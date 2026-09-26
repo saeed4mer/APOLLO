@@ -286,3 +286,309 @@ SELECT
         ELSE FALSE
     END AS coverage_gap_flag
 FROM windowed;
+
+-- ----------------------------------------------------------------------------
+-- 5. Analytical View 3: Sentry Presence History (Phase 7 Locked Contract)
+-- ----------------------------------------------------------------------------
+-- Purpose: Object presence, entry, exit, and persistence tracking across
+--          the authoritative platform snapshot sequence.
+-- Grain: (snapshot_key, sentry_id)
+-- Presence States:
+--   - 'NEW_ENTRY': Initial appearance in the platform archive.
+--   - 'PERSISTENT': Consecutively captured in the previous calendar day.
+--   - 'RE_ENTRY': Re-appearance after verified absence across fully captured days.
+--   - 'EXIT_AFTER_THIS_SNAPSHOT': Verified departure on immediate next contiguous day.
+--   - NULL: Observation resumes across an uncaptured platform date (coverage gap).
+CREATE OR REPLACE VIEW nasa_asteroids.v_sentry_presence_history AS
+WITH coverage_timeline AS (
+    SELECT
+        snapshot_key,
+        snapshot_seq,
+        LEAD(snapshot_key) OVER (ORDER BY snapshot_seq ASC) AS global_next_snapshot_key
+    FROM nasa_asteroids.v_sentry_snapshot_coverage
+),
+sentry_with_coverage AS (
+    SELECT
+        s.snapshot_key,
+        s.snapshot_time,
+        s.sentry_id,
+        s.designation,
+        s.fullname,
+        cov.snapshot_seq AS seq_curr,
+        cov.global_next_snapshot_key,
+        CASE
+            WHEN cov.global_next_snapshot_key IS NULL THEN NULL
+            ELSE DATE_DIFF('day', CAST(s.snapshot_key AS DATE), CAST(cov.global_next_snapshot_key AS DATE))
+        END AS global_next_days_diff
+    FROM nasa_asteroids.fact_sentry_risk_snapshot s
+    INNER JOIN coverage_timeline cov
+        ON cov.snapshot_key = s.snapshot_key
+),
+windowed AS (
+    SELECT
+        snapshot_key,
+        snapshot_time,
+        sentry_id,
+        designation,
+        fullname,
+        seq_curr,
+        global_next_snapshot_key,
+        global_next_days_diff,
+        LAG(seq_curr) OVER (
+            PARTITION BY sentry_id
+            ORDER BY snapshot_key ASC
+        ) AS seq_prev,
+        LAG(snapshot_key) OVER (
+            PARTITION BY sentry_id
+            ORDER BY snapshot_key ASC
+        ) AS prev_snapshot_key,
+        LEAD(seq_curr) OVER (
+            PARTITION BY sentry_id
+            ORDER BY snapshot_key ASC
+        ) AS seq_next,
+        LEAD(snapshot_key) OVER (
+            PARTITION BY sentry_id
+            ORDER BY snapshot_key ASC
+        ) AS next_snapshot_key
+    FROM sentry_with_coverage
+),
+classified AS (
+    SELECT
+        snapshot_key,
+        snapshot_time,
+        sentry_id,
+        designation,
+        fullname,
+        seq_curr,
+        seq_prev,
+        prev_snapshot_key,
+        seq_next,
+        next_snapshot_key,
+        global_next_snapshot_key,
+        global_next_days_diff,
+        CASE
+            WHEN prev_snapshot_key IS NULL THEN NULL
+            ELSE DATE_DIFF('day', CAST(prev_snapshot_key AS DATE), CAST(snapshot_key AS DATE))
+        END AS days_since_prev,
+        CASE
+            WHEN prev_snapshot_key IS NULL THEN FALSE
+            WHEN DATE_DIFF('day', CAST(prev_snapshot_key AS DATE), CAST(snapshot_key AS DATE)) = 1 THEN FALSE
+            WHEN (seq_curr - seq_prev) = DATE_DIFF('day', CAST(prev_snapshot_key AS DATE), CAST(snapshot_key AS DATE)) THEN FALSE
+            WHEN (seq_curr - seq_prev) < DATE_DIFF('day', CAST(prev_snapshot_key AS DATE), CAST(snapshot_key AS DATE)) THEN TRUE
+            ELSE FALSE
+        END AS coverage_gap_flag
+    FROM windowed
+),
+presence_computed AS (
+    SELECT
+        snapshot_key,
+        snapshot_time,
+        sentry_id,
+        designation,
+        fullname,
+        seq_curr,
+        seq_prev,
+        prev_snapshot_key,
+        seq_next,
+        next_snapshot_key,
+        global_next_snapshot_key,
+        global_next_days_diff,
+        days_since_prev,
+        coverage_gap_flag,
+        CASE
+            -- 1. Uncaptured-Date Gap: Observation resumes after missing platform coverage
+            WHEN prev_snapshot_key IS NOT NULL AND (seq_curr - seq_prev) < days_since_prev THEN NULL
+            -- 2. Validated Exit: Next global day was captured, contiguous, and object is absent
+            WHEN global_next_snapshot_key IS NOT NULL
+                 AND global_next_days_diff = 1
+                 AND (seq_next IS NULL OR seq_next > seq_curr + 1)
+                 THEN 'EXIT_AFTER_THIS_SNAPSHOT'
+            -- 3. Initial Appearance
+            WHEN prev_snapshot_key IS NULL THEN 'NEW_ENTRY'
+            -- 4. Consecutive Daily Persistence
+            WHEN (seq_curr - seq_prev) = 1 AND days_since_prev = 1 THEN 'PERSISTENT'
+            -- 5. Validated Re-Entry (Source absence across fully captured calendar days)
+            WHEN (seq_curr - seq_prev) = days_since_prev AND (seq_curr - seq_prev) > 1 THEN 'RE_ENTRY'
+            ELSE NULL
+        END AS presence_state
+    FROM classified
+)
+SELECT
+    snapshot_key,
+    snapshot_time,
+    sentry_id,
+    designation,
+    fullname,
+    seq_curr,
+    seq_prev,
+    prev_snapshot_key,
+    seq_next,
+    next_snapshot_key,
+    global_next_snapshot_key,
+    global_next_days_diff,
+    days_since_prev,
+    coverage_gap_flag,
+    presence_state,
+    CASE
+        WHEN presence_state = 'EXIT_AFTER_THIS_SNAPSHOT' THEN TRUE
+        ELSE FALSE
+    END AS is_exit_after_this_snapshot
+FROM presence_computed;
+
+-- ----------------------------------------------------------------------------
+-- 6. Analytical View 4: Sentry Object Lifecycle (Phase 7 Locked Contract)
+-- ----------------------------------------------------------------------------
+-- Purpose: Longitudinal object lifecycle, multi-snapshot metric progression,
+--          all-time maximum reported metrics, canonical crosswalk resolution,
+--          and tri-state operational activity tracking.
+-- Grain: (sentry_id)
+CREATE OR REPLACE VIEW nasa_asteroids.v_sentry_object_lifecycle AS
+WITH latest_global AS (
+    SELECT
+        snapshot_key AS latest_global_snapshot_key,
+        last_snapshot_time AS latest_global_snapshot_time
+    FROM nasa_asteroids.v_sentry_snapshot_coverage
+    ORDER BY snapshot_seq DESC
+    LIMIT 1
+),
+ranked_metrics AS (
+    SELECT
+        m.snapshot_key,
+        m.snapshot_time,
+        m.sentry_id,
+        m.designation,
+        m.fullname,
+        m.asteroid_key,
+        m.impact_probability,
+        m.palermo_scale_cum,
+        m.palermo_scale_max,
+        m.torino_scale_max,
+        m.potential_impacts_count,
+        m.v_infinity_km_s,
+        m.last_obs_date,
+        m.estimated_diameter_km,
+        m.absolute_magnitude,
+        ROW_NUMBER() OVER (
+            PARTITION BY m.sentry_id
+            ORDER BY m.snapshot_key ASC
+        ) AS rn_asc,
+        ROW_NUMBER() OVER (
+            PARTITION BY m.sentry_id
+            ORDER BY m.snapshot_key DESC
+        ) AS rn_desc,
+        ROW_NUMBER() OVER (
+            PARTITION BY m.sentry_id
+            ORDER BY CASE WHEN m.estimated_diameter_km IS NOT NULL THEN 0 ELSE 1 END, m.snapshot_key ASC
+        ) AS rn_diam_asc,
+        ROW_NUMBER() OVER (
+            PARTITION BY m.sentry_id
+            ORDER BY CASE WHEN m.estimated_diameter_km IS NOT NULL THEN 0 ELSE 1 END, m.snapshot_key DESC
+        ) AS rn_diam_desc,
+        ROW_NUMBER() OVER (
+            PARTITION BY m.sentry_id
+            ORDER BY CASE WHEN m.absolute_magnitude IS NOT NULL THEN 0 ELSE 1 END, m.snapshot_key ASC
+        ) AS rn_mag_asc,
+        ROW_NUMBER() OVER (
+            PARTITION BY m.sentry_id
+            ORDER BY CASE WHEN m.absolute_magnitude IS NOT NULL THEN 0 ELSE 1 END, m.snapshot_key DESC
+        ) AS rn_mag_desc
+    FROM nasa_asteroids.v_sentry_risk_metric_history m
+),
+aggregated AS (
+    SELECT
+        r.sentry_id,
+        MAX(CASE WHEN r.rn_desc = 1 THEN r.designation END) AS designation,
+        MAX(CASE WHEN r.rn_desc = 1 THEN r.fullname END) AS fullname,
+        -- Canonical Crosswalk Identity Semantics
+        CASE
+            WHEN COUNT(DISTINCT r.asteroid_key) = 1 THEN MAX(r.asteroid_key)
+            ELSE NULL
+        END AS asteroid_key,
+        CASE
+            WHEN COUNT(DISTINCT r.asteroid_key) > 1 THEN TRUE
+            ELSE FALSE
+        END AS is_crosswalk_ambiguous,
+        -- First & Last Snapshot Timeline
+        MAX(CASE WHEN r.rn_asc = 1 THEN r.snapshot_key END) AS first_snapshot_key,
+        MAX(CASE WHEN r.rn_asc = 1 THEN r.snapshot_time END) AS first_snapshot_time,
+        MAX(CASE WHEN r.rn_desc = 1 THEN r.snapshot_key END) AS last_snapshot_key,
+        MAX(CASE WHEN r.rn_desc = 1 THEN r.snapshot_time END) AS last_snapshot_time,
+        COUNT(DISTINCT r.snapshot_key) AS total_snapshots_observed,
+        DATE_DIFF(
+            'day',
+            CAST(MAX(CASE WHEN r.rn_asc = 1 THEN r.snapshot_key END) AS DATE),
+            CAST(MAX(CASE WHEN r.rn_desc = 1 THEN r.snapshot_key END) AS DATE)
+        ) + 1 AS archive_observation_span_days,
+        -- Mandatory Initial & Latest Risk Metrics
+        MAX(CASE WHEN r.rn_asc = 1 THEN r.impact_probability END) AS initial_impact_probability,
+        MAX(CASE WHEN r.rn_desc = 1 THEN r.impact_probability END) AS latest_impact_probability,
+        MAX(CASE WHEN r.rn_asc = 1 THEN r.palermo_scale_max END) AS initial_palermo_scale_max,
+        MAX(CASE WHEN r.rn_desc = 1 THEN r.palermo_scale_max END) AS latest_palermo_scale_max,
+        MAX(CASE WHEN r.rn_asc = 1 THEN r.palermo_scale_cum END) AS initial_palermo_scale_cum,
+        MAX(CASE WHEN r.rn_desc = 1 THEN r.palermo_scale_cum END) AS latest_palermo_scale_cum,
+        MAX(CASE WHEN r.rn_asc = 1 THEN r.torino_scale_max END) AS initial_torino_scale_max,
+        MAX(CASE WHEN r.rn_desc = 1 THEN r.torino_scale_max END) AS latest_torino_scale_max,
+        MAX(CASE WHEN r.rn_asc = 1 THEN r.potential_impacts_count END) AS initial_potential_impacts_count,
+        MAX(CASE WHEN r.rn_desc = 1 THEN r.potential_impacts_count END) AS latest_potential_impacts_count,
+        MAX(CASE WHEN r.rn_asc = 1 THEN r.v_infinity_km_s END) AS initial_v_infinity_km_s,
+        MAX(CASE WHEN r.rn_desc = 1 THEN r.v_infinity_km_s END) AS latest_v_infinity_km_s,
+        MAX(CASE WHEN r.rn_asc = 1 THEN r.last_obs_date END) AS initial_last_obs_date,
+        MAX(CASE WHEN r.rn_desc = 1 THEN r.last_obs_date END) AS latest_last_obs_date,
+        -- Optional Initial & Latest Physical Metrics (First/Last Non-Null)
+        MAX(CASE WHEN r.rn_diam_asc = 1 THEN r.estimated_diameter_km END) AS initial_estimated_diameter_km,
+        MAX(CASE WHEN r.rn_diam_desc = 1 THEN r.estimated_diameter_km END) AS latest_estimated_diameter_km,
+        MAX(CASE WHEN r.rn_mag_asc = 1 THEN r.absolute_magnitude END) AS initial_absolute_magnitude,
+        MAX(CASE WHEN r.rn_mag_desc = 1 THEN r.absolute_magnitude END) AS latest_absolute_magnitude,
+        -- All-Time Maximum Reported Metrics
+        MAX(r.impact_probability) AS all_time_max_impact_probability,
+        MAX(r.palermo_scale_max) AS all_time_max_palermo_scale_max,
+        MAX(r.palermo_scale_cum) AS all_time_max_palermo_scale_cum,
+        MAX(r.torino_scale_max) AS all_time_max_torino_scale_max,
+        MAX(r.potential_impacts_count) AS all_time_max_potential_impacts_count
+    FROM ranked_metrics r
+    GROUP BY r.sentry_id
+)
+SELECT
+    a.sentry_id,
+    a.designation,
+    a.fullname,
+    a.asteroid_key,
+    a.is_crosswalk_ambiguous,
+    a.first_snapshot_key,
+    a.first_snapshot_time,
+    a.last_snapshot_key,
+    a.last_snapshot_time,
+    a.total_snapshots_observed,
+    a.archive_observation_span_days,
+    -- Operational Freshness & Tri-State Activity
+    CASE
+        WHEN DATE_DIFF('hour', from_iso8601_timestamp(g.latest_global_snapshot_time), NOW()) > 48 THEN NULL
+        WHEN a.last_snapshot_key = g.latest_global_snapshot_key THEN TRUE
+        ELSE FALSE
+    END AS is_currently_active,
+    a.initial_impact_probability,
+    a.latest_impact_probability,
+    a.initial_palermo_scale_max,
+    a.latest_palermo_scale_max,
+    a.initial_palermo_scale_cum,
+    a.latest_palermo_scale_cum,
+    a.initial_torino_scale_max,
+    a.latest_torino_scale_max,
+    a.initial_potential_impacts_count,
+    a.latest_potential_impacts_count,
+    a.initial_v_infinity_km_s,
+    a.latest_v_infinity_km_s,
+    a.initial_last_obs_date,
+    a.latest_last_obs_date,
+    a.initial_estimated_diameter_km,
+    a.latest_estimated_diameter_km,
+    a.initial_absolute_magnitude,
+    a.latest_absolute_magnitude,
+    a.all_time_max_impact_probability,
+    a.all_time_max_palermo_scale_max,
+    a.all_time_max_palermo_scale_cum,
+    a.all_time_max_torino_scale_max,
+    a.all_time_max_potential_impacts_count
+FROM aggregated a
+CROSS JOIN latest_global g;
+

@@ -14,26 +14,25 @@ import pytest
 SQL_FILE_PATH = Path(__file__).parent / "athena_historical_risk.sql"
 
 
-@pytest.fixture
-def db_conn():
-    """Create a fresh in-memory DuckDB connection with schema and test views."""
+def build_db_connection(frozen_now: str = "2026-09-27T00:00:00Z"):
+    """Create an in-memory DuckDB connection with Athena DDL and deterministic clock."""
     conn = duckdb.connect(":memory:")
 
-    # Read and clean the Athena DDL script
     with open(SQL_FILE_PATH, encoding="utf-8") as f:
         sql_content = f.read()
 
-    # Create external tables as base in-memory tables for offline testing
     conn.execute("CREATE SCHEMA IF NOT EXISTS nasa_asteroids;")
+    # DuckDB compatibility shim for Athena/Trino from_iso8601_timestamp function
+    conn.execute(
+        "CREATE OR REPLACE MACRO from_iso8601_timestamp(x) AS "
+        "(CAST(x AS TIMESTAMPTZ) AT TIME ZONE 'UTC');"
+    )
 
-    # Strip single-line SQL comments before splitting by semicolon
     clean_lines = [re.sub(r"--.*$", "", line) for line in sql_content.splitlines()]
     clean_sql = "\n".join(clean_lines)
 
-    # Execute DDL statements from the file
     statements = [s.strip() for s in clean_sql.split(";") if s.strip()]
     for stmt in statements:
-        # Normalize Athena/Hive specific DDL clauses for in-memory SQL runner
         clean_stmt = re.sub(r"CREATE\s+DATABASE", "CREATE SCHEMA", stmt, flags=re.IGNORECASE)
         clean_stmt = re.sub(r"TBLPROPERTIES\s*\([^)]*\)", "", clean_stmt, flags=re.IGNORECASE)
         clean_stmt = re.sub(r"LOCATION\s*'[^']*'", "", clean_stmt, flags=re.IGNORECASE)
@@ -42,12 +41,19 @@ def db_conn():
             r"PARTITIONED\s+BY\s*\([^)]*\)", "", clean_stmt, flags=re.IGNORECASE
         )
         clean_stmt = re.sub(r"\bEXTERNAL\b", "", clean_stmt, flags=re.IGNORECASE)
+        clean_stmt = re.sub(r"\bNOW\(\)", f"CAST('{frozen_now}' AS TIMESTAMP)", clean_stmt, flags=re.IGNORECASE)
         clean_stmt = clean_stmt.strip()
 
         if clean_stmt:
             conn.execute(clean_stmt)
 
     return conn
+
+
+@pytest.fixture
+def db_conn():
+    """Create a fresh in-memory DuckDB connection with schema and test views."""
+    return build_db_connection()
 
 
 def test_athena_sql_syntax_and_schema_ddl(db_conn):
@@ -62,6 +68,8 @@ def test_athena_sql_syntax_and_schema_ddl(db_conn):
     assert "bridge_asteroid_identifier" in tables
     assert "v_sentry_snapshot_coverage" in tables
     assert "v_sentry_risk_metric_history" in tables
+    assert "v_sentry_presence_history" in tables
+    assert "v_sentry_object_lifecycle" in tables
 
 
 def test_snapshot_coverage_aggregation_and_sequence(db_conn):
@@ -364,3 +372,306 @@ def test_scientific_safety_no_palermo_percentage_or_composite_danger_scores():
     assert "danger_score" not in sql_text
     assert "threat_score" not in sql_text
     assert "composite_score" not in sql_text
+
+
+def test_presence_new_entry(db_conn):
+    """Scenario 1: First appearance of an object yields presence_state = 'NEW_ENTRY'."""
+    db_conn.execute("""
+        INSERT INTO nasa_asteroids.fact_sentry_risk_snapshot (
+            snapshot_key, run_id, snapshot_time, sentry_id, designation, fullname,
+            impact_probability, potential_impacts_count, palermo_scale_cum, palermo_scale_max,
+            torino_scale_max, v_infinity_km_s, last_obs_date
+        ) VALUES (
+            '2026-09-01', 'r1', '2026-09-01T00:00:00Z', 'obj_entry', '1979 XB', '(1979 XB)',
+            1e-6, 5, -2.5, -2.5, 0, 23.7, '1979-12-15'
+        );
+    """)
+
+    row = db_conn.execute("""
+        SELECT presence_state, is_exit_after_this_snapshot, coverage_gap_flag, seq_prev, prev_snapshot_key
+        FROM nasa_asteroids.v_sentry_presence_history
+        WHERE sentry_id = 'obj_entry'
+    """).fetchone()
+
+    assert row[0] == "NEW_ENTRY"
+    assert row[1] is False
+    assert row[2] is False
+    assert row[3] is None
+    assert row[4] is None
+
+
+def test_presence_consecutive_persistent(db_conn):
+    """Scenario 2: Object captured on consecutive calendar days yields presence_state = 'PERSISTENT'."""
+    db_conn.execute("""
+        INSERT INTO nasa_asteroids.fact_sentry_risk_snapshot (
+            snapshot_key, run_id, snapshot_time, sentry_id, designation, fullname,
+            impact_probability, potential_impacts_count, palermo_scale_cum, palermo_scale_max,
+            torino_scale_max, v_infinity_km_s, last_obs_date
+        ) VALUES
+        ('2026-09-01', 'r1', '2026-09-01T00:00:00Z', 'obj_pers', 'Ast Pers', '(Ast Pers)', 1e-6, 1, -3.0, -3.0, 0, 10.0, '2026-01-01'),
+        ('2026-09-02', 'r2', '2026-09-02T00:00:00Z', 'obj_pers', 'Ast Pers', '(Ast Pers)', 1e-6, 1, -3.0, -3.0, 0, 10.0, '2026-01-01');
+    """)
+
+    row = db_conn.execute("""
+        SELECT presence_state, is_exit_after_this_snapshot, coverage_gap_flag, days_since_prev
+        FROM nasa_asteroids.v_sentry_presence_history
+        WHERE sentry_id = 'obj_pers' AND snapshot_key = '2026-09-02'
+    """).fetchone()
+
+    assert row[0] == "PERSISTENT"
+    assert row[1] is False
+    assert row[2] is False
+    assert row[3] == 1
+
+
+def test_presence_valid_re_entry(db_conn):
+    """Scenario 3: Object reappearing after fully captured intervening absence yields 'RE_ENTRY'."""
+    db_conn.execute("""
+        INSERT INTO nasa_asteroids.fact_sentry_risk_snapshot (
+            snapshot_key, run_id, snapshot_time, sentry_id, designation, fullname,
+            impact_probability, potential_impacts_count, palermo_scale_cum, palermo_scale_max,
+            torino_scale_max, v_infinity_km_s, last_obs_date
+        ) VALUES
+        ('2026-09-01', 'r1', '2026-09-01T00:00:00Z', 'obj_re', 'Ast Re', '(Ast Re)', 1e-6, 1, -3.0, -3.0, 0, 10.0, '2026-01-01'),
+        ('2026-09-01', 'r1', '2026-09-01T00:00:00Z', 'obj_filler', 'Filler', '(Filler)', 2e-6, 1, -3.0, -3.0, 0, 10.0, '2026-01-01'),
+        ('2026-09-02', 'r2', '2026-09-02T00:00:00Z', 'obj_filler', 'Filler', '(Filler)', 2e-6, 1, -3.0, -3.0, 0, 10.0, '2026-01-01'),
+        ('2026-09-03', 'r3', '2026-09-03T00:00:00Z', 'obj_re', 'Ast Re', '(Ast Re)', 1e-6, 1, -3.0, -3.0, 0, 10.0, '2026-01-01');
+    """)
+
+    row = db_conn.execute("""
+        SELECT presence_state, is_exit_after_this_snapshot, coverage_gap_flag, days_since_prev, seq_curr - seq_prev
+        FROM nasa_asteroids.v_sentry_presence_history
+        WHERE sentry_id = 'obj_re' AND snapshot_key = '2026-09-03'
+    """).fetchone()
+
+    assert row[0] == "RE_ENTRY"
+    assert row[1] is False
+    assert row[2] is False
+    assert row[3] == 2
+    assert row[4] == 2
+
+
+def test_presence_validated_exit_after_this_snapshot(db_conn):
+    """Scenario 4: Object absent in next contiguous captured day yields 'EXIT_AFTER_THIS_SNAPSHOT'."""
+    db_conn.execute("""
+        INSERT INTO nasa_asteroids.fact_sentry_risk_snapshot (
+            snapshot_key, run_id, snapshot_time, sentry_id, designation, fullname,
+            impact_probability, potential_impacts_count, palermo_scale_cum, palermo_scale_max,
+            torino_scale_max, v_infinity_km_s, last_obs_date
+        ) VALUES
+        ('2026-09-01', 'r1', '2026-09-01T00:00:00Z', 'obj_exit', 'Exit Ast', '(Exit Ast)', 1e-6, 1, -3.0, -3.0, 0, 10.0, '2026-01-01'),
+        ('2026-09-01', 'r1', '2026-09-01T00:00:00Z', 'obj_f', 'Filler', '(Filler)', 2e-6, 1, -3.0, -3.0, 0, 10.0, '2026-01-01'),
+        ('2026-09-02', 'r2', '2026-09-02T00:00:00Z', 'obj_f', 'Filler', '(Filler)', 2e-6, 1, -3.0, -3.0, 0, 10.0, '2026-01-01');
+    """)
+
+    row = db_conn.execute("""
+        SELECT presence_state, is_exit_after_this_snapshot, global_next_days_diff
+        FROM nasa_asteroids.v_sentry_presence_history
+        WHERE sentry_id = 'obj_exit' AND snapshot_key = '2026-09-01'
+    """).fetchone()
+
+    assert row[0] == "EXIT_AFTER_THIS_SNAPSHOT"
+    assert row[1] is True
+    assert row[2] == 1
+
+
+def test_presence_uncaptured_date_no_exit_inferred(db_conn):
+    """Scenario 5: Object absence across uncaptured date does NOT infer EXIT_AFTER_THIS_SNAPSHOT."""
+    # Snapshot on Sep 1 and Sep 3. Sep 2 was UNCAPTURED (global_next_days_diff = 2)
+    db_conn.execute("""
+        INSERT INTO nasa_asteroids.fact_sentry_risk_snapshot (
+            snapshot_key, run_id, snapshot_time, sentry_id, designation, fullname,
+            impact_probability, potential_impacts_count, palermo_scale_cum, palermo_scale_max,
+            torino_scale_max, v_infinity_km_s, last_obs_date
+        ) VALUES
+        ('2026-09-01', 'r1', '2026-09-01T00:00:00Z', 'obj_gap_no_exit', 'Gap Ast', '(Gap Ast)', 1e-6, 1, -3.0, -3.0, 0, 10.0, '2026-01-01'),
+        ('2026-09-03', 'r3', '2026-09-03T00:00:00Z', 'obj_f', 'Filler', '(Filler)', 2e-6, 1, -3.0, -3.0, 0, 10.0, '2026-01-01');
+    """)
+
+    row = db_conn.execute("""
+        SELECT presence_state, is_exit_after_this_snapshot, global_next_days_diff
+        FROM nasa_asteroids.v_sentry_presence_history
+        WHERE sentry_id = 'obj_gap_no_exit' AND snapshot_key = '2026-09-01'
+    """).fetchone()
+
+    assert row[0] == "NEW_ENTRY"
+    assert row[1] is False
+    assert row[2] == 2
+
+
+def test_presence_resumed_after_gap_null_state(db_conn):
+    """Scenario 6: Resumed observation after uncaptured date yields presence_state = NULL and coverage_gap_flag = TRUE."""
+    db_conn.execute("""
+        INSERT INTO nasa_asteroids.fact_sentry_risk_snapshot (
+            snapshot_key, run_id, snapshot_time, sentry_id, designation, fullname,
+            impact_probability, potential_impacts_count, palermo_scale_cum, palermo_scale_max,
+            torino_scale_max, v_infinity_km_s, last_obs_date
+        ) VALUES
+        ('2026-09-01', 'r1', '2026-09-01T00:00:00Z', 'obj_resumed', 'Resumed', '(Resumed)', 1e-6, 1, -3.0, -3.0, 0, 10.0, '2026-01-01'),
+        ('2026-09-03', 'r3', '2026-09-03T00:00:00Z', 'obj_resumed', 'Resumed', '(Resumed)', 1e-6, 1, -3.0, -3.0, 0, 10.0, '2026-01-01');
+    """)
+
+    row = db_conn.execute("""
+        SELECT presence_state, is_exit_after_this_snapshot, coverage_gap_flag
+        FROM nasa_asteroids.v_sentry_presence_history
+        WHERE sentry_id = 'obj_resumed' AND snapshot_key = '2026-09-03'
+    """).fetchone()
+
+    assert row[0] is None
+    assert row[1] is False
+    assert row[2] is True
+
+
+def test_lifecycle_currently_active_deterministic_clock():
+    """Scenario 7: Proves tri-state active logic against frozen evaluation timestamp."""
+    frozen_now = "2026-09-27T00:00:00Z"
+
+    # Fresh catalog: latest snapshot time is 2026-09-26T23:00:00Z (1h diff <= 48h)
+    fresh_conn = build_db_connection(frozen_now=frozen_now)
+    fresh_conn.execute("""
+        INSERT INTO nasa_asteroids.fact_sentry_risk_snapshot (
+            snapshot_key, run_id, snapshot_time, sentry_id, designation, fullname,
+            impact_probability, potential_impacts_count, palermo_scale_cum, palermo_scale_max,
+            torino_scale_max, v_infinity_km_s, last_obs_date
+        ) VALUES
+        ('2026-09-25', 'r1', '2026-09-25T23:00:00Z', 'obj_absent', 'Absent', '(Absent)', 1e-6, 1, -3.0, -3.0, 0, 10.0, '2026-01-01'),
+        ('2026-09-26', 'r2', '2026-09-26T23:00:00Z', 'obj_present', 'Present', '(Present)', 1e-6, 1, -3.0, -3.0, 0, 10.0, '2026-01-01');
+    """)
+
+    row_present = fresh_conn.execute("""
+        SELECT is_currently_active FROM nasa_asteroids.v_sentry_object_lifecycle WHERE sentry_id = 'obj_present'
+    """).fetchone()
+    row_absent = fresh_conn.execute("""
+        SELECT is_currently_active FROM nasa_asteroids.v_sentry_object_lifecycle WHERE sentry_id = 'obj_absent'
+    """).fetchone()
+
+    assert row_present[0] is True
+    assert row_absent[0] is False
+
+    # Stale catalog: latest snapshot time is 2026-09-24T23:00:00Z (49h diff > 48h)
+    stale_conn = build_db_connection(frozen_now=frozen_now)
+    stale_conn.execute("""
+        INSERT INTO nasa_asteroids.fact_sentry_risk_snapshot (
+            snapshot_key, run_id, snapshot_time, sentry_id, designation, fullname,
+            impact_probability, potential_impacts_count, palermo_scale_cum, palermo_scale_max,
+            torino_scale_max, v_infinity_km_s, last_obs_date
+        ) VALUES
+        ('2026-09-24', 'r1', '2026-09-24T23:00:00Z', 'obj_stale', 'Stale', '(Stale)', 1e-6, 1, -3.0, -3.0, 0, 10.0, '2026-01-01');
+    """)
+
+    row_stale = stale_conn.execute("""
+        SELECT is_currently_active FROM nasa_asteroids.v_sentry_object_lifecycle WHERE sentry_id = 'obj_stale'
+    """).fetchone()
+
+    assert row_stale[0] is None
+
+
+def test_lifecycle_optional_first_last_non_null_physical_metrics(db_conn):
+    """Scenario 8: Preserves first and last non-null physical parameters across sparse observations."""
+    db_conn.execute("""
+        INSERT INTO nasa_asteroids.fact_sentry_risk_snapshot (
+            snapshot_key, run_id, snapshot_time, sentry_id, designation, fullname,
+            impact_probability, potential_impacts_count, palermo_scale_cum, palermo_scale_max,
+            torino_scale_max, v_infinity_km_s, last_obs_date, estimated_diameter_km, absolute_magnitude
+        ) VALUES
+        ('2026-09-01', 'r1', '2026-09-01T00:00:00Z', 'obj_opt', 'Opt', '(Opt)', 1e-6, 1, -3.0, -3.0, 0, 10.0, '2026-01-01', NULL, 20.1),
+        ('2026-09-02', 'r2', '2026-09-02T00:00:00Z', 'obj_opt', 'Opt', '(Opt)', 1e-6, 1, -3.0, -3.0, 0, 10.0, '2026-01-01', 0.45, NULL),
+        ('2026-09-03', 'r3', '2026-09-03T00:00:00Z', 'obj_opt', 'Opt', '(Opt)', 1e-6, 1, -3.0, -3.0, 0, 10.0, '2026-01-01', NULL, 20.5),
+        ('2026-09-01', 'r1', '2026-09-01T00:00:00Z', 'obj_all_null', 'Null', '(Null)', 1e-6, 1, -3.0, -3.0, 0, 10.0, '2026-01-01', NULL, NULL);
+    """)
+
+    row_opt = db_conn.execute("""
+        SELECT initial_estimated_diameter_km, latest_estimated_diameter_km, initial_absolute_magnitude, latest_absolute_magnitude
+        FROM nasa_asteroids.v_sentry_object_lifecycle
+        WHERE sentry_id = 'obj_opt'
+    """).fetchone()
+
+    assert row_opt[0] == 0.45
+    assert row_opt[1] == 0.45
+    assert row_opt[2] == 20.1
+    assert row_opt[3] == 20.5
+
+    row_null = db_conn.execute("""
+        SELECT initial_estimated_diameter_km, latest_estimated_diameter_km, initial_absolute_magnitude, latest_absolute_magnitude
+        FROM nasa_asteroids.v_sentry_object_lifecycle
+        WHERE sentry_id = 'obj_all_null'
+    """).fetchone()
+
+    assert row_null[0] is None
+    assert row_null[1] is None
+    assert row_null[2] is None
+    assert row_null[3] is None
+
+
+def test_lifecycle_crosswalk_ambiguity_enforcement(db_conn):
+    """Scenario 9: Enforces canonical key uniqueness and surfaces ambiguity without silent selection."""
+    # Seed bridge table
+    db_conn.execute("""
+        INSERT INTO nasa_asteroids.bridge_asteroid_identifier VALUES
+        ('ast_canonical_single', 'sentry', 'sentry_id', 'single_key_obj', FALSE, '2026-09-01T00:00:00Z', '2026-09-01T00:00:00Z'),
+        ('ast_competing_1', 'sentry', 'sentry_id', 'multi_key_obj', FALSE, '2026-09-01T00:00:00Z', '2026-09-01T00:00:00Z'),
+        ('ast_competing_2', 'sentry', 'sentry_id', 'multi_key_obj', FALSE, '2026-09-01T00:00:00Z', '2026-09-01T00:00:00Z');
+    """)
+
+    # Seed fact snapshots
+    db_conn.execute("""
+        INSERT INTO nasa_asteroids.fact_sentry_risk_snapshot (
+            snapshot_key, run_id, snapshot_time, sentry_id, designation, fullname,
+            impact_probability, potential_impacts_count, palermo_scale_cum, palermo_scale_max,
+            torino_scale_max, v_infinity_km_s, last_obs_date
+        ) VALUES
+        ('2026-09-01', 'r1', '2026-09-01T00:00:00Z', 'single_key_obj', 'Single', '(Single)', 1e-6, 1, -3.0, -3.0, 0, 10.0, '2026-01-01'),
+        ('2026-09-01', 'r1', '2026-09-01T00:00:00Z', 'multi_key_obj', 'Multi', '(Multi)', 1e-6, 1, -3.0, -3.0, 0, 10.0, '2026-01-01'),
+        ('2026-09-01', 'r1', '2026-09-01T00:00:00Z', 'unres_obj', 'Unres', '(Unres)', 1e-6, 1, -3.0, -3.0, 0, 10.0, '2026-01-01');
+    """)
+
+    # 1. Single valid canonical key
+    row_single = db_conn.execute("""
+        SELECT asteroid_key, is_crosswalk_ambiguous FROM nasa_asteroids.v_sentry_object_lifecycle WHERE sentry_id = 'single_key_obj'
+    """).fetchone()
+    assert row_single[0] == "ast_canonical_single"
+    assert row_single[1] is False
+
+    # 2. Competing canonical keys -> NULL + is_crosswalk_ambiguous = TRUE
+    row_multi = db_conn.execute("""
+        SELECT asteroid_key, is_crosswalk_ambiguous FROM nasa_asteroids.v_sentry_object_lifecycle WHERE sentry_id = 'multi_key_obj'
+    """).fetchone()
+    assert row_multi[0] is None
+    assert row_multi[1] is True
+
+    # 3. Unresolved object -> NULL + is_crosswalk_ambiguous = FALSE
+    row_unres = db_conn.execute("""
+        SELECT asteroid_key, is_crosswalk_ambiguous FROM nasa_asteroids.v_sentry_object_lifecycle WHERE sentry_id = 'unres_obj'
+    """).fetchone()
+    assert row_unres[0] is None
+    assert row_unres[1] is False
+
+
+def test_lifecycle_and_presence_duplicate_grain_protection(db_conn):
+    """Scenario 10: Asserts primary grains of lifecycle (sentry_id) and presence (snapshot_key, sentry_id)."""
+    db_conn.execute("""
+        INSERT INTO nasa_asteroids.fact_sentry_risk_snapshot (
+            snapshot_key, run_id, snapshot_time, sentry_id, designation, fullname,
+            impact_probability, potential_impacts_count, palermo_scale_cum, palermo_scale_max,
+            torino_scale_max, v_infinity_km_s, last_obs_date
+        ) VALUES
+        ('2026-09-01', 'r1', '2026-09-01T00:00:00Z', 'ast_A', 'A', '(A)', 1e-6, 1, -3.0, -3.0, 0, 10.0, '2026-01-01'),
+        ('2026-09-02', 'r2', '2026-09-02T00:00:00Z', 'ast_A', 'A', '(A)', 1e-6, 1, -3.0, -3.0, 0, 10.0, '2026-01-01'),
+        ('2026-09-01', 'r1', '2026-09-01T00:00:00Z', 'ast_B', 'B', '(B)', 2e-6, 1, -4.0, -4.0, 0, 15.0, '2026-01-01'),
+        ('2026-09-02', 'r2', '2026-09-02T00:00:00Z', 'ast_B', 'B', '(B)', 2e-6, 1, -4.0, -4.0, 0, 15.0, '2026-01-01');
+    """)
+
+    # Lifecycle grain check: total rows == distinct sentry_ids
+    total_life, distinct_life = db_conn.execute("""
+        SELECT COUNT(*), COUNT(DISTINCT sentry_id) FROM nasa_asteroids.v_sentry_object_lifecycle
+    """).fetchone()
+    assert total_life == 2
+    assert total_life == distinct_life
+
+    # Presence grain check: total rows == distinct (snapshot_key, sentry_id)
+    total_pres, distinct_pres = db_conn.execute("""
+        SELECT COUNT(*), COUNT(DISTINCT snapshot_key || ':' || sentry_id) FROM nasa_asteroids.v_sentry_presence_history
+    """).fetchone()
+    assert total_pres == 4
+    assert total_pres == distinct_pres
+
