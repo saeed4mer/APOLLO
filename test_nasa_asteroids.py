@@ -577,6 +577,7 @@ def test_cli_exits_code_1_when_fetch_data_raises_http_error(tmp_path):
     target_script = os.path.join(repo_dir, "nasa_asteroids.py")
     env = os.environ.copy()
     env["PYTHONPATH"] = repo_dir
+    env["NASA_API_KEY"] = "TEST_KEY"
 
     script = (
         "from unittest.mock import patch\n"
@@ -601,6 +602,7 @@ def test_cli_exits_code_1_and_logs_response_body_on_http_error(tmp_path):
     target_script = os.path.join(repo_dir, "nasa_asteroids.py")
     env = os.environ.copy()
     env["PYTHONPATH"] = repo_dir
+    env["NASA_API_KEY"] = "TEST_KEY"
 
     script = (
         "from unittest.mock import MagicMock, patch\n"
@@ -632,6 +634,7 @@ def test_cli_exits_code_1_when_fetch_data_raises_request_exception(tmp_path):
     target_script = os.path.join(repo_dir, "nasa_asteroids.py")
     env = os.environ.copy()
     env["PYTHONPATH"] = repo_dir
+    env["NASA_API_KEY"] = "TEST_KEY"
 
     script = (
         "from unittest.mock import patch\n"
@@ -660,6 +663,7 @@ def test_cli_exits_code_1_when_unexpected_pipeline_exception_occurs(tmp_path):
     env = os.environ.copy()
     env["PYTHONPATH"] = repo_dir
     env["DB_PATH"] = str(tmp_path / "subprocess.db")
+    env["NASA_API_KEY"] = "TEST_KEY"
 
     script = (
         "from unittest.mock import patch\n"
@@ -776,6 +780,7 @@ def test_main_exits_code_1_on_s3_failure(tmp_path):
     target_script = os.path.join(repo_dir, "nasa_asteroids.py")
     env = os.environ.copy()
     env["PYTHONPATH"] = repo_dir
+    env["NASA_API_KEY"] = "TEST_KEY"
 
     script = (
         "from unittest.mock import patch, MagicMock\n"
@@ -1416,6 +1421,7 @@ def test_top_level_error_logging_includes_run_id(tmp_path):
     env = os.environ.copy()
     env["PYTHONPATH"] = repo_dir
     env["DB_PATH"] = str(tmp_path / "subprocess.db")
+    env["NASA_API_KEY"] = "TEST_KEY"
 
     script = (
         "from unittest.mock import patch\n"
