@@ -209,6 +209,12 @@ def save_raw_json(data, filename):
         json.dump(data, file, indent=4)
 
 
+def save_sbdb_summary(summary_data, filename="sbdb_batch_summary.json"):
+    """Save authoritative SBDB batch summary as deterministic JSON."""
+    with open(filename, "w", encoding="utf-8") as f:
+        json.dump(summary_data, f, indent=4)
+
+
 # ---------------------------------------------------------------------------
 # Data Extraction & Normalization
 # ---------------------------------------------------------------------------
@@ -669,9 +675,73 @@ def upload_processed_to_s3(table_name, local_file_path, snapshot_date, metadata=
 
 
 # ---------------------------------------------------------------------------
-# CLI Argument Parsing
+# Target Resolution & CLI Argument Parsing
 # ---------------------------------------------------------------------------
-def parse_args():
+def resolve_targets(
+    target: str | None = None,
+    targets: str | list[str] | None = None,
+    targets_file: str | None = None,
+    default_target: str = DEFAULT_TARGET,
+) -> list[str]:
+    """Resolve target list according to strict precedence rules.
+
+    Precedence:
+    1. targets_file, when supplied
+    2. targets, when supplied
+    3. target, when supplied and non-empty
+    4. default_target
+    """
+    raw_targets: list[str] = []
+
+    if targets_file:
+        if not os.path.exists(targets_file):
+            raise FileNotFoundError(f"SBDB targets file not found: {targets_file}")
+        with open(targets_file, "r", encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if line and not line.startswith("#"):
+                    raw_targets.append(line)
+        if not raw_targets:
+            raise ValueError(f"SBDB targets file is empty: {targets_file}")
+
+    elif targets:
+        if isinstance(targets, str):
+            parts = [t.strip() for t in targets.split(",")]
+            raw_targets = [p for p in parts if p]
+        elif isinstance(targets, (list, tuple, set)):
+            raw_targets = [str(t).strip() for t in targets if str(t).strip()]
+        if not raw_targets:
+            raise ValueError("No valid targets provided in --targets")
+
+    elif target:
+        t = str(target).strip()
+        if t:
+            raw_targets = [t]
+        else:
+            raw_targets = [default_target]
+
+    else:
+        raw_targets = [default_target]
+
+    # Deduplicate while preserving deterministic alphanumeric order
+    normalized: list[str] = []
+    seen: set[str] = set()
+    for t in raw_targets:
+        clean = " ".join(t.split())
+        if clean.startswith("(") and clean.endswith(")"):
+            clean = clean[1:-1].strip()
+        if clean and clean not in seen:
+            seen.add(clean)
+            normalized.append(clean)
+
+    if not normalized:
+        raise ValueError("Target resolution produced zero valid targets.")
+
+    normalized.sort()
+    return normalized
+
+
+def parse_args(args=None):
     """Parse CLI arguments for SBDB pipeline."""
     parser = argparse.ArgumentParser(
         description="NASA Planetary Defense Risk Intelligence Platform — SBDB Ingestion Pipeline"
@@ -679,8 +749,20 @@ def parse_args():
     parser.add_argument(
         "--target",
         type=str,
-        default=DEFAULT_TARGET,
-        help=f"Target identifier to query (default: '{DEFAULT_TARGET}')",
+        default=None,
+        help=f"Target identifier to query (default: '{DEFAULT_TARGET}' if no targets specified)",
+    )
+    parser.add_argument(
+        "--targets",
+        type=str,
+        default=None,
+        help="Comma-separated list of target identifiers to query (e.g. '2010 TW54,2025 HX,2008 ST')",
+    )
+    parser.add_argument(
+        "--targets-file",
+        type=str,
+        default=None,
+        help="Path to text file containing target identifiers, one per line",
     )
     parser.add_argument(
         "--id-type",
@@ -695,20 +777,32 @@ def parse_args():
         default=None,
         help="Snapshot date for SBDB catalog (YYYY-MM-DD). Default: today (UTC)",
     )
-    return parser.parse_args()
+    parser.add_argument(
+        "--summary-file",
+        type=str,
+        default="sbdb_batch_summary.json",
+        help="Path for authoritative SBDB batch summary JSON (default: 'sbdb_batch_summary.json')",
+    )
+    return parser.parse_args(args)
 
 
 # ---------------------------------------------------------------------------
 # Main Orchestration Workflow
 # ---------------------------------------------------------------------------
-def main(target=None, id_type=None, snapshot_date_str=None):
+def main(
+    target: str | None = None,
+    id_type: str | None = None,
+    snapshot_date_str: str | None = None,
+    targets: str | list[str] | None = None,
+    targets_file: str | None = None,
+    summary_filename: str = "sbdb_batch_summary.json",
+) -> int:
     """Execute the end-to-end SBDB ingestion workflow."""
     start_time = time.perf_counter()
     run_id = uuid.uuid4().hex[:12]
     main.current_run_id = run_id
     snapshot_time = datetime.now(timezone.utc).isoformat()
 
-    resolved_target = (target or DEFAULT_TARGET).strip()
     resolved_id_type = (id_type or DEFAULT_ID_TYPE).strip()
 
     if snapshot_date_str:
@@ -730,65 +824,142 @@ def main(target=None, id_type=None, snapshot_date_str=None):
         ingested_at=snapshot_time,
     )
 
+    try:
+        resolved_targets = resolve_targets(
+            target=target,
+            targets=targets,
+            targets_file=targets_file,
+            default_target=DEFAULT_TARGET,
+        )
+    except Exception as error:
+        logger.error("Failed to resolve SBDB targets: %s", error)
+        return 1
+
     logger.info(
-        "[%s] Starting SBDB ingestion for target '%s' (%s) | snapshot_date=%s",
+        "[%s] Starting SBDB ingestion for %d target(s) (%s) | snapshot_date=%s",
         run_id,
-        resolved_target,
+        len(resolved_targets),
         resolved_id_type,
         snapshot_key,
     )
 
-    # 1. Fetch raw SBDB payload
+    all_obj_records: list[dict] = []
+    all_orbit_records: list[dict] = []
+    all_element_records: list[dict] = []
+    all_phys_records: list[dict] = []
+    saved_raw_files: list[tuple[str, str]] = []  # (filename, spkid)
+    successful_targets: list[str] = []
+    failed_targets: list[str] = []
+
+    for idx, target_item in enumerate(resolved_targets):
+        if idx > 0:
+            time.sleep(0.2)  # ~200 ms pacing between requests
+
+        try:
+            raw_payload = fetch_sbdb_data(
+                target=target_item,
+                id_type=resolved_id_type,
+                run_id=run_id,
+            )
+            obj_record = extract_sbdb_object(raw_payload, snapshot_key, run_id, snapshot_time)
+            spkid = obj_record["spkid"]
+            orbit_id = obj_record["orbit_id"]
+
+            orbit_record = extract_sbdb_orbit(raw_payload, snapshot_key, run_id, snapshot_time, spkid)
+            epoch_jd = orbit_record["epoch_jd"]
+            equinox = orbit_record["equinox"]
+
+            element_records = extract_sbdb_orbit_elements(
+                raw_payload, snapshot_key, run_id, snapshot_time, spkid, orbit_id, epoch_jd, equinox
+            )
+
+            phys_records = extract_sbdb_physical_parameters(
+                raw_payload, snapshot_key, run_id, snapshot_time, spkid
+            )
+
+            if not obj_record or not orbit_record:
+                logger.error("[%s] Mandatory object/orbit records missing for target '%s'", run_id, target_item)
+                failed_targets.append(target_item)
+                continue
+
+            raw_filename = f"sbdb_raw_{spkid}.json"
+            save_raw_json(raw_payload, filename=raw_filename)
+            saved_raw_files.append((raw_filename, spkid))
+
+            all_obj_records.append(obj_record)
+            all_orbit_records.append(orbit_record)
+            all_element_records.extend(element_records)
+            all_phys_records.extend(phys_records)
+            successful_targets.append(target_item)
+
+        except Exception as error:
+            logger.error(
+                "[%s] SBDB data fetch/extraction failed for target '%s': %s",
+                run_id,
+                target_item,
+                redact_api_key(str(error)),
+            )
+            failed_targets.append(target_item)
+            continue
+
+    # Circuit breaker & Data Quality Gate: objects_extracted > 0 AND failure_pct < 25.0%
+    total_targets = len(resolved_targets)
+    successful_targets_count = len(successful_targets)
+    failed_targets_count = len(failed_targets)
+    failure_pct = (failed_targets_count / total_targets * 100.0) if total_targets > 0 else 100.0
+    circuit_breaker_passed = (successful_targets_count > 0) and (failure_pct < 25.0)
+
+    summary_data = {
+        "run_id": run_id,
+        "snapshot_key": snapshot_key,
+        "snapshot_time": snapshot_time,
+        "total_targets": total_targets,
+        "successful_targets_count": successful_targets_count,
+        "failed_targets_count": failed_targets_count,
+        "successful_targets": successful_targets,
+        "failed_targets": failed_targets,
+        "failure_rate_pct": round(failure_pct, 2),
+        "circuit_breaker_threshold_pct": 25.0,
+        "circuit_breaker_passed": circuit_breaker_passed,
+        "output_tables": [
+            "fact_sbdb_object_snapshot.parquet",
+            "fact_sbdb_orbit.parquet",
+            "fact_sbdb_orbit_element.parquet",
+            "fact_sbdb_physical_parameter.parquet",
+        ],
+    }
+
     try:
-        raw_payload = fetch_sbdb_data(
-            target=resolved_target,
-            id_type=resolved_id_type,
-            run_id=run_id,
-        )
-    except Exception as error:
+        save_sbdb_summary(summary_data, filename=summary_filename)
+        logger.info("[%s] Saved SBDB batch summary to %s", run_id, summary_filename)
+    except Exception as e:
         logger.error(
-            "[%s] SBDB data fetch failed for target '%s': %s",
+            "[%s] Failed to write SBDB authoritative batch summary to %s: %s. "
+            "Halting pipeline to prevent unmonitored production output.",
             run_id,
-            resolved_target,
-            redact_api_key(str(error)),
+            summary_filename,
+            redact_api_key(str(e)),
         )
         return 1
 
-    # 2. Extract and validate all 4 normalized datasets
-    try:
-        obj_record = extract_sbdb_object(raw_payload, snapshot_key, run_id, snapshot_time)
-        spkid = obj_record["spkid"]
-        orbit_id = obj_record["orbit_id"]
-
-        orbit_record = extract_sbdb_orbit(raw_payload, snapshot_key, run_id, snapshot_time, spkid)
-        epoch_jd = orbit_record["epoch_jd"]
-        equinox = orbit_record["equinox"]
-
-        element_records = extract_sbdb_orbit_elements(
-            raw_payload, snapshot_key, run_id, snapshot_time, spkid, orbit_id, epoch_jd, equinox
-        )
-
-        phys_records = extract_sbdb_physical_parameters(
-            raw_payload, snapshot_key, run_id, snapshot_time, spkid
-        )
-    except Exception as error:
-        logger.error(
-            "[%s] Data extraction/validation failed for object '%s': %s",
-            run_id,
-            resolved_target,
-            error,
-        )
+    if not circuit_breaker_passed:
+        if successful_targets_count == 0:
+            logger.error(
+                "[%s] Circuit breaker triggered: 0 valid object or orbit records extracted across %d target(s).",
+                run_id,
+                total_targets,
+            )
+        else:
+            logger.error(
+                "[%s] Circuit breaker triggered: SBDB failure rate %.1f%% exceeded 25.0%% threshold "
+                "(%d failed, %d succeeded out of %d total targets). Halting before processed outputs.",
+                run_id,
+                failure_pct,
+                failed_targets_count,
+                successful_targets_count,
+                total_targets,
+            )
         return 1
-
-    # Circuit breaker: ensure mandatory object and orbit datasets are non-empty
-    if not obj_record or not orbit_record:
-        logger.error("[%s] Circuit breaker triggered: mandatory object or orbit records missing.", run_id)
-        return 1
-
-    # 3. Save raw JSON locally
-    raw_filename = f"sbdb_raw_{spkid}.json"
-    save_raw_json(raw_payload, filename=raw_filename)
-    logger.info("[%s] Saved raw SBDB payload to %s", run_id, raw_filename)
 
     # 4. Write 4 normalized Parquet tables locally
     obj_parquet = "fact_sbdb_object_snapshot.parquet"
@@ -796,26 +967,29 @@ def main(target=None, id_type=None, snapshot_date_str=None):
     elem_parquet = "fact_sbdb_orbit_element.parquet"
     phys_parquet = "fact_sbdb_physical_parameter.parquet"
 
-    write_parquet([obj_record], SBDB_OBJECT_SCHEMA, obj_parquet)
-    write_parquet([orbit_record], SBDB_ORBIT_SCHEMA, orbit_parquet)
-    write_parquet(element_records, SBDB_ORBIT_ELEMENT_SCHEMA, elem_parquet)
-    write_parquet(phys_records, SBDB_PHYS_PAR_SCHEMA, phys_parquet)
+    write_parquet(all_obj_records, SBDB_OBJECT_SCHEMA, obj_parquet)
+    write_parquet(all_orbit_records, SBDB_ORBIT_SCHEMA, orbit_parquet)
+    write_parquet(all_element_records, SBDB_ORBIT_ELEMENT_SCHEMA, elem_parquet)
+    write_parquet(all_phys_records, SBDB_PHYS_PAR_SCHEMA, phys_parquet)
 
     logger.info(
-        "[%s] Generated Parquets: object=1 row, orbit=1 row, elements=%d rows, phys_par=%d rows",
+        "[%s] Generated consolidated Parquets: objects=%d rows, orbits=%d rows, elements=%d rows, phys_par=%d rows",
         run_id,
-        len(element_records),
-        len(phys_records),
+        len(all_obj_records),
+        len(all_orbit_records),
+        len(all_element_records),
+        len(all_phys_records),
     )
 
     # 5. Upload raw payload and 4 Parquet tables to S3
     try:
-        upload_raw_to_s3(
-            local_file_path=raw_filename,
-            snapshot_date=resolved_snapshot_date,
-            spkid=spkid,
-            metadata=lineage_metadata,
-        )
+        for raw_file, spk in saved_raw_files:
+            upload_raw_to_s3(
+                local_file_path=raw_file,
+                snapshot_date=resolved_snapshot_date,
+                spkid=spk,
+                metadata=lineage_metadata,
+            )
 
         upload_processed_to_s3(
             table_name="fact_sbdb_object_snapshot",
@@ -853,13 +1027,22 @@ def main(target=None, id_type=None, snapshot_date_str=None):
         return 1
 
     elapsed = time.perf_counter() - start_time
-    logger.info(
-        "[%s] SBDB ingestion completed successfully for object %s (%s) in %.2fs",
-        run_id,
-        resolved_target,
-        spkid,
-        elapsed,
-    )
+    if len(resolved_targets) == 1:
+        logger.info(
+            "[%s] SBDB ingestion completed successfully for object %s (%s) in %.2fs",
+            run_id,
+            resolved_targets[0],
+            all_obj_records[0]["spkid"],
+            elapsed,
+        )
+    else:
+        logger.info(
+            "[%s] SBDB batch ingestion completed successfully for %d/%d target(s) in %.2fs",
+            run_id,
+            len(successful_targets),
+            len(resolved_targets),
+            elapsed,
+        )
     return 0
 
 
@@ -869,5 +1052,8 @@ if __name__ == "__main__":
         target=args.target,
         id_type=args.id_type,
         snapshot_date_str=args.snapshot_date,
+        targets=args.targets,
+        targets_file=args.targets_file,
+        summary_filename=args.summary_file,
     )
     sys.exit(exit_code)

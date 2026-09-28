@@ -335,6 +335,164 @@ def test_exact_designation_match_formatting_tolerance():
     assert sentry_des_audit["assigned_asteroid_key"] == generate_asteroid_key("54527277")
 
 
+def test_neows_exact_designation_match_when_id_differs_from_spkid():
+    """Verify NeoWs ID 3548666 with name (2010 TW54) resolves to SBDB 50548689 via exact designation."""
+    neows_tw54 = {
+        "id": "3548666",
+        "name": "(2010 TW54)",
+        "closest_approach_date": "2026-09-30",
+        "miss_distance_km": 17457205.0,
+        "hazardous": False,
+    }
+    sbdb_tw54 = {
+        "spkid": "50548689",
+        "designation": "2010 TW54",
+        "fullname": "(2010 TW54)",
+        "orbit_id": "14",
+        "is_neo": True,
+    }
+
+    bridge, audit, metrics = resolve_entities(
+        neows_records=[neows_tw54],
+        sbdb_records=[sbdb_tw54],
+        sentry_records=[],
+        run_id="run_neows_tw54",
+    )
+
+    expected_key = "ast_b8259bf1-e6e5-5059-853e-9434274cdf2c"
+    assert generate_asteroid_key("50548689") == expected_key
+
+    # Audit assertions
+    neows_audits = [a for a in audit if a["source_system"] == "neows" and a["identifier_name"] == "id"]
+    assert len(neows_audits) == 1
+    a = neows_audits[0]
+    assert a["match_state"] == STATE_RESOLVED
+    assert a["match_rule"] == RULE_EXACT_DESIGNATION
+    assert a["assigned_asteroid_key"] == expected_key
+    assert a["matched_target_system"] == "sbdb"
+    assert a["matched_target_identifier_name"] == "des"
+    assert a["matched_target_identifier_value"] == "2010 TW54"
+
+    # Bridge assertions
+    neows_bridge = [b for b in bridge if b["source_system"] == "neows"]
+    assert len(neows_bridge) == 1
+    b = neows_bridge[0]
+    assert b["asteroid_key"] == expected_key
+    assert b["identifier_name"] == "id"
+    assert b["identifier_value"] == "3548666"
+    assert b["is_primary_pivot"] is False
+
+    # Name is not emitted as identifier row
+    assert not any(row["identifier_name"] == "name" for row in bridge)
+
+
+def test_neows_exact_designation_match_2008_st():
+    """Verify NeoWs ID 3427460 with name (2008 ST) resolves to SBDB 50427483."""
+    neows_st = {
+        "id": "3427460",
+        "name": "(2008 ST)",
+        "closest_approach_date": "2026-09-27",
+        "miss_distance_km": 12000000.0,
+        "hazardous": False,
+    }
+    sbdb_st = {
+        "spkid": "50427483",
+        "designation": "2008 ST",
+        "fullname": "(2008 ST)",
+        "orbit_id": "14",
+        "is_neo": True,
+    }
+
+    bridge, audit, metrics = resolve_entities(
+        neows_records=[neows_st],
+        sbdb_records=[sbdb_st],
+        sentry_records=[],
+        run_id="run_neows_st",
+    )
+
+    expected_key = "ast_8520aaac-9c77-5e8f-9a88-b4e501749e26"
+    assert generate_asteroid_key("50427483") == expected_key
+
+    # Audit assertions
+    neows_audits = [a for a in audit if a["source_system"] == "neows" and a["identifier_name"] == "id"]
+    assert len(neows_audits) == 1
+    assert neows_audits[0]["match_state"] == STATE_RESOLVED
+    assert neows_audits[0]["match_rule"] == RULE_EXACT_DESIGNATION
+    assert neows_audits[0]["assigned_asteroid_key"] == expected_key
+
+    # Bridge assertions
+    neows_bridge = [b for b in bridge if b["source_system"] == "neows"]
+    assert len(neows_bridge) == 1
+    assert neows_bridge[0]["asteroid_key"] == expected_key
+    assert neows_bridge[0]["identifier_name"] == "id"
+    assert neows_bridge[0]["identifier_value"] == "3427460"
+
+
+def test_neows_designation_ambiguity_quarantined():
+    """Verify NeoWs name matching multiple distinct SBDB entities is quarantined as AMBIGUOUS."""
+    sbdb_dup1 = {
+        "spkid": "9000001",
+        "designation": "2026 AMB1",
+        "fullname": "(2026 AMB1)",
+    }
+    sbdb_dup2 = {
+        "spkid": "9000002",
+        "designation": "2026 AMB1",
+        "fullname": "2026 AMB1 Duplicate",
+    }
+    neows_amb = {
+        "id": "7777777",
+        "name": "(2026 AMB1)",
+        "closest_approach_date": "2026-10-01",
+    }
+
+    bridge, audit, metrics = resolve_entities(
+        neows_records=[neows_amb],
+        sbdb_records=[sbdb_dup1, sbdb_dup2],
+        sentry_records=[],
+        run_id="run_neows_amb",
+    )
+
+    neows_audits = [a for a in audit if a["source_system"] == "neows" and a["identifier_name"] == "id"]
+    assert len(neows_audits) == 1
+    assert neows_audits[0]["match_state"] == STATE_AMBIGUOUS
+    assert neows_audits[0]["match_rule"] == RULE_COLLISION_QUARANTINE
+    assert neows_audits[0]["assigned_asteroid_key"] is None
+
+    # Zero bridge rows emitted for NeoWs
+    assert not any(b["source_system"] == "neows" for b in bridge)
+
+
+def test_neows_unresolved_when_designation_not_in_sbdb():
+    """Verify NeoWs object with unknown designation returns UNRESOLVED with null key."""
+    neows_unres = {
+        "id": "8888888",
+        "name": "(2099 ZZ99)",
+        "closest_approach_date": "2026-12-31",
+    }
+    sbdb_known = {
+        "spkid": "50548689",
+        "designation": "2010 TW54",
+        "fullname": "(2010 TW54)",
+    }
+
+    bridge, audit, metrics = resolve_entities(
+        neows_records=[neows_unres],
+        sbdb_records=[sbdb_known],
+        sentry_records=[],
+        run_id="run_neows_unres",
+    )
+
+    neows_audits = [a for a in audit if a["source_system"] == "neows" and a["identifier_name"] == "id"]
+    assert len(neows_audits) == 1
+    assert neows_audits[0]["match_state"] == STATE_UNRESOLVED
+    assert neows_audits[0]["match_rule"] == RULE_NO_MATCH
+    assert neows_audits[0]["assigned_asteroid_key"] is None
+
+    # Zero bridge rows emitted for NeoWs
+    assert not any(b["source_system"] == "neows" for b in bridge)
+
+
 # ===========================================================================
 # 5. No Heuristic / Fuzzy Matching Tests
 # ===========================================================================

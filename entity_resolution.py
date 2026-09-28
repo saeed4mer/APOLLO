@@ -163,8 +163,9 @@ def resolve_entities(
 
     Resolves NeoWs and Sentry records to canonical SBDB asteroid entities using:
     1. Primary match rule: NeoWs.id == SBDB.spkid (EXACT_SPKID_MATCH)
-    2. Secondary match rule: Sentry.des == SBDB.des (EXACT_DESIGNATION_MATCH)
-    3. Global DQ invariant: (source_system, identifier_name, identifier_value) -> at most one asteroid_key
+    2. Secondary match rule: NeoWs.name == SBDB.des (EXACT_DESIGNATION_MATCH)
+    3. Secondary match rule: Sentry.des == SBDB.des (EXACT_DESIGNATION_MATCH)
+    4. Global DQ invariant: (source_system, identifier_name, identifier_value) -> at most one asteroid_key
 
     Returns:
         (bridge_records, fact_resolution_records, metrics_dict)
@@ -425,25 +426,105 @@ def resolve_entities(
                 })
 
         else:
-            # Unresolved in SBDB
-            neows_unres_evidence = {"reason": "NeoWs ID not found in SBDB catalog"}
-            if clean_name:
-                neows_unres_evidence["name"] = clean_name
+            # Clean ID is not in SBDB SPK-ID index: attempt secondary exact designation match
+            norm_name = normalize_designation(clean_name) if clean_name else None
+            candidates = sbdb_by_norm_des.get(norm_name, []) if norm_name else []
 
-            audit_records.append({
-                "resolution_run_id": run_id,
-                "resolved_at": resolved_at,
-                "source_system": "neows",
-                "identifier_name": "id",
-                "source_identifier_value": clean_id,
-                "matched_target_system": None,
-                "matched_target_identifier_name": None,
-                "matched_target_identifier_value": None,
-                "assigned_asteroid_key": None,
-                "match_state": STATE_UNRESOLVED,
-                "match_rule": RULE_NO_MATCH,
-                "evidence_json": json.dumps(neows_unres_evidence, sort_keys=True),
-            })
+            if len(candidates) == 1:
+                # Case A: Exactly one SBDB entity matches normalized designation
+                matched_entity = candidates[0]
+                target_key = matched_entity["asteroid_key"]
+                target_spkid = matched_entity["spkid"]
+                target_sbdb_des = matched_entity["designation"]
+
+                neows_des_evidence = {
+                    "matched_sbdb_des": target_sbdb_des,
+                    "matched_spkid": target_spkid,
+                    "name": clean_name,
+                    "normalized_designation": norm_name,
+                    "resolution_rule": RULE_EXACT_DESIGNATION,
+                }
+
+                audit_records.append({
+                    "resolution_run_id": run_id,
+                    "resolved_at": resolved_at,
+                    "source_system": "neows",
+                    "identifier_name": "id",
+                    "source_identifier_value": clean_id,
+                    "matched_target_system": "sbdb",
+                    "matched_target_identifier_name": "des",
+                    "matched_target_identifier_value": target_sbdb_des,
+                    "assigned_asteroid_key": target_key,
+                    "match_state": STATE_RESOLVED,
+                    "match_rule": RULE_EXACT_DESIGNATION,
+                    "evidence_json": json.dumps(neows_des_evidence, sort_keys=True),
+                })
+                candidate_bridge_rows.append({
+                    "asteroid_key": target_key,
+                    "source_system": "neows",
+                    "identifier_name": "id",
+                    "identifier_value": clean_id,
+                    "is_primary_pivot": False,
+                    "created_at": resolved_at,
+                    "updated_at": resolved_at,
+                })
+
+            elif len(candidates) > 1:
+                # Case B: Multiple SBDB entities match normalized designation: AMBIGUOUS collision quarantine
+                cand_spkids = [c["spkid"] for c in candidates]
+                cand_keys = [c["asteroid_key"] for c in candidates]
+                logger.warning(
+                    "[%s] NeoWs designation '%s' (%s) matches multiple SBDB entities: SPK-IDs=%s",
+                    run_id,
+                    clean_name,
+                    norm_name,
+                    cand_spkids,
+                )
+                amb_neows_ev = {
+                    "conflicting_keys": cand_keys,
+                    "conflicting_spkids": cand_spkids,
+                    "error": "NeoWs designation matches multiple SBDB entities",
+                    "name": clean_name,
+                    "normalized_designation": norm_name,
+                }
+
+                audit_records.append({
+                    "resolution_run_id": run_id,
+                    "resolved_at": resolved_at,
+                    "source_system": "neows",
+                    "identifier_name": "id",
+                    "source_identifier_value": clean_id,
+                    "matched_target_system": "sbdb",
+                    "matched_target_identifier_name": "des",
+                    "matched_target_identifier_value": norm_name,
+                    "assigned_asteroid_key": None,
+                    "match_state": STATE_AMBIGUOUS,
+                    "match_rule": RULE_COLLISION_QUARANTINE,
+                    "evidence_json": json.dumps(amb_neows_ev, sort_keys=True),
+                })
+
+            else:
+                # Case C: Unresolved in SBDB (neither SPK-ID nor designation matched)
+                neows_unres_evidence = {"reason": "NeoWs ID and designation not found in SBDB catalog"}
+                if clean_name:
+                    neows_unres_evidence["name"] = clean_name
+                if norm_name:
+                    neows_unres_evidence["normalized_designation"] = norm_name
+
+                audit_records.append({
+                    "resolution_run_id": run_id,
+                    "resolved_at": resolved_at,
+                    "source_system": "neows",
+                    "identifier_name": "id",
+                    "source_identifier_value": clean_id,
+                    "matched_target_system": None,
+                    "matched_target_identifier_name": None,
+                    "matched_target_identifier_value": None,
+                    "assigned_asteroid_key": None,
+                    "match_state": STATE_UNRESOLVED,
+                    "match_rule": RULE_NO_MATCH,
+                    "evidence_json": json.dumps(neows_unres_evidence, sort_keys=True),
+                })
 
     # -----------------------------------------------------------------------
     # Step 3: Resolve Sentry Entities via Secondary Bridge (Sentry.des == SBDB.des)

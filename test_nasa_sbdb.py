@@ -824,3 +824,370 @@ def test_idempotent_same_snapshot_key_behavior():
 
         assert key_run1 == key_run2
         assert key_run1 == "raw/sbdb/object/year=2026/month=09/day=26/spkid=54527277/raw.json"
+
+
+# ---------------------------------------------------------------------------
+# 6. Step 3A: Native Batch Support & Target Resolution Tests
+# ---------------------------------------------------------------------------
+def test_single_target_argument_parsing():
+    """Verify existing single-target CLI argument parsing remains fully functional."""
+    args = nasa_sbdb.parse_args(["--target", "2010 TW54"])
+    assert args.target == "2010 TW54"
+    assert args.targets is None
+    assert args.targets_file is None
+    assert args.id_type == "sstr"
+
+    # Default invocation without flags
+    args_default = nasa_sbdb.parse_args([])
+    assert args_default.target is None
+    assert args_default.targets is None
+    assert args_default.targets_file is None
+
+
+def test_targets_comma_separated_parsing():
+    """Verify --targets parsing extracts list of targets."""
+    args = nasa_sbdb.parse_args(["--targets", "2010 TW54,2025 HX,2008 ST"])
+    assert args.targets == "2010 TW54,2025 HX,2008 ST"
+    assert args.target is None
+    assert args.targets_file is None
+
+
+def test_targets_file_parsing(tmp_path):
+    """Verify --targets-file parsing accepts file path."""
+    target_file = tmp_path / "targets.txt"
+    target_file.write_text("2010 TW54\n2025 HX\n", encoding="utf-8")
+
+    args = nasa_sbdb.parse_args(["--targets-file", str(target_file)])
+    assert args.targets_file == str(target_file)
+    assert args.target is None
+    assert args.targets is None
+
+
+def test_target_resolution_precedence(tmp_path):
+    """Verify target resolution precedence: file > targets > target > default."""
+    target_file = tmp_path / "precedence_targets.txt"
+    target_file.write_text("FileTarget1\nFileTarget2\n", encoding="utf-8")
+
+    # 1. targets_file wins over targets and target
+    res1 = nasa_sbdb.resolve_targets(
+        target="SingleTarget",
+        targets="ListTarget1,ListTarget2",
+        targets_file=str(target_file),
+    )
+    assert res1 == ["FileTarget1", "FileTarget2"]
+
+    # 2. targets wins over target
+    res2 = nasa_sbdb.resolve_targets(
+        target="SingleTarget",
+        targets="ListTarget2,ListTarget1",
+    )
+    assert res2 == ["ListTarget1", "ListTarget2"]
+
+    # 3. target wins over default
+    res3 = nasa_sbdb.resolve_targets(
+        target="SingleTarget",
+    )
+    assert res3 == ["SingleTarget"]
+
+    # 4. default target when all are None
+    res4 = nasa_sbdb.resolve_targets()
+    assert res4 == [nasa_sbdb.DEFAULT_TARGET]
+
+
+def test_target_deduplication_and_normalization():
+    """Verify deduplication, whitespace normalization, and deterministic alphanumeric sorting."""
+    raw_input = "  2025 HX , (2010 TW54) , 2008 ST , 2025 HX ,   (2008 ST)   "
+    res = nasa_sbdb.resolve_targets(targets=raw_input)
+
+    assert res == ["2008 ST", "2010 TW54", "2025 HX"]
+
+
+def test_target_resolution_errors(tmp_path):
+    """Verify invalid target inputs raise proper exceptions or return code 1."""
+    # Non-existent file
+    with pytest.raises(FileNotFoundError):
+        nasa_sbdb.resolve_targets(targets_file="nonexistent_targets_file.txt")
+
+    # Empty file
+    empty_file = tmp_path / "empty_targets.txt"
+    empty_file.write_text("# only comments\n   \n", encoding="utf-8")
+    with pytest.raises(ValueError):
+        nasa_sbdb.resolve_targets(targets_file=str(empty_file))
+
+    # Empty comma string
+    with pytest.raises(ValueError):
+        nasa_sbdb.resolve_targets(targets="  ,  ,  ")
+
+    # Main returns 1 on target resolution failure
+    assert nasa_sbdb.main(targets_file="nonexistent_targets_file.txt") == 1
+
+
+def test_batch_execution_multi_target_aggregation():
+    """Verify multi-target batch ingestion consolidates records into single Parquet files."""
+    def mock_fetch(target, id_type="sstr", run_id=None):
+        if target == "2025 HX":
+            return SAMPLE_SBDB_2025_HX_PAYLOAD
+        elif target == "433":
+            return SAMPLE_SBDB_EROS_PAYLOAD
+        raise ValueError(f"Unexpected target {target}")
+
+    with patch("nasa_sbdb.fetch_sbdb_data", side_effect=mock_fetch), \
+         patch("nasa_sbdb.save_raw_json") as mock_raw, \
+         patch("nasa_sbdb.write_parquet") as mock_pq, \
+         patch("nasa_sbdb.upload_raw_to_s3") as mock_up_raw, \
+         patch("nasa_sbdb.upload_processed_to_s3") as mock_up_proc, \
+         patch("time.sleep") as mock_sleep:
+
+        exit_code = nasa_sbdb.main(targets="2025 HX, 433")
+
+        assert exit_code == 0
+        mock_sleep.assert_called_once_with(0.2)
+
+        # 2 raw JSON saves and uploads (one per object)
+        assert mock_raw.call_count == 2
+        assert mock_up_raw.call_count == 2
+
+        # 4 consolidated Parquets written locally
+        assert mock_pq.call_count == 4
+
+        # Inspect the calls to write_parquet
+        # Call 1: fact_sbdb_object_snapshot.parquet should have 2 records
+        obj_call_records = mock_pq.call_args_list[0][0][0]
+        assert len(obj_call_records) == 2
+        spkids = {r["spkid"] for r in obj_call_records}
+        assert spkids == {"54527277", "2000433"}
+
+        # Call 2: fact_sbdb_orbit.parquet should have 2 records
+        orbit_call_records = mock_pq.call_args_list[1][0][0]
+        assert len(orbit_call_records) == 2
+
+        # Call 3: fact_sbdb_orbit_element.parquet should have elements from both objects
+        elem_call_records = mock_pq.call_args_list[2][0][0]
+        assert len(elem_call_records) > 10
+        elem_spkids = {r["spkid"] for r in elem_call_records}
+        assert elem_spkids == {"54527277", "2000433"}
+
+        # Call 4: fact_sbdb_physical_parameter.parquet should have physical records
+        phys_call_records = mock_pq.call_args_list[3][0][0]
+        assert len(phys_call_records) >= 1
+
+        # 4 consolidated processed Parquets uploaded to S3
+        assert mock_up_proc.call_count == 4
+        uploaded_tables = [c[1]["table_name"] for c in mock_up_proc.call_args_list]
+        assert uploaded_tables == [
+            "fact_sbdb_object_snapshot",
+            "fact_sbdb_orbit",
+            "fact_sbdb_orbit_element",
+            "fact_sbdb_physical_parameter",
+        ]
+
+
+def make_mock_payload(spkid, des):
+    """Helper to generate mock SBDB payload with custom spkid and designation."""
+    payload = json.loads(json.dumps(SAMPLE_SBDB_2025_HX_PAYLOAD))
+    payload["object"]["spkid"] = str(spkid)
+    payload["object"]["des"] = str(des)
+    payload["object"]["fullname"] = f"({des})"
+    return payload
+
+
+def test_batch_failure_gate_zero_success_fails():
+    """Verify 0/N success halts pipeline with exit code 1 and no processed outputs."""
+    with patch("nasa_sbdb.fetch_sbdb_data", side_effect=requests.exceptions.HTTPError("500 Server Error")), \
+         patch("nasa_sbdb.save_raw_json") as mock_raw, \
+         patch("nasa_sbdb.write_parquet") as mock_pq, \
+         patch("nasa_sbdb.upload_raw_to_s3") as mock_up_raw, \
+         patch("nasa_sbdb.upload_processed_to_s3") as mock_up_proc, \
+         patch("time.sleep"):
+
+        exit_code = nasa_sbdb.main(targets="OBJ1, OBJ2, OBJ3")
+
+        assert exit_code == 1
+        mock_raw.assert_not_called()
+        mock_pq.assert_not_called()
+        mock_up_raw.assert_not_called()
+        mock_up_proc.assert_not_called()
+
+
+def test_batch_failure_gate_exactly_25_percent_fails():
+    """Verify exactly 25.0% failure (1 of 4 failed) triggers circuit breaker and exits 1."""
+    def mock_fetch(target, id_type="sstr", run_id=None):
+        if target in ("T1", "T2", "T3"):
+            return make_mock_payload(spkid=f"100{target}", des=target)
+        elif target == "T4":
+            raise requests.exceptions.HTTPError("404 Not Found")
+        raise ValueError(f"Unexpected target {target}")
+
+    with patch("nasa_sbdb.fetch_sbdb_data", side_effect=mock_fetch), \
+         patch("nasa_sbdb.save_raw_json") as mock_raw, \
+         patch("nasa_sbdb.write_parquet") as mock_pq, \
+         patch("nasa_sbdb.upload_raw_to_s3") as mock_up_raw, \
+         patch("nasa_sbdb.upload_processed_to_s3") as mock_up_proc, \
+         patch("time.sleep"):
+
+        exit_code = nasa_sbdb.main(targets="T1, T2, T3, T4")
+
+        # 1/4 = 25.0% failure -> fails
+        assert exit_code == 1
+        # Raw payloads for the 3 succeeded targets were captured locally
+        assert mock_raw.call_count == 3
+        # Consolidated processed outputs MUST NOT be written or uploaded to S3
+        mock_pq.assert_not_called()
+        mock_up_raw.assert_not_called()
+        mock_up_proc.assert_not_called()
+
+
+def test_batch_failure_gate_just_below_25_percent_succeeds():
+    """Verify failure rate just below 25% (1 of 5 failed = 20.0%) succeeds and publishes outputs."""
+    def mock_fetch(target, id_type="sstr", run_id=None):
+        if target in ("T1", "T2", "T3", "T4"):
+            return make_mock_payload(spkid=f"100{target}", des=target)
+        elif target == "T5":
+            raise requests.exceptions.HTTPError("404 Not Found")
+        raise ValueError(f"Unexpected target {target}")
+
+    with patch("nasa_sbdb.fetch_sbdb_data", side_effect=mock_fetch), \
+         patch("nasa_sbdb.save_raw_json") as mock_raw, \
+         patch("nasa_sbdb.write_parquet") as mock_pq, \
+         patch("nasa_sbdb.upload_raw_to_s3") as mock_up_raw, \
+         patch("nasa_sbdb.upload_processed_to_s3") as mock_up_proc, \
+         patch("time.sleep"):
+
+        exit_code = nasa_sbdb.main(targets="T1, T2, T3, T4, T5")
+
+        # 1/5 = 20.0% failure -> succeeds!
+        assert exit_code == 0
+        assert mock_raw.call_count == 4
+        assert mock_up_raw.call_count == 4
+        assert mock_pq.call_count == 4
+        assert mock_up_proc.call_count == 4
+
+        # Consolidated object table has 4 records
+        obj_records = mock_pq.call_args_list[0][0][0]
+        assert len(obj_records) == 4
+
+
+def test_batch_failure_gate_above_25_percent_fails():
+    """Verify failure rate above 25% (2 of 4 failed = 50.0%) halts pipeline and exits 1."""
+    def mock_fetch(target, id_type="sstr", run_id=None):
+        if target in ("T1", "T2"):
+            return make_mock_payload(spkid=f"100{target}", des=target)
+        elif target in ("T3", "T4"):
+            raise requests.exceptions.HTTPError("500 Server Error")
+        raise ValueError(f"Unexpected target {target}")
+
+    with patch("nasa_sbdb.fetch_sbdb_data", side_effect=mock_fetch), \
+         patch("nasa_sbdb.save_raw_json") as mock_raw, \
+         patch("nasa_sbdb.write_parquet") as mock_pq, \
+         patch("nasa_sbdb.upload_raw_to_s3") as mock_up_raw, \
+         patch("nasa_sbdb.upload_processed_to_s3") as mock_up_proc, \
+         patch("time.sleep"):
+
+        exit_code = nasa_sbdb.main(targets="T1, T2, T3, T4")
+
+        # 2/4 = 50.0% failure -> fails
+        assert exit_code == 1
+        assert mock_raw.call_count == 2
+        mock_pq.assert_not_called()
+        mock_up_raw.assert_not_called()
+        mock_up_proc.assert_not_called()
+
+
+def test_sbdb_batch_summary_emission_success(tmp_path):
+    summary_file = tmp_path / "custom_sbdb_summary.json"
+    with patch("nasa_sbdb.fetch_sbdb_data", return_value=SAMPLE_SBDB_2025_HX_PAYLOAD), \
+         patch("nasa_sbdb.save_raw_json"), \
+         patch("nasa_sbdb.write_parquet"), \
+         patch("nasa_sbdb.upload_raw_to_s3"), \
+         patch("nasa_sbdb.upload_processed_to_s3"):
+
+        exit_code = nasa_sbdb.main(
+            target="2025 HX",
+            snapshot_date_str="2026-09-28",
+            summary_filename=str(summary_file)
+        )
+        assert exit_code == 0
+        assert summary_file.exists()
+
+        with open(summary_file, "r", encoding="utf-8") as f:
+            summary = json.load(f)
+
+        assert summary["total_targets"] == 1
+        assert summary["successful_targets_count"] == 1
+        assert summary["failed_targets_count"] == 0
+        assert summary["failure_rate_pct"] == 0.0
+        assert summary["circuit_breaker_passed"] is True
+        assert summary["successful_targets"] == ["2025 HX"]
+        assert summary["snapshot_key"] == "2026-09-28"
+        assert len(summary["output_tables"]) == 4
+
+
+def test_sbdb_batch_summary_emission_failure(tmp_path):
+    summary_file = tmp_path / "failed_sbdb_summary.json"
+    def mock_fetch(target, id_type="sstr", run_id=None):
+        if target == "T1":
+            return make_mock_payload(spkid="1001", des="T1")
+        raise requests.exceptions.HTTPError("500 Server Error")
+
+    with patch("nasa_sbdb.fetch_sbdb_data", side_effect=mock_fetch), \
+         patch("nasa_sbdb.save_raw_json"), \
+         patch("nasa_sbdb.write_parquet") as mock_pq, \
+         patch("nasa_sbdb.upload_raw_to_s3") as mock_up_raw, \
+         patch("nasa_sbdb.upload_processed_to_s3") as mock_up_proc, \
+         patch("time.sleep"):
+
+        # 1 success (T1), 1 failure (T2) -> 50% failure rate >= 25% threshold
+        exit_code = nasa_sbdb.main(
+            targets="T1, T2",
+            snapshot_date_str="2026-09-28",
+            summary_filename=str(summary_file)
+        )
+        assert exit_code == 1
+        assert summary_file.exists()
+
+        with open(summary_file, "r", encoding="utf-8") as f:
+            summary = json.load(f)
+
+        assert summary["total_targets"] == 2
+        assert summary["successful_targets_count"] == 1
+        assert summary["failed_targets_count"] == 1
+        assert summary["failure_rate_pct"] == 50.0
+        assert summary["circuit_breaker_passed"] is False
+        assert summary["successful_targets"] == ["T1"]
+        assert summary["failed_targets"] == ["T2"]
+
+        # Ensure Parquet and S3 uploads were suppressed
+        mock_pq.assert_not_called()
+        mock_up_raw.assert_not_called()
+        mock_up_proc.assert_not_called()
+
+
+def test_sbdb_batch_summary_write_failure_halts_pipeline(tmp_path, caplog):
+    summary_file = tmp_path / "summary_write_fail.json"
+
+    with patch("nasa_sbdb.fetch_sbdb_data", return_value=SAMPLE_SBDB_2025_HX_PAYLOAD), \
+         patch("nasa_sbdb.save_raw_json") as mock_raw, \
+         patch("nasa_sbdb.save_sbdb_summary", side_effect=IOError("Disk write error")), \
+         patch("nasa_sbdb.write_parquet") as mock_pq, \
+         patch("nasa_sbdb.upload_raw_to_s3") as mock_up_raw, \
+         patch("nasa_sbdb.upload_processed_to_s3") as mock_up_proc, \
+         patch("time.sleep"):
+
+        with caplog.at_level(logging.ERROR):
+            exit_code = nasa_sbdb.main(
+                target="2025 HX",
+                snapshot_date_str="2026-09-28",
+                summary_filename=str(summary_file)
+            )
+
+        assert exit_code == 1
+        # Raw payload was saved locally before summary write
+        assert mock_raw.called
+        # Production Parquets and S3 uploads must be suppressed
+        mock_pq.assert_not_called()
+        mock_up_raw.assert_not_called()
+        mock_up_proc.assert_not_called()
+
+        # Must log ERROR, not WARNING
+        assert any("Failed to write SBDB authoritative batch summary" in record.message and record.levelname == "ERROR"
+                   for record in caplog.records)

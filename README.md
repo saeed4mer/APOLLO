@@ -1,507 +1,613 @@
-# NASA Asteroid Intelligence Platform
+# NASA Planetary Defense Risk Intelligence Platform
 
-A data engineering project that ingests Near-Earth Object (NEO) data from NASA's NeoWs API, validates and transforms it with Python, stores it locally and in Amazon S3, prepares analytics-ready Parquet data for Amazon Athena, and presents asteroid intelligence through an interactive Streamlit dashboard.
+An end-to-end planetary defense data engineering platform that ingests, validates, characterizes, resolves, and tracks Near-Earth Objects (NEOs) across multiple distinct NASA/JPL astronomical data sources. The platform unifies operational close approaches, long-term impact monitoring, and Keplerian orbital characterizations into an analytics-ready Amazon S3 lakehouse, Amazon Athena serverless SQL intelligence views, and an interactive Streamlit intelligence dossier.
 
-![Tests](https://img.shields.io/badge/tests-56%20passed-brightgreen)
-![Python](https://img.shields.io/badge/python-3.x-blue)
+![Tests](https://img.shields.io/badge/tests-286%20passed-brightgreen)
+![Python](https://img.shields.io/badge/python-3.11-blue)
 ![CI](https://img.shields.io/badge/CI-GitHub%20Actions-informational)
+![Code Style](https://img.shields.io/badge/code%20style-ruff-000000.svg)
 
 ---
 
 ## Table of Contents
 
-- [Project Overview](#project-overview)
-- [Architecture](#architecture)
-- [Pipeline Workflow](#pipeline-workflow)
-- [Data Quality](#data-quality)
-- [SQL Analytics](#sql-analytics)
-- [Testing](#testing)
+- [Platform Purpose](#platform-purpose)
+- [Source Architecture](#source-architecture)
+- [End-to-End Architecture](#end-to-end-architecture)
+- [Core Architectural Principles](#core-architectural-principles)
+- [Analytical Intelligence Layer](#analytical-intelligence-layer)
+- [Interactive Streamlit Dossier](#interactive-streamlit-dossier)
+- [Production Orchestration](#production-orchestration)
+- [Historical Backfill Semantics](#historical-backfill-semantics)
+- [Data Quality & Reliability Gates](#data-quality--reliability-gates)
 - [Continuous Integration](#continuous-integration)
-- [Production Scheduling](#production-scheduling)
-- [Project Structure](#project-structure)
+- [Security & Secrets Management](#security--secrets-management)
+- [Repository Structure](#repository-structure)
 - [Tech Stack](#tech-stack)
-- [Running the Project](#running-the-project)
-- [Current Status](#current-status)
-- [Future Engineering Improvements](#future-engineering-improvements)
-- [Project Goal](#project-goal)
+- [Running the Platform Locally](#running-the-platform-locally)
+- [Project Status & Roadmap](#project-status--roadmap)
 
 ---
 
-## Project Overview
+## Platform Purpose
 
-NASA's Near-Earth Object Web Service (NeoWs) provides valuable information about asteroid approaches, including:
+Planetary defense against asteroid impacts relies on disparate observational programs and catalogs maintained across NASA and the Jet Propulsion Laboratory (JPL). Each source serves a distinct operational purpose with its own identifier taxonomy, cadence, and data structures:
 
-- Asteroid identity
-- Closest approach dates
-- Miss distances
-- Potentially hazardous classifications
+1. **Short-Term Operations:** Tactical approach feeds tracking imminent close approaches to Earth.
+2. **Impact Risk Monitoring:** Computational impact solution catalogs tracking collision probabilities across future encounter epochs.
+3. **Physical & Astrometric Characterization:** Astrometric catalogs tracking Keplerian orbital elements and physical properties (albedo, diameter, absolute magnitude).
 
-The raw API response is deeply nested and not immediately suitable for analytics.
-
-This project builds an **end-to-end data engineering pipeline** that transforms that raw API data into structured, validated, analytics-ready datasets and exposes the resulting information through SQL analytics and an interactive intelligence dashboard.
+The **NASA Planetary Defense Risk Intelligence Platform** solves this fragmentation by building an automated, reliable data lakehouse and deterministic entity resolution engine. The platform cross-references heterogeneous designations, enforces scientific data integrity, and delivers actionable multi-source risk intelligence without synthetic danger scores or causal overreach.
 
 ---
 
-## Architecture
+## Source Architecture
 
-### Local Development Pipeline
-
-```
-NASA NeoWs API
-      ↓
-Python Ingestion
-      ↓
-Validation & Transformation
-      ↓
-CSV + SQLite
-      ↓
-SQL Analytics
-```
-
-### Cloud Analytics Pipeline
+The platform ingests from three primary NASA/JPL planetary defense sources:
 
 ```
-NASA NeoWs API
-      ↓
-Python ETL Pipeline
-      ↓
-Amazon S3
-   ┌──────┴──────┐
-   ↓             ↓
-Raw JSON   Processed Parquet
-                  ↓
-            Amazon Athena
-                  ↓
-            SQL Analytics
-                  ↓
-       Intelligence Dashboard
+┌──────────────────────────────────────────────────────────────────────────────────┐
+│                             NASA / JPL DATA SOURCES                              │
+├──────────────────────────┬────────────────────────────┬──────────────────────────┤
+│        NASA NeoWs        │    JPL CNEOS Sentry Mode S │     NASA / JPL SBDB      │
+│   (Near-Earth Objects)   │   (Impact Risk Monitoring) │  (Small-Body Database)   │
+├──────────────────────────┼────────────────────────────┼──────────────────────────┤
+│ • Ingestion:             │ • Ingestion:               │ • Ingestion:             │
+│   nasa_asteroids.py      │   nasa_sentry.py           │   nasa_sbdb.py           │
+│ • Domain:                │ • Domain:                  │ • Domain:                │
+│   Operational encounters │   Potential Earth impacts  │   Keplerian orbit &      │
+│ • Primary Metrics:       │ • Primary Metrics:         │   physical parameters    │
+│   - Miss distance (km/LD)│   - Cumulative/max impact  │ • Primary Metrics:       │
+│   - Relative velocity    │     probability            │   - Semi-major axis (a)  │
+│   - Estimated diameter   │   - Palermo Technical Scale│   - Eccentricity (e)     │
+│   - Potentially Hazardous│   - Torino Hazard Scale    │   - Inclination (i)      │
+│     Asteroid (PHA) flag  │   - Potential impact paths │   - Absolute magnitude H │
+│   - Close-approach date  │   - Velocity at infinity   │   - Astrometric tier     │
+│ • Ingestion Grain:       │ • Ingestion Grain:         │ • Ingestion Grain:       │
+│   (approach_date, neows_id) (snapshot_key, sentry_id) │   (snapshot_key, spkid)  │
+└──────────────────────────┴────────────────────────────┴──────────────────────────┘
 ```
-
-The project uses **S3** as the cloud storage layer and **Athena** as the serverless analytical query layer.
 
 ---
 
-## Pipeline Workflow
+## End-to-End Architecture
 
-### 1. Configuration
+```
+                       NASA / JPL REST APIs
+           (NASA NeoWs  •  CNEOS Sentry  •  JPL SBDB)
+                               │
+                               ▼
+               Ingestion & Raw Forensic Archival
+       (Preserved JSON payloads & Authoritative Summaries)
+                               │
+                               ▼
+            Centralized Ingestion Quality Gate (DQ-1)
+          (pipeline_dq.py check-ingestion: Lineage & Gates)
+                               │
+                               ▼
+               Processed Lakehouse Layer (Parquet)
+           (Strict PyArrow schemas, Snappy compression)
+                               │
+                               ▼
+           Pre-Resolution Source Output Quality Gate (DQ-2)
+          (pipeline_dq.py check-outputs: 8 vs 7, Grains, Dates)
+                               │
+                               ▼
+                  Deterministic Entity Resolution
+                       (entity_resolution.py)
+       ┌───────────────────────┴───────────────────────┐
+       ▼                                               ▼
+bridge_asteroid_identifier                    fact_entity_resolution
+(Source IDs mapped to asteroid_key)           (Run metadata, rules & status)
+       └───────────────────────┬───────────────────────┘
+                               │
+                               ▼
+             Post-Resolution Crosswalk Quality Gate (DQ-3)
+         (pipeline_dq.py check-crosswalk: Invariants & 1 Pivot)
+                               │
+                               ▼
+              Unified Run Manifest & S3 Publication
+         (run_manifest.json with all stage metrics & keys)
+                               │
+                               ▼
+            Amazon S3 & Athena Serverless SQL Analytics
+               (External tables & partition projection)
+                               │
+                               ▼
+                 Interactive Streamlit Dossier
+                   (5-Tab Mission Intelligence)
+```
 
-- Configuration is loaded from environment variables using `python-dotenv`.
-- Sensitive credentials are stored locally in `.env` and excluded from version control.
-- A `.env.example` file is provided as a configuration template.
+---
 
-### 2. NASA API Ingestion
+## Core Architectural Principles
 
-The pipeline retrieves Near-Earth Object data from NASA's NeoWs feed API.
+### 1. Parquet is the Authoritative Storage Contract
+All downstream analytics, Athena queries, entity resolution logic, and dashboard providers consume **processed Parquet files** with explicit PyArrow schemas.
+- Raw JSON responses are archived for auditability, lineage, and replay.
+- SQLite and CSV files serve as local development inspection targets and transient operational exports.
+- Cloud analytics strictly query Snappy-compressed Parquet.
 
-- The default ingestion window is dynamically generated from the current date.
-- Custom date ranges are supported via CLI arguments:
+### 2. Conceptual S3 Lakehouse Layout
+Storage keys follow deterministic, idempotent partition structures:
+
+```
+s3://nasa-asteroid-intelligence/
+├── raw/                                                # Raw JSON payloads (audit & lineage)
+│   ├── year=YYYY/month=MM/day=DD/                      # NeoWs raw JSON approach feeds
+│   │   └── asteroids_raw.json
+│   ├── sentry/risk_snapshot/                           # Sentry raw JSON risk snapshots
+│   │   └── year=YYYY/month=MM/day=DD/
+│   │       └── sentry_risk_snapshot_raw.json
+│   └── sbdb/object/                                    # SBDB raw JSON payloads (per target)
+│       └── year=YYYY/month=MM/day=DD/spkid={spkid}/
+│           └── sbdb_raw_{spkid}.json
+├── processed/                                          # Processed Parquet lakehouse tables
+│   ├── year=YYYY/month=MM/day=DD/                      # NeoWs processed approach Parquet
+│   │   └── asteroids.parquet
+│   ├── sentry/risk_snapshot/                           # Sentry risk snapshot Parquet
+│   │   └── year=YYYY/month=MM/day=DD/
+│   │       └── fact_sentry_risk_snapshot.parquet
+│   └── sbdb/                                           # SBDB normalized characterization tables
+│       ├── fact_sbdb_object_snapshot/
+│       │   └── year=YYYY/month=MM/day=DD/
+│       │       └── fact_sbdb_object_snapshot.parquet
+│       ├── fact_sbdb_orbit/
+│       │   └── year=YYYY/month=MM/day=DD/
+│       │       └── fact_sbdb_orbit.parquet
+│       ├── fact_sbdb_orbit_element/
+│       │   └── year=YYYY/month=MM/day=DD/
+│       │       └── fact_sbdb_orbit_element.parquet
+│       └── fact_sbdb_physical_parameter/
+│           └── year=YYYY/month=MM/day=DD/
+│               └── fact_sbdb_physical_parameter.parquet
+├── processed_csv/                                      # Transient operational CSV exports
+│   └── year=YYYY/month=MM/day=DD/
+│       └── asteroids.csv
+├── reference/asteroid_crosswalk/                       # Canonical entity resolution crosswalk
+│   ├── bridge_asteroid_identifier/
+│   │   └── year=YYYY/month=MM/day=DD/
+│   │       └── bridge_asteroid_identifier.parquet
+│   └── fact_entity_resolution/
+│       └── year=YYYY/month=MM/day=DD/
+│           └── fact_entity_resolution.parquet
+└── metadata/                                           # Unified pipeline execution manifests & operational audit
+    └── pipeline_runs/
+        └── year=YYYY/month=MM/day=DD/
+            └── run_manifest_{pipeline_run_id}.json
+```
+
+
+### 3. Canonical `asteroid_key` and SPK-ID Pivot
+Because different NASA systems identify celestial objects using varying nomenclature (NeoWs IDs, Sentry catalog designations, provisional designations, IAU numbers), the platform implements a canonical identity model:
+- **Primary Pivot:** The JPL SBDB **SPK-ID** serves as the canonical platform anchor (`is_primary_pivot == True`).
+- **Canonical Key:** Every recognized asteroid is assigned a deterministic `asteroid_key` (e.g., `AST-2099942` or `AST-50548689`).
+- **Crosswalk Datasets:**
+  - `bridge_asteroid_identifier`: Resolves source-specific identifiers (`neows_id`, `sentry_id`, `des`, `fullname`, `spkid`) to a single `asteroid_key`.
+  - `fact_entity_resolution`: Records resolution run metadata, applied matching rules, confidence states, and run linkages.
+
+### 4. Deterministic Entity Resolution
+The resolution engine (`entity_resolution.py`) implements deterministic matching rules without heuristic fuzziness:
+- Matches on verified SPK-IDs (`EXACT_SPKID_MATCH`) or normalized astronomical designations (`EXACT_DESIGNATION_MATCH`).
+- Strictly enforces three foundational crosswalk invariants:
+  1. **Exactly One Primary Pivot:** Every canonical `asteroid_key` has exactly one record with `is_primary_pivot == True`.
+  2. **Source Identifier Uniqueness:** Within any source system namespace, an identifier value is unique.
+  3. **Zero Ambiguity:** Zero bridge records are generated in an `AMBIGUOUS` state; ambiguous entities are flagged and isolated.
+
+### 5. Historical Sentry Snapshot Semantics
+CNEOS Sentry does not provide retroactive historical observation APIs; it provides active computed risk solutions based on current astrometric fits.
+- Each Sentry ingestion captures an immutable point-in-time snapshot (`fact_sentry_risk_snapshot`).
+- **Historical backfills skip Sentry entirely.** Historical Sentry snapshots are never fabricated or backdated.
+- During backfills, entity resolution executes without Sentry inputs, guaranteeing that zero synthetic Sentry `UNRESOLVED` records are generated.
+
+---
+
+## Analytical Intelligence Layer
+
+The platform provides unified serverless SQL analytics in Amazon Athena across three DDL and view scripts:
+- [`athena_schema.sql`](athena_schema.sql): Foundation table schemas with partition projection.
+- [`athena_intelligence_layer.sql`](athena_intelligence_layer.sql): Multi-source relational views.
+- [`athena_historical_risk.sql`](athena_historical_risk.sql): Snapshot coverage and risk metric lifecycle tracking.
+
+### Major Analytical Views
+
+| Analytical View | Grain | Description |
+|---|---|---|
+| `v_sbdb_characterization_profile` | `(spkid)` | Deep astronomical profile combining object snapshot metadata, Keplerian orbital parameters, and physical properties. |
+| `v_neows_sentry_threat_watchlist` | `(closest_approach_date, neows_id)` | Integrated operations watchlist correlating upcoming NeoWs close approaches with active Sentry impact probabilities and risk scales. |
+| `v_asteroid_cross_source_profile` | `(asteroid_key)` | Complete unified celestial portrait joining close approach telemetry, Keplerian orbits, physical characteristics, and impact risk. |
+| `v_crosswalk_coverage_audit` | `(source_system, match_state, match_rule)` | Governance and data quality audit tracking resolution rates, unmapped targets, and match rules across all three source namespaces. |
+| `v_sentry_risk_metric_history` | `(snapshot_key, sentry_id)` | Snapshot-by-snapshot observational delta tracking that monitors catalog metric changes across observation epochs without causal claims. |
+| `v_sentry_snapshot_coverage` | `(snapshot_key)` | Longitudinal audit tracking monitored object counts, newly added/removed threats, and active impact solutions across ingestion runs. |
+
+### Scientific Safety Protocol
+- **Zero Composite Threat Formulas:** No synthetic danger scores, weighted indices, or combined "danger percentages" are fabricated.
+- **Logarithmic Integrity:** No percentage differences are computed on logarithmic scales (such as the Palermo Scale). Only linear arithmetic deltas ($\Delta$) are reported.
+- **Zero Causal Overreach:** Metric changes describe updates in published catalog parameters following new observation epochs, never physical orbital decay or causal trajectory shifts.
+
+---
+
+## Interactive Streamlit Dossier
+
+The platform includes an interactive mission intelligence dossier implemented in [`dashboard.py`](dashboard.py) with cached data access in [`dashboard_data.py`](dashboard_data.py):
 
 ```bash
-python nasa_asteroids.py --start-date 2026-09-01 --end-date 2026-09-07
+streamlit run dashboard.py
 ```
 
-### 3. API Reliability
+### The 5-Tab Multi-Source Dossier
 
-The HTTP client includes:
-
-- Request timeouts
-- Retry handling with exponential backoff
-- HTTP error handling
-- Network error handling
-
-Retry handling covers common transient HTTP responses: `429`, `500`, `502`, `503`, `504`.
-
-### 4. Data Extraction
-
-NASA's nested JSON response is parsed to extract the fields required for downstream processing:
-
-| Field | Description |
-|---|---|
-| `id` | NASA asteroid identifier |
-| `name` | Asteroid name |
-| `closest_approach_date` | Closest approach date |
-| `miss_distance_km` | Miss distance in kilometers |
-| `hazardous` | Potentially hazardous classification |
-
-### 5. Data Validation
-
-Incoming records are validated before entering the processed dataset. Records are skipped when required information is missing or invalid, including:
-
-- Asteroid ID
-- Asteroid name
-- Close-approach data
-- Close-approach date
-- Miss-distance information (raw and km value)
-- Valid hazardous classification
-
-The pipeline tracks **records received**, **valid records**, and **skipped records** for every run.
-
-### 6. Local Data Storage
-
-Validated data is written to:
-
-- `asteroids.csv`
-- `asteroids.parquet` (explicit PyArrow schema, Snappy compression)
-
-Processed records are also loaded into **SQLite** for relational analytics.
-
-### 7. Relational Database
-
-The local SQLite database contains two related tables:
-
-```
-asteroids
-    │
-    │ 1-to-many
-    ↓
-close_approaches
-```
-
-The database loader is **idempotent**, preventing duplicate asteroid and close-approach records from being inserted on repeated pipeline runs.
-
-### 8. Amazon S3
-
-The pipeline uploads data to S3 using deterministic, date-partitioned paths based on the logical start date of the data window. S3 keys are deterministic, and repeated runs overwrite the same logical dataset atomically. This ensures cloud storage idempotency and prevents duplicate rows in Amazon Athena queries caused by repeated pipeline runs.
-
-Raw JSON data:
-
-```
-raw/
-└── year=YYYY/
-    └── month=MM/
-        └── day=DD/
-            └── asteroids_raw.json
-```
-
-Processed Parquet data:
-
-```
-processed/
-└── year=YYYY/
-    └── month=MM/
-        └── day=DD/
-            └── asteroids.parquet
-```
-
-Processed CSV data:
-
-```
-processed_csv/
-└── year=YYYY/
-    └── month=MM/
-        └── day=DD/
-            └── asteroids.csv
-```
-
-Raw API responses are kept outside version control.
-
-#### Storage Lifecycle & Retention Policy
-
-To optimize cloud storage costs while preserving analytical reproducibility, the platform defines the following S3 lifecycle and retention strategy:
-
-| Path Prefix | Storage Tier | Lifecycle & Retention Action | Rationale |
-|---|---|---|---|
-| `raw/` | S3 Standard → Glacier Instant Retrieval | Transition after **90 days**; expire after **365 days** | Raw JSON payloads (~70 KB/run) are retained for audit and re-parsing. Glacier Instant Retrieval provides millisecond access for replay, while annual expiration caps storage growth. |
-| `processed/` | S3 Standard | **Indefinite retention** (no transition, no expiration) | Processed Parquet files are the authoritative dataset for Amazon Athena analytics and require low-latency querying across all historical partitions. |
-| `processed_csv/` | S3 Standard | Expire after **14 days** | CSV exports serve as temporary operational inspection files; Athena analytics exclusively target Parquet. Expiring CSVs prevents redundant data accumulation. |
-| Legacy timestamped objects | S3 Standard | **Untouched** (no automated deletion) | Pre-M4 Phase 2C timestamped objects are preserved without automated deletion to prevent accidental data loss. |
-
-> **Note:** This represents the documented lifecycle/retention strategy for the platform. The configuration below is an example specification and is not applied to AWS resources in this phase.
-
-##### Example AWS S3 Lifecycle Configuration (`lifecycle.json`)
-
-```json
-{
-  "Rules": [
-    {
-      "ID": "RawPayloadRetention",
-      "Filter": { "Prefix": "raw/" },
-      "Status": "Enabled",
-      "Transitions": [
-        {
-          "Days": 90,
-          "StorageClass": "GLACIER_IR"
-        }
-      ],
-      "Expiration": { "Days": 365 }
-    },
-    {
-      "ID": "ProcessedCsvExpiration",
-      "Filter": { "Prefix": "processed_csv/" },
-      "Status": "Enabled",
-      "Expiration": { "Days": 14 }
-    }
-  ]
-}
-```
-
-### 9. Amazon Athena
-
-Processed Parquet data is designed for analytical querying through Amazon Athena. Prepared SQL analytics include:
-
-- Total asteroid count
-- Potentially hazardous asteroid count
-- Closest / farthest approaches
-- Average miss distance
-- Hazardous vs. non-hazardous distribution
-- Close approaches by date
-- Potentially hazardous objects beyond a specified distance
-
-### 10. Intelligence Dashboard
-
-An interactive **Streamlit** dashboard provides:
-
-- Interactive asteroid visualization
-- Hazardous / nominal filtering
-- Miss-distance filtering
-- Asteroid selection with identifiers, closest approach dates, miss distances, and lunar-distance equivalents
-- Hazard classification display
-
-> Note: the orbital visualization is an illustrative visual model, not an astronomical ephemeris calculation.
+1. **TAB 1 — OVERVIEW:**
+   - Planetary defense KPI summary cards (imminent approaches, PHAs, monitored impact threats).
+   - Multi-source identity coverage matrix showing resolution state (`RESOLVED`, `UNRESOLVED`, `AMBIGUOUS`).
+   - Close-approach geometry telemetry (miss distance, relative velocity, estimated diameter bounds).
+   - Observational protocol and safety guidance disclosures.
+2. **TAB 2 — SBDB (Small-Body Database):**
+   - Full Keplerian orbit elements ($a$, $e$, $i$, $\Omega$, $\omega$, $M$, period, perihelion, aphelion).
+   - Physical characteristics ($H$ absolute magnitude, estimated diameter, geometric albedo, rotation period).
+   - Orbit solution quality tier, solution ID, and data-arc parameters.
+3. **TAB 3 — SENTRY (Impact Risk Monitor):**
+   - Published Palermo Technical Scale (maximum and cumulative).
+   - Torino Scale maximum hazard classification.
+   - Cumulative and maximum impact probabilities with encounter paths count.
+   - Potential impact year range and velocity at infinity ($v_\infty$).
+4. **TAB 4 — HISTORY (Risk Metric Lifecycles):**
+   - Longitudinal tracking of risk parameters across catalog snapshots.
+   - Observational delta change log highlighting when impact probabilities or Palermo ratings shift across published epochs.
+5. **TAB 5 — CROSSWALK (Identity Provenance):**
+   - Full identity bridge audit displaying exact match rules (`EXACT_SPKID_MATCH`, `EXACT_DESIGNATION_MATCH`) and evidence.
+   - Side-by-side namespace isolation grid displaying raw keys across NeoWs, SBDB, and Sentry.
+   - Verification of the canonical anchor and primary pivot assignment.
 
 ---
 
-## Data Quality
+## Production Orchestration
 
-The pipeline explicitly tracks ingestion quality on every run:
+Automated production orchestration is implemented in [`.github/workflows/scheduled_pipeline.yml`](.github/workflows/scheduled_pipeline.yml).
 
-- Records received
-- Valid records
-- Skipped records
+### Architecture & Concurrency
+- **Runner:** Single-job runner on `ubuntu-latest` with Python 3.11.
+- **Schedule:** Automated daily execution at `06:00 UTC` (`cron: "0 6 * * *"`).
+- **Manual Trigger:** `workflow_dispatch` with fail-fast `start_date` and `end_date` inputs (`YYYY-MM-DD`).
+- **Concurrency Protection:** Group `nasa-asteroid-pipeline` with `cancel-in-progress: false` prevents overlapping runs while allowing active ingestions to finish deterministically.
 
-Validation occurs **before** data enters the processed datasets or relational database, preventing incomplete records from silently propagating downstream.
+### Execution Sequence
+
+```
+1. Clean Local Workspace Artifacts
+   • Purges transient Parquets, raw payloads, summaries, DQ results, targets, and manifests
+       ↓
+2. Determine Execution Mode & Initialize Run
+   • Validates manual date bounds (rejects end_date < start_date)
+   • Generates deterministic PIPELINE_RUN_ID (pipe_<uuid12>) and exports run environment
+   • Sets CURRENT_PRODUCTION or HISTORICAL_BACKFILL
+       ↓
+3. Ingest NASA NeoWs Telemetry
+   • python nasa_asteroids.py (emits neows_summary.json with authoritative run_id and lineage)
+   • Captures non-zero exit code without terminating prematurely before centralized DQ
+       ↓
+4. Ingest NASA CNEOS Sentry Telemetry (Mode S)
+   • python nasa_sentry.py (CURRENT_PRODUCTION only; skipped during HISTORICAL_BACKFILL)
+   • Captures non-zero exit code; preserves forensics
+       ↓
+5. Dynamic SBDB Target Generation
+   • Generates sbdb_targets.txt from active NeoWs & Sentry threats (with priority filters)
+   • Handles upstream ingestion failures gracefully (exports SBDB_TARGETS_COUNT)
+       ↓
+6. Ingest NASA/JPL SBDB Batch Telemetry
+   • If SBDB_TARGETS_COUNT == 0: emits WORKFLOW_DIAGNOSTIC_SUMMARY (SBDB_NOT_EXECUTED_UPSTREAM_FAILURE)
+   • If targets exist: runs python nasa_sbdb.py --targets-file ./sbdb_targets.txt (emits sbdb_batch_summary.json)
+   • Captures exit code; preserves forensics
+       ↓
+7. Enforce Centralized Ingestion Quality Gate (DQ-1)
+   • python pipeline_dq.py check-ingestion --execution-mode ... --output-file dq_ingestion.json
+   • Halts pipeline immediately on threshold breach, missing summary, or lineage violation
+       ↓
+8. Enforce Pre-Resolution Source Output Quality Gate (DQ-2)
+   • python pipeline_dq.py check-outputs --execution-mode ... --output-file dq_outputs.json
+   • Verifies artifact co-presence (8 production vs 7 backfill), structural grains, and approach windows
+       ↓
+9. Execute Deterministic Entity Resolution Engine
+   • python entity_resolution.py
+   • Maps NeoWs + SBDB (+ Sentry in prod) to canonical crosswalk without synthetic unresolved records
+       ↓
+10. Enforce Crosswalk Quality Gate (DQ-3)
+    • python pipeline_dq.py check-crosswalk --bridge-file ... --audit-file ... --output-file dq_crosswalk.json
+    • Validates exactly 1 primary pivot per key, source identifier uniqueness, and zero AMBIGUOUS records
+       ↓
+11. Extract Crosswalk Metadata
+    • Extracts resolution_run_id, evaluated identifiers, resolved count, and resolution rate
+       ↓
+12. Publish Crosswalk to Amazon S3
+    • Uploads bridge and audit Parquets with lineage metadata to reference/asteroid_crosswalk/...
+       ↓
+13. Post-Publish S3 HeadObject Verification
+    • Verifies non-zero ContentLength and matching run_id metadata on published S3 objects
+       ↓
+14. Generate and Publish Unified Execution Manifest
+    • python pipeline_utils.py (generate_run_manifest & upload_run_manifest_to_s3)
+    • Serializes run_manifest.json with all stage metrics and uploads to s3://.../metadata/pipeline_runs/...
+       ↓
+15. Emit GitHub Actions Step Summary
+    • Markdown table reporting DQ gates, ingestion metrics, entity resolution, and S3 artifact links
+```
 
 ---
 
-## SQL Analytics
+## Historical Backfill Semantics
 
-A dedicated Athena query collection lives in [`athena_queries.sql`](athena_queries.sql), including:
+The platform maintains strict temporal semantics for historical data processing:
 
-- Total asteroid count
-- Potentially hazardous asteroid count
-- Closest asteroid approaches
-- Average miss distance
-- Hazardous vs. non-hazardous distribution
-- Closest potentially hazardous objects
-
-The local SQLite layer provides an additional relational analytics environment for development and validation.
+1. **Backfill Applies Exclusively to NeoWs:** NASA NeoWs supports historical queries over any valid date window.
+2. **Sentry Ingestion is Skipped:** Sentry provides forward-looking impact probabilities based on active orbit solutions; it does not support retrospective historical snapshots. Historical backfill workflows explicitly skip Sentry.
+3. **No Fabricated Snapshots:** Sentry snapshots are never backdated, interpolated, or synthesized.
+4. **SBDB Capture Time:** Keplerian orbital solutions queried during historical backfills represent physical parameters at execution/query time.
+5. **Crosswalk Partitioning:** Historical runs publish crosswalk datasets under the actual execution date partition (`year=YYYY/month=MM/day=DD/`) within `reference/asteroid_crosswalk/`.
+6. **No Synthetic Unresolved Records:** Because Sentry input is omitted during backfill resolution, entity resolution does not create synthetic Sentry `UNRESOLVED` records.
 
 ---
 
-## Testing
+## Data Quality & Reliability Gates
 
-The project uses `pytest`. The current suite contains **56 tests**, covering:
+The pipeline enforces centralized operational data quality gates via `pipeline_dq.py`. A violation halts execution immediately (`exit 1`) before corrupt, partial, or unverified data can publish to S3:
 
-- Valid asteroid extraction and data schema validation
-- Missing, empty, or malformed field handling
-- Date validation, range boundaries, and runtime dynamic dates
-- Deduplication of identical asteroid approaches
-- Data quality metrics, rejection rate warnings, and circuit breakers
-- Parquet and CSV generation with explicit typing
-- Relational database loading and idempotency
-- API key redaction and sanitized raw payload storage
-- CLI exit codes, error propagation, and unhandled exceptions
-- S3 deterministic Hive partitioning and idempotent keys
-- S3 partial failure handling and local-first sequencing
-- Pipeline execution duration and observability logging
-- Mocked NASA API requests and S3 cloud storage
-
-**Current status:** ✅ 56 passed
-
-Tests are designed to avoid making live NASA API requests.
+```
+┌──────────────────────────────────────────────────────────────────────────────────┐
+│                   OPERATIONAL DATA QUALITY ENGINE (pipeline_dq.py)               │
+├─────────────────────────┬───────────────────────────────┬────────────────────────┤
+│ Check Suite             │ Validation Logic              │ Failure Behavior       │
+├─────────────────────────┼───────────────────────────────┼────────────────────────┤
+│ check-ingestion         │ • Authoritative summary check │ Halts execution;       │
+│                         │   (neows_summary, sbdb_batch) │ blocks downstream      │
+│                         │ • Gate thresholds: NeoWs      │ resolution and S3      │
+│                         │   rejection < 20%, SBDB batch │ publication            │
+│                         │   failure < 25%               │                        │
+│                         │ • Summary-to-Parquet lineage  │                        │
+│                         │   (run_id & record alignment) │                        │
+├─────────────────────────┼───────────────────────────────┼────────────────────────┤
+│ check-outputs           │ • Pre-resolution accounting   │ Halts execution;       │
+│                         │   (8 files prod, 7 backfill)  │ suppresses entity      │
+│                         │ • SBDB table co-presence      │ resolution crosswalk   │
+│                         │ • SBDB structural grain &     │                        │
+│                         │   referential integrity       │                        │
+│                         │ • Approach-window validation  │                        │
+│                         │ • Snapshot-date validation    │                        │
+├─────────────────────────┼───────────────────────────────┼────────────────────────┤
+│ check-crosswalk         │ • Exactly 1 primary pivot per │ Halts execution;       │
+│                         │   canonical asteroid_key      │ suppresses crosswalk   │
+│                         │ • Source identifier uniqueness│ publication to S3      │
+│                         │ • Single resolution_run_id    │                        │
+│                         │ • Zero AMBIGUOUS bridge rows  │                        │
+│                         │ • Audit-bridge integrity      │                        │
+├─────────────────────────┼───────────────────────────────┼────────────────────────┤
+│ check-s3-publication    │ • HeadObject verification of  │ Halts execution on     │
+│                         │   ContentLength > 0           │ missing or corrupt     │
+│                         │ • Metadata run_id alignment   │ cloud objects          │
+└─────────────────────────┴───────────────────────────────┴────────────────────────┘
+```
 
 ---
 
 ## Continuous Integration
 
-The repository includes a GitHub Actions workflow at `.github/workflows/ci.yml` that:
+The repository includes a fast, fully isolated quality gate in [`.github/workflows/ci.yml`](.github/workflows/ci.yml):
 
-1. Checks out the repository
-2. Sets up Python 3.11
-3. Installs project dependencies (`requirements.txt`)
-4. Verifies whitespace and file formatting (`git diff --check`)
-5. Runs the Ruff linter (`ruff check . --select E4,E7,E9,F`)
-6. Runs the full pytest test suite (`pytest -v`)
-
----
-
-## Production Scheduling
-
-Automated production execution is implemented via GitHub Actions in [`.github/workflows/scheduled_pipeline.yml`](.github/workflows/scheduled_pipeline.yml):
-
-- **Scheduled Ingestion:** Runs daily at `06:00 UTC` (`cron: "0 6 * * *"`), using the pipeline's standard rolling 7-day ingestion window (`date.today()` to `date.today() + 6 days`).
-- **Manual Ingestion & Backfills:** Supports `workflow_dispatch` with optional `start_date` and `end_date` inputs (`YYYY-MM-DD`). When both dates are provided, the workflow runs the pipeline for that specific historical date range; if either or both are omitted, execution defaults to the standard rolling date window.
-- **Secrets Management:** Pipeline credentials (`NASA_API_KEY`, `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`) are injected securely through GitHub Actions Secrets into step environment variables and masked from logs.
-- **Concurrency & Failure Handling:** Concurrency group `nasa-asteroid-pipeline` with `cancel-in-progress: false` prevents overlapping runs while allowing active ingestions to complete. Any pipeline failure preserves Python's non-zero exit code (`sys.exit(1)`), failing the workflow run and alerting operators.
+- **Triggers:** Every `push` and `pull_request` targeting `main` or `master`.
+- **Environment:** `ubuntu-latest`, Python 3.11 with pip caching.
+- **Formatting Gate:** `git diff --check` with zero tolerance for trailing whitespace or newline discrepancies.
+- **Linter Gate:** `ruff check .` with zero tolerance for lint or syntax errors.
+- **Full Test Suite:** `pytest -v` executing all **286 automated tests**.
+- **Isolation Guarantee:** Runs with **zero AWS credentials**, **zero NASA API keys**, and **zero live network calls**. All external APIs and cloud operations are strictly mocked.
 
 ---
 
-## Project Structure
+## Security & Secrets Management
+
+- **Zero Credentials in Repository:** No API keys, AWS credentials, secret keys, or account IDs are stored in version control.
+- **Local Development:** Credentials are loaded via `python-dotenv` from a local `.env` file that is excluded in `.gitignore`. A template is provided in [`.env.example`](.env.example).
+- **Production CI/CD:** Production credentials (`NASA_API_KEY`, `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`) are managed exclusively through GitHub Actions Secrets and injected only into scoped production runner steps.
+- **Log Masking & Redaction:** All URL query strings and logs scrub the `api_key` parameter using `pipeline_utils.redact_api_key`.
+
+---
+
+## Repository Structure
 
 ```
 NASA-Intelligence-Platform/
-│
-├── nasa_asteroids.py
-├── database.py
-├── dashboard.py
-│
-├── test_nasa_asteroids.py
-│
-├── schema.sql
-├── athena_schema.sql
-├── athena_queries.sql
-│
-├── asteroids.csv
-├── asteroids.parquet
-│
-├── architecture.md
-├── requirements.txt
-├── .env.example
-├── .gitignore
-│
 ├── .github/
 │   └── workflows/
-│       ├── ci.yml
-│       └── scheduled_pipeline.yml
+│       ├── ci.yml                           # Hardened, credential-free CI gate
+│       └── scheduled_pipeline.yml           # Single-job M5 production orchestration
 │
-└── README.md
+├── nasa_asteroids.py                        # NASA NeoWs ingestion engine & CLI
+├── nasa_sentry.py                           # CNEOS Sentry Mode S ingestion engine & CLI
+├── nasa_sbdb.py                             # NASA/JPL SBDB batch ingestion engine & CLI
+├── entity_resolution.py                     # Deterministic multi-source crosswalk engine
+├── database.py                              # SQLite relational storage engine (local dev)
+├── pipeline_utils.py                        # Reusable HTTP, S3, PyArrow & redaction utils
+├── pipeline_dq.py                           # Centralized operational data quality engine & CLI
+│
+├── dashboard.py                             # Interactive 5-tab Streamlit intelligence dossier
+├── dashboard_data.py                        # Data provider & caching layer for dashboard
+│
+├── athena_schema.sql                        # Foundation Athena external table DDL
+├── athena_queries.sql                       # Standard operational Athena SQL queries
+├── athena_intelligence_layer.sql            # M5 cross-source Athena views & DDL
+├── athena_historical_risk.sql               # M5 historical Sentry risk lifecycle views
+├── schema.sql                               # Local SQLite schema DDL
+│
+├── test_nasa_asteroids.py                   # NeoWs ingestion test suite
+├── test_nasa_sentry.py                      # Sentry Mode S ingestion test suite
+├── test_nasa_sbdb.py                        # SBDB batch ingestion & failure gate test suite
+├── test_entity_resolution.py                # Entity resolution & invariant test suite
+├── test_historical_risk.py                  # Historical risk view validation test suite
+├── test_intelligence_layer.py               # Multi-source intelligence view test suite
+├── test_dashboard.py                        # Streamlit dashboard & data provider test suite
+├── test_pipeline_utils.py                   # Shared utilities & manifest test suite
+├── test_pipeline_dq.py                      # Centralized data quality engine test suite
+│
+├── requirements.txt                         # Pinned production and test dependencies
+├── .env.example                             # Configuration environment variable template
+├── .gitignore                               # Git exclusion rules
+└── README.md                                # Authoritative platform documentation
 ```
-
-Local-only files such as `.env`, SQLite databases, and raw API responses are excluded from version control.
 
 ---
 
 ## Tech Stack
 
-| Technology | Purpose |
-|---|---|
-| Python | Ingestion, transformation, validation, pipeline orchestration |
-| NASA NeoWs API | Source data |
-| Requests | API communication |
-| python-dotenv | Environment configuration |
-| Pandas | Data handling for the dashboard |
-| PyArrow | Parquet generation and schema management |
-| SQLite | Local relational data storage |
-| SQL | Data analytics |
-| Amazon S3 | Cloud object storage |
-| Amazon Athena | Serverless SQL analytics |
-| Boto3 | AWS integration |
-| Streamlit | Interactive intelligence dashboard |
-| Pytest | Automated testing |
-| Git | Version control |
-| GitHub Actions | Continuous integration |
+| Component | Technology | Purpose |
+|---|---|---|
+| **Language** | Python 3.11 | Core ingestion, transformation, validation, and CLI tools |
+| **Data Sources** | NASA NeoWs, JPL CNEOS Sentry, JPL SBDB | Planetary defense observation, impact risk, and Keplerian orbit APIs |
+| **Object Storage** | Amazon S3 | Serverless data lakehouse (raw JSON, partitioned Parquet, and run manifests) |
+| **Query Engine** | Amazon Athena (Trino) | Serverless interactive SQL analytics and multi-source views |
+| **Columnar Engine** | PyArrow / Apache Parquet | Explicit schemas, Snappy compression, authoritative lakehouse datasets |
+| **Identity Engine** | Python / PyArrow | Deterministic entity resolution, namespace isolation, primary pivot crosswalk |
+| **Quality Engine** | Python / PyArrow / Boto3 | Centralized operational DQ engine (`pipeline_dq.py`) & invariant enforcement |
+| **Dashboard** | Streamlit, Pandas | Interactive 5-tab mission intelligence dossier |
+| **Quality & Linting**| Ruff, Pytest | Code formatting, static linting, and 286-test automated regression suite |
+| **CI / CD** | GitHub Actions | Hardened pull-request validation and daily production orchestration |
 
 ---
 
-## Running the Project
+## Running the Platform Locally
 
-### 1. Clone the repository
-
+### 1. Clone the Repository
 ```bash
-git clone <your-repository-url>
-cd NASA-Intelligence-Platform
+git clone <repository-url>
+cd "Nasa Intelligence Platform"
 ```
 
-### 2. Install dependencies
-
+### 2. Set Up a Virtual Environment & Install Dependencies
 ```bash
+python -m venv .venv
+# On Linux/macOS:
+source .venv/bin/activate
+# On Windows PowerShell:
+.venv\Scripts\Activate.ps1
+
 pip install -r requirements.txt
 ```
 
-### 3. Configure environment variables
-
-Create a local `.env` file:
-
+### 3. Configure Local Environment Variables
+Copy the example configuration to `.env` and provide your credentials:
+```bash
+cp .env.example .env
+```
+Edit `.env`:
 ```env
-NASA_API_KEY=your_nasa_api_key
-AWS_ACCESS_KEY_ID=your_aws_access_key_id
-AWS_SECRET_ACCESS_KEY=your_aws_secret_access_key
+NASA_API_KEY=your_nasa_api_key_here
+AWS_ACCESS_KEY_ID=your_aws_access_key
+AWS_SECRET_ACCESS_KEY=your_aws_secret_key
 AWS_DEFAULT_REGION=us-east-1
 S3_BUCKET_NAME=nasa-asteroid-intelligence
 ```
 
-> ⚠️ Never commit `.env` to version control.
+### 4. Run Ingestion Pipelines Locally
 
-### 4. Run the ingestion pipeline
-
+**NASA NeoWs (Rolling 7-day approach feed):**
 ```bash
 python nasa_asteroids.py
-```
-
-Or specify a custom date range:
-
-```bash
+# Or custom date range:
 python nasa_asteroids.py --start-date 2026-09-01 --end-date 2026-09-07
 ```
 
-### 5. Run tests
-
+**NASA/JPL CNEOS Sentry (Mode S impact risk table):**
 ```bash
-pytest -v
+python nasa_sentry.py --mode S
 ```
 
-### 6. Launch the dashboard
+**NASA/JPL SBDB Batch Ingestion (via targets file):**
+```bash
+# Ingest single target:
+python nasa_sbdb.py --target 99942
 
+# Ingest batch of targets:
+python nasa_sbdb.py --targets-file sbdb_targets.txt
+```
+
+**Execute Deterministic Entity Resolution:**
+```bash
+python entity_resolution.py \
+    --neows-path asteroids.parquet \
+    --sbdb-path fact_sbdb_object_snapshot.parquet \
+    --sentry-path fact_sentry_risk_snapshot.parquet \
+    --output-dir crosswalk_out
+```
+
+### 5. Run Operational Data Quality Gates Locally
+
+**Validate Source Ingestion Lineage & Thresholds:**
+```bash
+python pipeline_dq.py check-ingestion --execution-mode CURRENT_PRODUCTION
+```
+
+**Validate Pre-Resolution Source Outputs & Grains:**
+```bash
+python pipeline_dq.py check-outputs --execution-mode CURRENT_PRODUCTION --snapshot-date 2026-09-28
+```
+
+**Validate Crosswalk Invariants & Identity Bridge:**
+```bash
+python pipeline_dq.py check-crosswalk \
+    --bridge-file crosswalk_out/bridge_asteroid_identifier.parquet \
+    --audit-file crosswalk_out/fact_entity_resolution.parquet
+```
+
+**Execute Unified End-to-End Data Quality Suite:**
+```bash
+python pipeline_dq.py run-suite --execution-mode CURRENT_PRODUCTION
+```
+
+### 6. Run Quality Checks & Automated Tests
+```bash
+# Run complete test suite (286 tests)
+pytest -v
+
+# Run linter
+ruff check .
+
+# Check formatting and whitespace
+git diff --check
+```
+
+### 7. Launch the Streamlit Intelligence Dossier
 ```bash
 streamlit run dashboard.py
 ```
 
 ---
 
-## Current Status
+## Project Status & Roadmap
 
-### ✅ Implemented
+### Current Milestone Status
 
-- NASA NeoWs API ingestion
-- Dynamic date-window ingestion
-- Custom CLI date ranges
-- API timeout, retry, and backoff handling
-- JSON parsing
-- Data validation and data-quality metrics
-- CSV and Parquet generation
-- SQLite relational database with idempotent loading
-- Local SQL analytics
-- Amazon S3 integration with raw/processed separation and partitioned layout
-- Amazon Athena schema and analytical queries
-- Interactive Streamlit dashboard
-- Automated testing (pytest)
-- GitHub Actions CI
-- Automated scheduled pipeline execution (GitHub Actions)
-- Environment-based configuration
-- Architecture documentation
+- **M1–M4:** Complete
+  - NeoWs ingestion and data-quality foundation
+  - SQL/data modeling
+  - S3 / Parquet / Athena lakehouse and analytics
+  - M4 productionization and GitHub Actions scheduling
 
-### 🚧 In Progress
+- **M5:** Complete / Operational
+  - **Phase 1–10:** Complete
+    - NASA/JPL CNEOS Sentry Mode S impact monitoring (introduced in M5)
+    - NASA/JPL Small-Body Database (SBDB) Keplerian and physical characterization (introduced in M5)
+    - Deterministic multi-source entity resolution and canonical `asteroid_key` / SPK-ID crosswalk
+    - Historical Sentry risk intelligence and snapshot lifecycle tracking
+    - Cross-source intelligence views in Amazon Athena
+    - Mission intelligence dashboard expansion (5-tab dossier)
+    - Phase 10 production orchestration, native SBDB batch ingestion, and CI hardening
+  - **Phase 11:** Complete
+    - Phase 11A: Unified pipeline execution manifest (`run_manifest.json`) and metadata S3 publication
+    - Phase 11B: Authoritative source summaries (`neows_summary.json`, `sbdb_batch_summary.json`) and centralized DQ engine (`pipeline_dq.py`)
+    - Phase 11C: Scheduled workflow integration, multi-stage DQ enforcement, and zero-target failure provenance (`SBDB_NOT_EXECUTED_UPSTREAM_FAILURE`)
+    - Phase 11D: Complete (Final regression verification, test expansion to 286 tests, and documentation hardening)
+  - **Phase 12:** Pending
 
-- End-to-end cloud analytics validation
-- Further data-quality validation
-- Expanded intelligence metrics
-- Historical asteroid analysis
-- Final portfolio documentation
-
----
-
-## Future Engineering Improvements
-
-- Automated data-quality monitoring
-- Historical data accumulation, incremental processing, and backfills
-- Schema evolution handling
-- Improved observability
-- Pipeline failure recovery
-- Advanced asteroid risk and priority metrics
-- Historical trend analysis
-- API/data-serving layer
-- Dashboard expansion
-- Deployment automation
-
----
-
-## Project Goal
-
-The goal of this project is to demonstrate an end-to-end data engineering workflow using a real-world scientific data source:
-
-```
-Data Ingestion → Data Validation → Data Transformation → Data Storage
-    → Cloud Data Lake → SQL Analytics → Data Intelligence → Interactive Visualization
-```
-
-The resulting system provides a foundation for exploring Near-Earth Object activity and building analytical intelligence around asteroid approaches, miss distances, hazardous classifications, and historical patterns.
+### Parked / Future Architectural Roadmap
+*The following items are explicitly parked and represent future potential enhancements:*
+- **Event-Driven Architecture:** Decoupling batch runs with Apache Kafka or AWS EventBridge.
+- **Multi-Region Disaster Recovery:** Automated S3 Cross-Region Replication (CRR) and multi-region Athena catalog sync.
+- **Ephemeris Calculations:** N-body gravitational trajectory simulation (the platform presents factual observational telemetry, not orbital integrations).
+- **Containerized Deployment:** Docker packaging and AWS ECS / Fargate deployment for the Streamlit dashboard.

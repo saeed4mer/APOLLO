@@ -1312,7 +1312,7 @@ def test_rejection_percentage_warning_emitted_when_over_20_percent(monkeypatch, 
         with caplog.at_level(logging.WARNING):
             exit_code = nasa_asteroids.main()
 
-        assert exit_code == 0
+        assert exit_code == 1
         assert any("High rejection rate" in record.message for record in caplog.records)
 
 
@@ -1437,3 +1437,183 @@ def test_top_level_error_logging_includes_run_id(tmp_path):
     )
     assert result.returncode == 1
     assert re.search(r"\[[0-9a-f]{12}\] Pipeline failure: Unexpected AWS error", result.stderr)
+
+
+def test_neows_summary_emission_on_success(tmp_path, monkeypatch):
+    monkeypatch.setattr(nasa_asteroids, "API_KEY", "TEST_KEY")
+    valid_data = {
+        "near_earth_objects": {
+            "2026-09-28": [
+                {
+                    "id": "12345",
+                    "name": "Asteroid A",
+                    "close_approach_data": [{
+                        "close_approach_date": "2026-09-28",
+                        "miss_distance": {"kilometers": "100000"}
+                    }],
+                    "is_potentially_hazardous_asteroid": False
+                }
+            ]
+        }
+    }
+    summary_file = tmp_path / "custom_neows_summary.json"
+
+    with patch("nasa_asteroids.fetch_data", return_value=valid_data), \
+         patch("nasa_asteroids.save_raw_json"), \
+         patch("nasa_asteroids.save_to_csv"), \
+         patch("nasa_asteroids.save_to_parquet"), \
+         patch("nasa_asteroids.load_data"), \
+         patch("nasa_asteroids.upload_raw_to_s3"), \
+         patch("nasa_asteroids.upload_processed_to_s3"):
+
+        exit_code = nasa_asteroids.main(
+            start_date_str="2026-09-28",
+            end_date_str="2026-10-04",
+            summary_filename=str(summary_file)
+        )
+        assert exit_code == 0
+        assert summary_file.exists()
+
+        with open(summary_file, "r", encoding="utf-8") as f:
+            summary = json.load(f)
+
+        assert summary["records_received"] == 1
+        assert summary["valid_records"] == 1
+        assert summary["skipped_records"] == 0
+        assert summary["rejection_pct"] == 0.0
+        assert summary["gate_passed"] is True
+        assert summary["start_date"] == "2026-09-28"
+        assert summary["end_date"] == "2026-10-04"
+        assert summary["run_id"] == nasa_asteroids.main.current_run_id
+
+
+def test_neows_summary_emission_on_high_rejection_failure(tmp_path, monkeypatch):
+    monkeypatch.setattr(nasa_asteroids, "API_KEY", "TEST_KEY")
+    # 1 valid, 1 skipped -> 50% rejection rate >= 20%
+    data = {
+        "near_earth_objects": {
+            "2026-09-28": [
+                {
+                    "id": "12345",
+                    "name": "Valid Asteroid",
+                    "close_approach_data": [{
+                        "close_approach_date": "2026-09-28",
+                        "miss_distance": {"kilometers": "100000"}
+                    }],
+                    "is_potentially_hazardous_asteroid": False
+                },
+                {
+                    "id": "99999",
+                    "name": "",  # invalid: missing name
+                    "close_approach_data": [{
+                        "close_approach_date": "2026-09-28",
+                        "miss_distance": {"kilometers": "100000"}
+                    }],
+                    "is_potentially_hazardous_asteroid": False
+                }
+            ]
+        }
+    }
+    summary_file = tmp_path / "failed_neows_summary.json"
+
+    with patch("nasa_asteroids.fetch_data", return_value=data), \
+         patch("nasa_asteroids.save_raw_json"), \
+         patch("nasa_asteroids.save_to_csv") as mock_csv, \
+         patch("nasa_asteroids.save_to_parquet") as mock_parquet, \
+         patch("nasa_asteroids.load_data") as mock_load, \
+         patch("nasa_asteroids.upload_raw_to_s3") as mock_raw_s3, \
+         patch("nasa_asteroids.upload_processed_to_s3") as mock_proc_s3:
+
+        exit_code = nasa_asteroids.main(
+            start_date_str="2026-09-28",
+            end_date_str="2026-10-04",
+            summary_filename=str(summary_file)
+        )
+        assert exit_code == 1
+        assert summary_file.exists()
+
+        with open(summary_file, "r", encoding="utf-8") as f:
+            summary = json.load(f)
+
+        assert summary["records_received"] == 2
+        assert summary["valid_records"] == 1
+        assert summary["skipped_records"] == 1
+        assert summary["rejection_pct"] == 50.0
+        assert summary["gate_passed"] is False
+
+        # Verify production outputs were suppressed
+        mock_csv.assert_not_called()
+        mock_parquet.assert_not_called()
+        mock_load.assert_not_called()
+        mock_raw_s3.assert_not_called()
+        mock_proc_s3.assert_not_called()
+
+
+def test_neows_parquet_metadata_embeds_run_id(tmp_path):
+    records = [
+        {
+            "id": "12345",
+            "name": "Asteroid A",
+            "closest_approach_date": "2026-09-28",
+            "miss_distance_km": 150000.0,
+            "hazardous": False
+        }
+    ]
+    parquet_path = tmp_path / "asteroids_meta.parquet"
+    nasa_asteroids.save_to_parquet(records, filename=str(parquet_path), run_id="run_abc_123")
+
+    table = pq.read_table(str(parquet_path))
+    assert table.num_rows == 1
+    assert table.schema.metadata is not None
+    assert b"run_id" in table.schema.metadata
+    assert table.schema.metadata[b"run_id"].decode("utf-8") == "run_abc_123"
+
+
+def test_neows_summary_write_failure_halts_pipeline(tmp_path, monkeypatch, caplog):
+    monkeypatch.setattr(nasa_asteroids, "API_KEY", "TEST_KEY")
+    valid_data = {
+        "near_earth_objects": {
+            "2026-09-28": [
+                {
+                    "id": "12345",
+                    "name": "Asteroid A",
+                    "close_approach_data": [{
+                        "close_approach_date": "2026-09-28",
+                        "miss_distance": {"kilometers": "100000"}
+                    }],
+                    "is_potentially_hazardous_asteroid": False
+                }
+            ]
+        }
+    }
+    summary_file = tmp_path / "summary_write_fail.json"
+
+    with patch("nasa_asteroids.fetch_data", return_value=valid_data), \
+         patch("nasa_asteroids.save_raw_json") as mock_raw, \
+         patch("nasa_asteroids.save_neows_summary", side_effect=IOError("Disk write error")), \
+         patch("nasa_asteroids.save_to_csv") as mock_csv, \
+         patch("nasa_asteroids.save_to_parquet") as mock_parquet, \
+         patch("nasa_asteroids.load_data") as mock_load, \
+         patch("nasa_asteroids.upload_raw_to_s3") as mock_raw_s3, \
+         patch("nasa_asteroids.upload_processed_to_s3") as mock_proc_s3:
+
+        with caplog.at_level(logging.ERROR):
+            exit_code = nasa_asteroids.main(
+                start_date_str="2026-09-28",
+                end_date_str="2026-10-04",
+                summary_filename=str(summary_file)
+            )
+
+        assert exit_code == 1
+        # Raw forensic JSON was preserved prior to summary write
+        assert mock_raw.called
+        # Production outputs must be suppressed
+        mock_csv.assert_not_called()
+        mock_parquet.assert_not_called()
+        mock_load.assert_not_called()
+        mock_raw_s3.assert_not_called()
+        mock_proc_s3.assert_not_called()
+
+        # Must log ERROR, not WARNING
+        assert any("Failed to write NeoWs authoritative summary" in record.message and record.levelname == "ERROR"
+                   for record in caplog.records)

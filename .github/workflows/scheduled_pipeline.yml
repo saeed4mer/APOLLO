@@ -24,7 +24,15 @@ jobs:
   pipeline:
     name: Execute NASA Asteroid Pipeline
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 15
+
+    env:
+      NASA_API_KEY: ${{ secrets.NASA_API_KEY }}
+      AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+      AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+      AWS_DEFAULT_REGION: us-east-1
+      S3_BUCKET_NAME: nasa-asteroid-intelligence
+      DB_PATH: asteroids.db
 
     steps:
       - name: Checkout Code
@@ -41,19 +49,753 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
-      - name: Run NASA Asteroid Pipeline
-        env:
-          NASA_API_KEY: ${{ secrets.NASA_API_KEY }}
-          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
-          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          AWS_DEFAULT_REGION: us-east-1
-          S3_BUCKET_NAME: nasa-asteroid-intelligence
-          DB_PATH: asteroids.db
-          START_DATE: ${{ inputs.start_date }}
-          END_DATE: ${{ inputs.end_date }}
+      - name: Clean Local Workspace Artifacts
         run: |
-          if [ -n "$START_DATE" ] && [ -n "$END_DATE" ]; then
+          rm -f asteroids.parquet asteroids.csv asteroids_raw.json neows_summary.json
+          rm -f fact_sentry_risk_snapshot.parquet sentry_risk_snapshot_raw.json
+          rm -f fact_sbdb_*.parquet sbdb_raw_*.json sbdb_targets.txt sbdb_batch_summary.json
+          rm -f dq_*.json run_manifest.json
+          rm -rf crosswalk_out
+
+      - name: Determine Execution Mode
+        env:
+          INPUT_START_DATE: ${{ inputs.start_date }}
+          INPUT_END_DATE: ${{ inputs.end_date }}
+        run: |
+          set -euo pipefail
+          python - << 'EOF'
+          import os
+          import sys
+          import uuid
+          from datetime import date, datetime, timedelta, timezone
+
+          input_start = os.getenv("INPUT_START_DATE", "").strip()
+          input_end = os.getenv("INPUT_END_DATE", "").strip()
+          now_utc = datetime.now(timezone.utc)
+          today_utc = now_utc.date()
+          run_date_str = today_utc.strftime("%Y-%m-%d")
+          run_timestamp = now_utc.isoformat()
+          pipeline_run_id = f"pipe_{uuid.uuid4().hex[:12]}"
+
+          if input_end and not input_start:
+              print("Error: Ambiguous backfill configuration — end_date supplied without start_date.", file=sys.stderr)
+              sys.exit(1)
+
+          if input_start:
+              execution_mode = "HISTORICAL_BACKFILL"
+              try:
+                  start_dt = datetime.strptime(input_start, "%Y-%m-%d").date()
+              except ValueError:
+                  print(f"Error: Invalid start_date format '{input_start}'. Expected YYYY-MM-DD.", file=sys.stderr)
+                  sys.exit(1)
+
+              if input_end:
+                  try:
+                      end_dt = datetime.strptime(input_end, "%Y-%m-%d").date()
+                  except ValueError:
+                      print(f"Error: Invalid end_date format '{input_end}'. Expected YYYY-MM-DD.", file=sys.stderr)
+                      sys.exit(1)
+              else:
+                  end_dt = start_dt + timedelta(days=6)
+
+              if end_dt < start_dt:
+                  print(f"Error: Invalid date range — end_date ({end_dt.strftime('%Y-%m-%d')}) cannot be before start_date ({start_dt.strftime('%Y-%m-%d')}).", file=sys.stderr)
+                  sys.exit(1)
+
+              start_date_str = start_dt.strftime("%Y-%m-%d")
+              end_date_str = end_dt.strftime("%Y-%m-%d")
+          else:
+              execution_mode = "CURRENT_PRODUCTION"
+              start_date_str = run_date_str
+              end_date_str = (today_utc + timedelta(days=6)).strftime("%Y-%m-%d")
+
+          print(f"Pipeline Run ID: {pipeline_run_id}")
+          print(f"Execution Mode : {execution_mode}")
+          print(f"Run Date (UTC) : {run_date_str}")
+          print(f"Run Timestamp  : {run_timestamp}")
+          print(f"Start Date     : {start_date_str}")
+          print(f"End Date       : {end_date_str}")
+
+          env_file = os.getenv("GITHUB_ENV")
+          if env_file:
+              with open(env_file, "a", encoding="utf-8") as f:
+                  f.write(f"PIPELINE_RUN_ID={pipeline_run_id}\n")
+                  f.write(f"EXECUTION_MODE={execution_mode}\n")
+                  f.write(f"RUN_DATE={run_date_str}\n")
+                  f.write(f"RUN_TIMESTAMP={run_timestamp}\n")
+                  f.write(f"START_DATE={start_date_str}\n")
+                  f.write(f"END_DATE={end_date_str}\n")
+          EOF
+
+      - name: Ingest NeoWs Close Approaches
+        run: |
+          set -uo pipefail
+          set +e
+          if [ "$EXECUTION_MODE" = "HISTORICAL_BACKFILL" ]; then
+            echo "Running historical NeoWs ingestion ($START_DATE to $END_DATE)..."
             python nasa_asteroids.py --start-date "$START_DATE" --end-date "$END_DATE"
           else
+            echo "Running current production NeoWs ingestion..."
             python nasa_asteroids.py
           fi
+          NEOWS_EXIT=$?
+          set -e
+          echo "NEOWS_EXIT_CODE=$NEOWS_EXIT" >> "$GITHUB_ENV"
+          if [ "$NEOWS_EXIT" -ne 0 ]; then
+            echo "::warning::NeoWs ingestion returned non-zero exit code: $NEOWS_EXIT. Forensics preserved for centralized DQ."
+          fi
+
+      - name: Ingest Sentry Risk Catalog
+        if: env.EXECUTION_MODE == 'CURRENT_PRODUCTION'
+        run: |
+          set -uo pipefail
+          set +e
+          echo "Running Sentry Mode S ingestion..."
+          python nasa_sentry.py
+          SENTRY_EXIT=$?
+          set -e
+          echo "SENTRY_EXIT_CODE=$SENTRY_EXIT" >> "$GITHUB_ENV"
+          if [ "$SENTRY_EXIT" -ne 0 ]; then
+            echo "::warning::Sentry ingestion returned non-zero exit code: $SENTRY_EXIT. Forensics preserved for centralized DQ."
+          fi
+
+      - name: Generate SBDB Target File
+        run: |
+          set -uo pipefail
+          set +e
+          python - << 'EOF'
+          import os
+          import sys
+          import pyarrow.parquet as pq
+
+          execution_mode = os.getenv("EXECUTION_MODE", "CURRENT_PRODUCTION")
+          raw_targets = set()
+
+          # 1 & 2: Unique NeoWs target designations
+          if os.path.exists("asteroids.parquet"):
+              try:
+                  neows_table = pq.read_table("asteroids.parquet")
+                  neows_names = neows_table.column("name").to_pylist()
+                  for name in neows_names:
+                      if name and str(name).strip():
+                          raw_targets.add(str(name).strip())
+                  print(f"Extracted {len(raw_targets)} unique target candidate(s) from NeoWs.")
+              except Exception as e:
+                  print(f"Warning: Failed reading asteroids.parquet for target generation: {e}")
+          else:
+              print("Notice: asteroids.parquet not found (ingestion failed or suppressed).")
+
+          # 3, 4, 5: Sentry priority designations (CURRENT_PRODUCTION only)
+          if execution_mode == "CURRENT_PRODUCTION":
+              if os.path.exists("fact_sentry_risk_snapshot.parquet"):
+                  try:
+                      sentry_table = pq.read_table("fact_sentry_risk_snapshot.parquet")
+                      sentry_rows = sentry_table.to_pylist()
+                      sentry_priority_added = 0
+
+                      # Rule: torino_scale_max > 0 OR palermo_scale_max > -2.0
+                      for r in sentry_rows:
+                          t_max = r.get("torino_scale_max")
+                          t_val = int(t_max) if t_max is not None else 0
+                          p_max = r.get("palermo_scale_max")
+                          p_val = float(p_max) if p_max is not None else -999.0
+                          if t_val > 0 or p_val > -2.0:
+                              des = r.get("designation") or r.get("fullname")
+                              if des and str(des).strip():
+                                  raw_targets.add(str(des).strip())
+                                  sentry_priority_added += 1
+
+                      # Rule: Top 10 by impact_probability DESC, sentry_id ASC
+                      def sentry_sort_key(r):
+                          ip = float(r.get("impact_probability") or 0.0)
+                          sid = str(r.get("sentry_id") or "")
+                          return (-ip, sid)
+
+                      sorted_sentry = sorted(sentry_rows, key=sentry_sort_key)
+                      top_10 = sorted_sentry[:10]
+                      for r in top_10:
+                          des = r.get("designation") or r.get("fullname")
+                          if des and str(des).strip():
+                              raw_targets.add(str(des).strip())
+                              sentry_priority_added += 1
+
+                      print(f"Evaluated {len(sentry_rows)} Sentry rows; priority candidates added/merged: {sentry_priority_added}")
+                  except Exception as e:
+                      print(f"Warning: Failed reading fact_sentry_risk_snapshot.parquet: {e}")
+              else:
+                  print("Notice: fact_sentry_risk_snapshot.parquet not present.")
+          else:
+              print("Historical backfill mode: Sentry catalog excluded from target generation.")
+
+          normalized_targets = []
+          seen = set()
+          for t in raw_targets:
+              clean = " ".join(t.split())
+              if clean.startswith("(") and clean.endswith(")"):
+                  clean = clean[1:-1].strip()
+              if clean and clean not in seen:
+                  seen.add(clean)
+                  normalized_targets.append(clean)
+
+          normalized_targets.sort()
+
+          with open("sbdb_targets.txt", "w", encoding="utf-8") as f:
+              for target in normalized_targets:
+                  f.write(f"{target}\n")
+
+          print(f"Generated ./sbdb_targets.txt with {len(normalized_targets)} unique target(s).")
+
+          env_file = os.getenv("GITHUB_ENV")
+          if env_file:
+              with open(env_file, "a", encoding="utf-8") as f:
+                  f.write(f"SBDB_TARGETS_COUNT={len(normalized_targets)}\n")
+          EOF
+          TARGET_GEN_EXIT=$?
+          set -e
+          if [ "$TARGET_GEN_EXIT" -ne 0 ]; then
+            echo "::warning::Target generation failed with exit code $TARGET_GEN_EXIT. Ensuring fallback empty target file."
+            touch sbdb_targets.txt
+            echo "SBDB_TARGETS_COUNT=0" >> "$GITHUB_ENV"
+          fi
+
+      - name: Ingest SBDB Batch Data
+        run: |
+          set -uo pipefail
+          set +e
+          if [ "${SBDB_TARGETS_COUNT:-0}" -eq 0 ]; then
+            echo "Notice: SBDB_TARGETS_COUNT is 0 (upstream ingestion failure or empty target candidate list)."
+            echo "Skipping live SBDB batch API query; emitting workflow diagnostic summary."
+            python - << 'EOF'
+            import json
+            import os
+            from datetime import datetime, timezone
+            summary = {
+                "summary_type": "WORKFLOW_DIAGNOSTIC_SUMMARY",
+                "execution_status": "SBDB_NOT_EXECUTED_UPSTREAM_FAILURE",
+                "producer": "workflow_orchestration",
+                "run_id": os.getenv("PIPELINE_RUN_ID", "unknown"),
+                "snapshot_key": os.getenv("RUN_DATE", datetime.now(timezone.utc).strftime("%Y-%m-%d")),
+                "snapshot_time": datetime.now(timezone.utc).isoformat(),
+                "total_targets": 0,
+                "successful_targets_count": 0,
+                "failed_targets_count": 0,
+                "successful_targets": [],
+                "failed_targets": [],
+                "failure_rate_pct": 100.0,
+                "circuit_breaker_threshold_pct": 25.0,
+                "circuit_breaker_passed": False,
+                "output_tables": [],
+                "diagnostic": "SBDB_NOT_EXECUTED_UPSTREAM_FAILURE: SBDB batch query intentionally not executed because there are zero targets due to upstream failure / target-generation failure.",
+            }
+            with open("sbdb_batch_summary.json", "w", encoding="utf-8") as f:
+                json.dump(summary, f, indent=2)
+            print("Emitted WORKFLOW_DIAGNOSTIC_SUMMARY (SBDB_NOT_EXECUTED_UPSTREAM_FAILURE) to sbdb_batch_summary.json")
+            EOF
+            SBDB_EXIT=1
+          else
+            echo "Running native SBDB batch ingestion for $SBDB_TARGETS_COUNT targets..."
+            python nasa_sbdb.py --targets-file ./sbdb_targets.txt
+            SBDB_EXIT=$?
+          fi
+          set -e
+          echo "SBDB_EXIT_CODE=$SBDB_EXIT" >> "$GITHUB_ENV"
+          if [ "$SBDB_EXIT" -ne 0 ]; then
+            echo "::warning::SBDB ingestion completed with non-zero exit code: $SBDB_EXIT. Forensics preserved for centralized DQ."
+          fi
+
+      - name: Enforce Ingestion Quality Gate
+        run: |
+          set -euo pipefail
+          echo "Executing centralized ingestion quality gate..."
+          python pipeline_dq.py check-ingestion \
+            --execution-mode "$EXECUTION_MODE" \
+            --output-file dq_ingestion.json
+
+      - name: Enforce Source Output Quality Gate
+        run: |
+          set -euo pipefail
+          echo "Executing centralized source output quality gate..."
+          python pipeline_dq.py check-outputs \
+            --execution-mode "$EXECUTION_MODE" \
+            --snapshot-date "$RUN_DATE" \
+            --start-date "$START_DATE" \
+            --end-date "$END_DATE" \
+            --output-file dq_outputs.json
+
+      - name: Execute Entity Resolution Engine
+        run: |
+          set -euo pipefail
+          mkdir -p crosswalk_out
+          if [ "$EXECUTION_MODE" = "CURRENT_PRODUCTION" ]; then
+            echo "Running full entity resolution (NeoWs + SBDB + Sentry)..."
+            python entity_resolution.py \
+              --neows-path ./asteroids.parquet \
+              --sbdb-path ./fact_sbdb_object_snapshot.parquet \
+              --sentry-path ./fact_sentry_risk_snapshot.parquet \
+              --output-dir crosswalk_out \
+              --resolution-date "$RUN_DATE"
+          else
+            echo "Running historical entity resolution (NeoWs + SBDB, no Sentry)..."
+            python entity_resolution.py \
+              --neows-path ./asteroids.parquet \
+              --sbdb-path ./fact_sbdb_object_snapshot.parquet \
+              --output-dir crosswalk_out \
+              --resolution-date "$RUN_DATE"
+          fi
+
+      - name: Enforce Crosswalk Quality Gate
+        run: |
+          set -euo pipefail
+          echo "Executing centralized crosswalk quality gate..."
+          python pipeline_dq.py check-crosswalk \
+            --bridge-file crosswalk_out/bridge_asteroid_identifier.parquet \
+            --audit-file crosswalk_out/fact_entity_resolution.parquet \
+            --output-file dq_crosswalk.json
+
+      - name: Extract Crosswalk Metadata
+        run: |
+          set -euo pipefail
+          python - << 'EOF'
+          import os
+          import sys
+          import pyarrow.parquet as pq
+
+          audit_file = "crosswalk_out/fact_entity_resolution.parquet"
+          bridge_file = "crosswalk_out/bridge_asteroid_identifier.parquet"
+
+          if not (os.path.exists(audit_file) and os.path.exists(bridge_file)):
+              print("Crosswalk outputs not found for metadata extraction.")
+              sys.exit(0)
+
+          audit_table = pq.read_table(audit_file)
+          bridge_table = pq.read_table(bridge_file)
+          audit_rows = audit_table.to_pylist()
+
+          run_ids = {r.get("resolution_run_id") for r in audit_rows if r.get("resolution_run_id")}
+          res_run_id = list(run_ids)[0] if run_ids else "unknown"
+
+          total_eval = len(audit_rows)
+          resolved_count = sum(1 for r in audit_rows if r.get("match_state") == "RESOLVED")
+          res_rate = (resolved_count / total_eval * 100.0) if total_eval > 0 else 0.0
+
+          env_file = os.getenv("GITHUB_ENV")
+          if env_file:
+              with open(env_file, "a", encoding="utf-8") as f:
+                  f.write(f"RESOLUTION_RUN_ID={res_run_id}\n")
+                  f.write(f"CROSSWALK_BRIDGE_ROWS={len(bridge_table)}\n")
+                  f.write(f"CROSSWALK_AUDIT_ROWS={total_eval}\n")
+                  f.write(f"CROSSWALK_RESOLVED_COUNT={resolved_count}\n")
+                  f.write(f"CROSSWALK_RATE_PCT={res_rate:.1f}\n")
+          EOF
+
+      - name: Publish Crosswalk to S3
+        run: |
+          set -euo pipefail
+          python - << 'EOF'
+          from datetime import datetime
+          import os
+          import sys
+          import boto3
+          from entity_resolution import upload_crosswalk_to_s3
+          from pipeline_utils import build_lineage_metadata
+
+          run_date_str = os.getenv("RUN_DATE")
+          run_id = os.getenv("RESOLUTION_RUN_ID")
+          bucket_name = os.getenv("S3_BUCKET_NAME", "nasa-asteroid-intelligence")
+          run_timestamp = os.getenv("RUN_TIMESTAMP", datetime.utcnow().isoformat())
+
+          if not run_date_str or not run_id:
+              print("Error: RUN_DATE or RESOLUTION_RUN_ID environment variable missing.", file=sys.stderr)
+              sys.exit(1)
+
+          res_date = datetime.strptime(run_date_str, "%Y-%m-%d").date()
+          metadata = build_lineage_metadata(
+              source_name="nasa_entity_resolution_engine",
+              run_id=run_id,
+              ingested_at=run_timestamp,
+          )
+
+          s3_client = boto3.client("s3")
+          bridge_s3_key, audit_s3_key = upload_crosswalk_to_s3(
+              bridge_local_path="crosswalk_out/bridge_asteroid_identifier.parquet",
+              resolution_local_path="crosswalk_out/fact_entity_resolution.parquet",
+              resolution_date=res_date,
+              bucket_name=bucket_name,
+              metadata=metadata,
+              s3_client=s3_client,
+          )
+
+          print(f"Uploaded bridge: s3://{bucket_name}/{bridge_s3_key}")
+          print(f"Uploaded audit : s3://{bucket_name}/{audit_s3_key}")
+
+          env_file = os.getenv("GITHUB_ENV")
+          if env_file:
+              with open(env_file, "a", encoding="utf-8") as f:
+                  f.write(f"BRIDGE_S3_KEY={bridge_s3_key}\n")
+                  f.write(f"AUDIT_S3_KEY={audit_s3_key}\n")
+          EOF
+
+      - name: Verify Published S3 Crosswalk
+        run: |
+          set -euo pipefail
+          python - << 'EOF'
+          import os
+          import sys
+          import boto3
+          from botocore.exceptions import ClientError
+
+          bucket_name = os.getenv("S3_BUCKET_NAME", "nasa-asteroid-intelligence")
+          bridge_s3_key = os.getenv("BRIDGE_S3_KEY")
+          audit_s3_key = os.getenv("AUDIT_S3_KEY")
+          expected_run_id = os.getenv("RESOLUTION_RUN_ID")
+
+          s3 = boto3.client("s3")
+
+          def verify_s3_object(key, label):
+              try:
+                  resp = s3.head_object(Bucket=bucket_name, Key=key)
+              except ClientError as e:
+                  print(f"Verification Failure: HeadObject failed for {label} (s3://{bucket_name}/{key}): {e}", file=sys.stderr)
+                  sys.exit(1)
+
+              content_length = resp.get("ContentLength", 0)
+              if content_length <= 0:
+                  print(f"Verification Failure: ContentLength for {label} is {content_length} <= 0", file=sys.stderr)
+                  sys.exit(1)
+
+              metadata = resp.get("Metadata", {})
+              obj_run_id = metadata.get("run_id")
+              if not obj_run_id:
+                  print(f"Verification Failure: Missing 'run_id' in S3 metadata for {label}. Metadata: {metadata}", file=sys.stderr)
+                  sys.exit(1)
+
+              if obj_run_id != expected_run_id:
+                  print(f"Verification Failure: run_id mismatch for {label}: expected '{expected_run_id}', found '{obj_run_id}'", file=sys.stderr)
+                  sys.exit(1)
+
+              print(f"Verified {label}: s3://{bucket_name}/{key} (size={content_length} bytes, run_id={obj_run_id})")
+              return content_length, obj_run_id
+
+          bridge_len, bridge_run_id = verify_s3_object(bridge_s3_key, "Bridge Parquet")
+          audit_len, audit_run_id = verify_s3_object(audit_s3_key, "Audit Parquet")
+
+          if bridge_run_id != audit_run_id:
+              print(f"Verification Failure: Bridge run_id '{bridge_run_id}' != Audit run_id '{audit_run_id}'", file=sys.stderr)
+              sys.exit(1)
+
+          print(f"Post-Publish Verification: SUCCESS (Both objects verified with matching run_id '{expected_run_id}')")
+          EOF
+
+      - name: Generate and Publish Execution Manifest
+        if: always()
+        run: |
+          python - << 'EOF'
+          import json
+          import os
+          import sys
+          from datetime import date, datetime, timezone
+          import boto3
+          from pipeline_utils import generate_run_manifest, save_run_manifest, upload_run_manifest_to_s3
+
+          pipeline_run_id = os.getenv("PIPELINE_RUN_ID", "pipe_unknown")
+          execution_mode = os.getenv("EXECUTION_MODE", "CURRENT_PRODUCTION")
+          started_at = os.getenv("RUN_TIMESTAMP", datetime.now(timezone.utc).isoformat())
+          completed_at = datetime.now(timezone.utc).isoformat()
+          run_date_str = os.getenv("RUN_DATE")
+
+          stages = {}
+
+          # 1. NeoWs stage
+          neows_sum_path = "neows_summary.json"
+          if os.path.exists(neows_sum_path):
+              try:
+                  with open(neows_sum_path, "r", encoding="utf-8") as f:
+                      n_data = json.load(f)
+                  stages["neows"] = {
+                      "status": "SUCCESS" if n_data.get("gate_passed") else "FAILED",
+                      "run_id": n_data.get("run_id"),
+                      "records_received": n_data.get("records_received", 0),
+                      "valid_records": n_data.get("valid_records", 0),
+                      "skipped_records": n_data.get("skipped_records", 0),
+                      "rejection_pct": n_data.get("rejection_pct", 0.0),
+                      "gate_passed": n_data.get("gate_passed", False),
+                  }
+              except Exception as e:
+                  stages["neows"] = {"status": "FAILED", "error": str(e)}
+          else:
+              stages["neows"] = {"status": "FAILED" if os.getenv("NEOWS_EXIT_CODE") != "0" else "SKIPPED"}
+
+          # 2. Sentry stage
+          if execution_mode == "CURRENT_PRODUCTION":
+              sentry_pq = "fact_sentry_risk_snapshot.parquet"
+              if os.path.exists(sentry_pq):
+                  try:
+                      import pyarrow.parquet as pq
+                      s_tbl = pq.read_table(sentry_pq)
+                      stages["sentry"] = {
+                          "status": "SUCCESS",
+                          "valid_records": len(s_tbl),
+                      }
+                  except Exception as e:
+                      stages["sentry"] = {"status": "FAILED", "error": str(e)}
+              else:
+                  stages["sentry"] = {"status": "FAILED" if os.getenv("SENTRY_EXIT_CODE") != "0" else "SKIPPED"}
+          else:
+              stages["sentry"] = None
+
+          # 3. SBDB stage
+          sbdb_sum_path = "sbdb_batch_summary.json"
+          if os.path.exists(sbdb_sum_path):
+              try:
+                  with open(sbdb_sum_path, "r", encoding="utf-8") as f:
+                      s_data = json.load(f)
+                  exec_status = s_data.get("execution_status")
+                  summary_type = s_data.get("summary_type")
+                  stages["sbdb"] = {
+                      "status": "SUCCESS" if s_data.get("circuit_breaker_passed") else "FAILED",
+                      "execution_status": exec_status or ("EXECUTED" if s_data.get("circuit_breaker_passed") else "FAILED"),
+                      "summary_type": summary_type or "REAL_SBDB_SUMMARY",
+                      "run_id": s_data.get("run_id"),
+                      "total_targets": s_data.get("total_targets", 0),
+                      "successful_targets_count": s_data.get("successful_targets_count", 0),
+                      "failed_targets_count": s_data.get("failed_targets_count", 0),
+                      "failure_rate_pct": s_data.get("failure_rate_pct", 0.0),
+                      "circuit_breaker_passed": s_data.get("circuit_breaker_passed", False),
+                  }
+              except Exception as e:
+                  stages["sbdb"] = {"status": "FAILED", "error": str(e)}
+          else:
+              stages["sbdb"] = {"status": "FAILED" if os.getenv("SBDB_EXIT_CODE") != "0" else "SKIPPED"}
+
+          # 4. DQ stages (tolerant of missing files if stage never ran)
+          for dq_key, dq_file in [
+              ("dq_ingestion", "dq_ingestion.json"),
+              ("dq_outputs", "dq_outputs.json"),
+              ("dq_crosswalk", "dq_crosswalk.json"),
+          ]:
+              if os.path.exists(dq_file):
+                  try:
+                      with open(dq_file, "r", encoding="utf-8") as f:
+                          dq_data = json.load(f)
+                      stages[dq_key] = {
+                          "status": "SUCCESS" if dq_data.get("overall_status") in ("PASSED", "WARNING") else "FAILED",
+                          "overall_status": dq_data.get("overall_status"),
+                          "summary": dq_data.get("summary"),
+                      }
+                  except Exception as e:
+                      stages[dq_key] = {"status": "FAILED", "error": str(e)}
+              else:
+                  stages[dq_key] = {"status": "NOT_RUN"}
+
+          # 5. Entity resolution stage
+          res_run_id = os.getenv("RESOLUTION_RUN_ID")
+          if res_run_id:
+              stages["entity_resolution"] = {
+                  "status": "SUCCESS",
+                  "resolution_run_id": res_run_id,
+                  "bridge_rows": int(os.getenv("CROSSWALK_BRIDGE_ROWS", "0")),
+                  "audit_rows": int(os.getenv("CROSSWALK_AUDIT_ROWS", "0")),
+                  "resolved_count": int(os.getenv("CROSSWALK_RESOLVED_COUNT", "0")),
+                  "resolution_rate_pct": float(os.getenv("CROSSWALK_RATE_PCT", "0.0")),
+              }
+          else:
+              stages["entity_resolution"] = {"status": "NOT_RUN"}
+
+          # 6. S3 crosswalk publication stage
+          bridge_s3_key = os.getenv("BRIDGE_S3_KEY")
+          audit_s3_key = os.getenv("AUDIT_S3_KEY")
+          published_keys = []
+          if bridge_s3_key:
+              published_keys.append(bridge_s3_key)
+          if audit_s3_key:
+              published_keys.append(audit_s3_key)
+
+          if bridge_s3_key and audit_s3_key:
+              stages["s3_crosswalk_publish"] = {
+                  "status": "SUCCESS",
+                  "bridge_s3_key": bridge_s3_key,
+                  "audit_s3_key": audit_s3_key,
+              }
+          else:
+              stages["s3_crosswalk_publish"] = {"status": "NOT_RUN"}
+
+          # Workflow metadata
+          wf_meta = {
+              "github_run_id": os.getenv("GITHUB_RUN_ID"),
+              "github_run_number": os.getenv("GITHUB_RUN_NUMBER"),
+              "github_sha": os.getenv("GITHUB_SHA"),
+              "github_actor": os.getenv("GITHUB_ACTOR"),
+              "github_workflow": os.getenv("GITHUB_WORKFLOW"),
+              "start_date": os.getenv("START_DATE"),
+              "end_date": os.getenv("END_DATE"),
+          }
+
+          manifest = generate_run_manifest(
+              pipeline_run_id=pipeline_run_id,
+              execution_mode=execution_mode,
+              started_at=started_at,
+              completed_at=completed_at,
+              workflow_metadata=wf_meta,
+              stages=stages,
+              published_s3_keys=published_keys,
+              run_date=run_date_str,
+          )
+
+          local_manifest_path = save_run_manifest(manifest, "run_manifest.json")
+          print(f"Saved local manifest: {local_manifest_path}")
+
+          # Attempt upload to S3 if AWS credentials available
+          bucket_name = os.getenv("S3_BUCKET_NAME", "nasa-asteroid-intelligence")
+          aws_key = os.getenv("AWS_ACCESS_KEY_ID")
+          aws_secret = os.getenv("AWS_SECRET_ACCESS_KEY")
+
+          if aws_key and aws_secret:
+              try:
+                  s3_key = upload_run_manifest_to_s3(manifest, local_manifest_path, bucket_name=bucket_name)
+                  print(f"Uploaded run manifest to s3://{bucket_name}/{s3_key}")
+                  env_file = os.getenv("GITHUB_ENV")
+                  if env_file:
+                      with open(env_file, "a", encoding="utf-8") as f:
+                          f.write(f"MANIFEST_S3_KEY={s3_key}\n")
+                          f.write(f"MANIFEST_OVERALL_STATUS={manifest['overall_status']}\n")
+              except Exception as e:
+                  print(f"Warning: S3 upload of run manifest failed: {e}", file=sys.stderr)
+          else:
+              print("AWS credentials not configured; skipped S3 upload of run manifest.")
+          EOF
+
+      - name: Emit GitHub Step Summary
+        if: always()
+        run: |
+          python - << 'EOF'
+          import json
+          import os
+          import sys
+
+          summary_file = os.getenv("GITHUB_STEP_SUMMARY")
+          if not summary_file:
+              print("GITHUB_STEP_SUMMARY not set.")
+              sys.exit(0)
+
+          pipeline_run_id = os.getenv("PIPELINE_RUN_ID", "pipe_unknown")
+          mode = os.getenv("EXECUTION_MODE", "UNKNOWN")
+          run_date = os.getenv("RUN_DATE", "UNKNOWN")
+          run_time = os.getenv("RUN_TIMESTAMP", "UNKNOWN")
+          start_date = os.getenv("START_DATE", "UNKNOWN")
+          end_date = os.getenv("END_DATE", "UNKNOWN")
+          manifest_status = os.getenv("MANIFEST_OVERALL_STATUS", "UNKNOWN")
+          manifest_s3_key = os.getenv("MANIFEST_S3_KEY", "NOT_PUBLISHED")
+
+          # Read NeoWs summary if available
+          neows_received = "0"
+          neows_valid = "0"
+          neows_rej_pct = "0.0"
+          if os.path.exists("neows_summary.json"):
+              try:
+                  with open("neows_summary.json", "r", encoding="utf-8") as f:
+                      nd = json.load(f)
+                      neows_received = str(nd.get("records_received", 0))
+                      neows_valid = str(nd.get("valid_records", 0))
+                      neows_rej_pct = f"{nd.get('rejection_pct', 0.0):.1f}"
+              except Exception:
+                  pass
+
+          # Sentry
+          sentry_valid = "N/A (Historical Mode)"
+          if mode == "CURRENT_PRODUCTION":
+              if os.path.exists("fact_sentry_risk_snapshot.parquet"):
+                  try:
+                      import pyarrow.parquet as pq
+                      sentry_valid = str(len(pq.read_table("fact_sentry_risk_snapshot.parquet")))
+                  except Exception:
+                      sentry_valid = "0"
+              else:
+                  sentry_valid = "0 (Failed/Omitted)"
+
+          # SBDB
+          sbdb_requested = 0
+          sbdb_succeeded = 0
+          sbdb_fail_pct = 0.0
+          sbdb_diag_status = None
+          if os.path.exists("sbdb_batch_summary.json"):
+              try:
+                  with open("sbdb_batch_summary.json", "r", encoding="utf-8") as f:
+                      sd = json.load(f)
+                      exec_status = sd.get("execution_status")
+                      if exec_status == "SBDB_NOT_EXECUTED_UPSTREAM_FAILURE":
+                          sbdb_diag_status = "SBDB_NOT_EXECUTED_UPSTREAM_FAILURE"
+                      else:
+                          sbdb_requested = sd.get("total_targets", 0)
+                          sbdb_succeeded = sd.get("successful_targets_count", 0)
+                          sbdb_fail_pct = sd.get("failure_rate_pct", 0.0)
+              except Exception:
+                  pass
+
+          # DQ Gate Statuses
+          def get_dq_status(filename):
+              if os.path.exists(filename):
+                  try:
+                      with open(filename, "r", encoding="utf-8") as f:
+                          return json.load(f).get("overall_status", "UNKNOWN")
+                  except Exception:
+                      return "READ_ERROR"
+              return "NOT_RUN"
+
+          dq_ingest_status = get_dq_status("dq_ingestion.json")
+          dq_output_status = get_dq_status("dq_outputs.json")
+          dq_crosswalk_status = get_dq_status("dq_crosswalk.json")
+
+          res_run_id = os.getenv("RESOLUTION_RUN_ID", "NOT_RUN")
+          bridge_rows = os.getenv("CROSSWALK_BRIDGE_ROWS", "0")
+          audit_rows = os.getenv("CROSSWALK_AUDIT_ROWS", "0")
+          res_count = os.getenv("CROSSWALK_RESOLVED_COUNT", "0")
+          res_rate = os.getenv("CROSSWALK_RATE_PCT", "0.0")
+
+          bucket = os.getenv("S3_BUCKET_NAME", "nasa-asteroid-intelligence")
+          bridge_key = os.getenv("BRIDGE_S3_KEY", "NOT_PUBLISHED")
+          audit_key = os.getenv("AUDIT_S3_KEY", "NOT_PUBLISHED")
+
+          if sbdb_diag_status:
+              sbdb_row = "| **SBDB** | Batch Query | 0 (Upstream Failure) | 0 (Not Executed) | `SBDB_NOT_EXECUTED_UPSTREAM_FAILURE` |"
+          else:
+              sbdb_row = f"| **SBDB** | Batch Query | {sbdb_requested} requested | {sbdb_succeeded} succeeded | {sbdb_fail_pct:.1f}% |"
+
+          report = (
+              "# NASA Asteroid Intelligence Platform — Pipeline Execution Summary\n\n"
+              f"**Pipeline Run ID**: `{pipeline_run_id}`\n"
+              f"**Overall Status**: `{manifest_status}`\n"
+              f"**Run Timestamp (UTC)**: `{run_time}`\n"
+              f"**Execution Mode**: `{mode}`\n"
+              f"**Window**: `{start_date}` to `{end_date}`\n\n"
+              "---\n\n"
+              "### Operational Data Quality Gates\n\n"
+              "| Quality Gate | Stage | Status |\n"
+              "| :--- | :--- | :--- |\n"
+              f"| Ingestion Lineage & Gate | Source Ingestion | `{dq_ingest_status}` |\n"
+              f"| Pre-Resolution Output Gate | Data Warehouse Outputs | `{dq_output_status}` |\n"
+              f"| Crosswalk Invariant Gate | Entity Resolution | `{dq_crosswalk_status}` |\n\n"
+              "---\n\n"
+              "### Ingestion Metrics\n\n"
+              "| Source | Mode | Records Received | Records Valid | Rejection / Failure Rate |\n"
+              "| :--- | :--- | :--- | :--- | :--- |\n"
+              f"| **NeoWs** | Feed API | {neows_received} | {neows_valid} | {neows_rej_pct}% |\n"
+              f"| **Sentry** | Mode S | {'N/A' if mode != 'CURRENT_PRODUCTION' else 'Catalog'} | {sentry_valid} | {'N/A' if mode != 'CURRENT_PRODUCTION' else '0.0%'} |\n"
+              f"{sbdb_row}\n\n"
+              "---\n\n"
+              "### Multi-Source Entity Resolution\n\n"
+              f"- **Resolution Run ID**: `{res_run_id}`\n"
+              f"- **Total Evaluated Identifiers**: `{audit_rows}`\n"
+              f"- **Successfully Resolved Identifiers**: `{res_count}` (`{res_rate}%`)\n"
+              f"- **Emitted Bridge Records**: `{bridge_rows}`\n\n"
+              "---\n\n"
+              "### S3 Publication & Manifest Lineage\n\n"
+              f"- **Execution Manifest**: `s3://{bucket}/{manifest_s3_key}`\n"
+              f"- **Bridge S3 Key**: `s3://{bucket}/{bridge_key}`\n"
+              f"- **Audit S3 Key**: `s3://{bucket}/{audit_key}`\n"
+          )
+
+          with open(summary_file, "a", encoding="utf-8") as f:
+              f.write(report)
+
+          print("Step summary written successfully.")
+          EOF

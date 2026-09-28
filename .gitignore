@@ -5,3 +5,10 @@ __pycache__/
 *.db
 *.parquet
 asteroids_raw.json
+*_summary.json
+sbdb_raw_*.json
+sentry_risk_snapshot_raw.json
+dq_*.json
+run_manifest.json
+sbdb_targets.txt
+crosswalk_out/

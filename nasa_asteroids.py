@@ -12,6 +12,7 @@ from datetime import date, datetime, timedelta, timezone
 import boto3
 from botocore.exceptions import BotoCoreError, ClientError
 import pyarrow as pa
+import pyarrow.parquet as pq
 import requests
 from dotenv import load_dotenv
 
@@ -289,8 +290,21 @@ def upload_processed_to_s3(start_date=None, metadata=None):
         )
         raise
 
-def save_to_parquet(asteroid_data, filename="asteroids.parquet"):
-    write_parquet(asteroid_data, schema=ASTEROID_SCHEMA, output_path=filename, compression="snappy")
+def save_neows_summary(summary_data, filename="neows_summary.json"):
+    """Save authoritative NeoWs ingestion summary as deterministic JSON."""
+    with open(filename, "w", encoding="utf-8") as f:
+        json.dump(summary_data, f, indent=4)
+
+
+def save_to_parquet(asteroid_data, filename="asteroids.parquet", run_id=None):
+    if run_id:
+        table = pa.Table.from_pylist(asteroid_data, schema=ASTEROID_SCHEMA)
+        existing_meta = table.schema.metadata or {}
+        existing_meta[b"run_id"] = str(run_id).encode("utf-8")
+        table = table.replace_schema_metadata(existing_meta)
+        pq.write_table(table, filename, compression="snappy")
+    else:
+        write_parquet(asteroid_data, schema=ASTEROID_SCHEMA, output_path=filename, compression="snappy")
 
 def save_to_csv(asteroid_data, filename="asteroids.csv"):
     with open(filename, "w", newline="", encoding="utf-8") as file:
@@ -328,10 +342,16 @@ def parse_args():
         help="End date for NASA feed (YYYY-MM-DD). Default: start_date + 6 days",
         default=None
     )
+    parser.add_argument(
+        "--summary-file",
+        type=str,
+        help="Path for authoritative NeoWs summary JSON. Default: neows_summary.json",
+        default="neows_summary.json"
+    )
     return parser.parse_args()
 
 
-def main(start_date_str=None, end_date_str=None):
+def main(start_date_str=None, end_date_str=None, summary_filename="neows_summary.json"):
     start_time = time.perf_counter()
     run_id = uuid.uuid4().hex[:12]
     main.current_run_id = run_id
@@ -393,15 +413,43 @@ def main(start_date_str=None, end_date_str=None):
 
     asteroid_data, skipped_records, records_received = extract_asteroids(data)
     records_valid = len(asteroid_data)
-    rejection_pct = (skipped_records / records_received * 100) if records_received > 0 else 0.0
+    rejection_pct = (skipped_records / records_received * 100.0) if records_received > 0 else 0.0
+    gate_passed = (records_valid > 0) and (rejection_pct < 20.0)
+
+    summary_data = {
+        "run_id": run_id,
+        "start_date": resolved_start.strftime("%Y-%m-%d"),
+        "end_date": resolved_end.strftime("%Y-%m-%d"),
+        "records_received": records_received,
+        "valid_records": records_valid,
+        "skipped_records": skipped_records,
+        "rejection_pct": round(rejection_pct, 2),
+        "rejection_threshold_pct": 20.0,
+        "gate_passed": gate_passed,
+        "created_at": datetime.now(timezone.utc).isoformat(),
+    }
+
+    try:
+        save_neows_summary(summary_data, filename=summary_filename)
+        logger.info("[%s] Saved NeoWs execution summary to %s", run_id, summary_filename)
+    except Exception as e:
+        logger.error(
+            "[%s] Failed to write NeoWs authoritative summary to %s: %s. "
+            "Halting pipeline to prevent unmonitored production output.",
+            run_id,
+            summary_filename,
+            e,
+        )
+        return 1
 
     logger.info(
-        "[%s] Extraction summary: received=%d, valid=%d, skipped=%d, rejection=%.1f%%",
+        "[%s] Extraction summary: received=%d, valid=%d, skipped=%d, rejection=%.1f%%, gate_passed=%s",
         run_id,
         records_received,
         records_valid,
         skipped_records,
-        rejection_pct
+        rejection_pct,
+        gate_passed,
     )
 
     if rejection_pct > 20.0:
@@ -410,26 +458,23 @@ def main(start_date_str=None, end_date_str=None):
             run_id,
             rejection_pct,
             skipped_records,
-            records_received
+            records_received,
         )
 
-    if records_valid == 0:
+    if not gate_passed:
         logger.error(
-            "[%s] Data quality failure: 0 valid asteroid records produced "
-            "(received: %d, valid: %d, skipped: %d, rejection: %.1f%%). "
-            "Halting pipeline to prevent uploading empty dataset to S3.",
+            "[%s] NeoWs Data Quality Gate Failure: valid_records=%d, rejection_pct=%.1f%% (threshold < 20.0%%). "
+            "Halting pipeline before CSV, Parquet, SQLite, or S3 outputs.",
             run_id,
-            records_received,
             records_valid,
-            skipped_records,
-            rejection_pct
+            rejection_pct,
         )
         return 1
 
     logger.info("[%s] Saving asteroid data to CSV and Parquet", run_id)
 
     save_to_csv(asteroid_data)
-    save_to_parquet(asteroid_data)
+    save_to_parquet(asteroid_data, run_id=run_id)
 
     load_data(asteroid_data)
     logger.info("[%s] Loaded %d valid records into SQLite database (%s)", run_id, records_valid, DB_PATH)
@@ -454,7 +499,8 @@ if __name__ == "__main__":
     try:
         exit_code = main(
             start_date_str=args.start_date,
-            end_date_str=args.end_date
+            end_date_str=args.end_date,
+            summary_filename=args.summary_file,
         )
         sys.exit(exit_code or 0)
 

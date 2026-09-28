@@ -294,7 +294,63 @@ class LocalDuckDBDataProvider:
 
         conn = self._get_connection()
 
-        # Step 1: Check bridge_asteroid_identifier
+        # Step 1: Check fact_entity_resolution audit table (Authoritative Lineage)
+        if self._resolution_file.exists():
+            res_path = str(self._resolution_file).replace("\\", "/")
+            res_rows = conn.execute(
+                f"""
+                SELECT match_state, assigned_asteroid_key, match_rule, evidence_json, resolved_at
+                FROM '{res_path}'
+                WHERE source_system = 'neows'
+                  AND identifier_name = 'id'
+                  AND source_identifier_value = ?
+                ORDER BY resolved_at DESC
+                LIMIT 1
+                """,
+                [clean_id],
+            ).fetchall()
+
+            if res_rows:
+                state, assigned_key, rule, evidence, resolved_at = res_rows[0]
+                conn.close()
+                if state == "RESOLVED" and assigned_key:
+                    return {
+                        "neows_id": clean_id,
+                        "match_state": "RESOLVED",
+                        "asteroid_key": assigned_key,
+                        "match_rule": rule,
+                        "evidence": evidence or "Resolved via entity resolution audit log.",
+                        "resolved_at": str(resolved_at) if resolved_at else None,
+                    }
+                elif state == "AMBIGUOUS":
+                    return {
+                        "neows_id": clean_id,
+                        "match_state": "AMBIGUOUS",
+                        "asteroid_key": None,
+                        "match_rule": rule,
+                        "evidence": evidence or "Ambiguous multi-source match detected in audit log.",
+                        "resolved_at": str(resolved_at) if resolved_at else None,
+                    }
+                elif state == "INVALID":
+                    return {
+                        "neows_id": clean_id,
+                        "match_state": "INVALID",
+                        "asteroid_key": None,
+                        "match_rule": rule,
+                        "evidence": evidence or "Identifier evaluated as invalid in audit log.",
+                        "resolved_at": str(resolved_at) if resolved_at else None,
+                    }
+                else:
+                    return {
+                        "neows_id": clean_id,
+                        "match_state": "UNRESOLVED",
+                        "asteroid_key": None,
+                        "match_rule": rule or "NO_CROSS_SOURCE_MATCH",
+                        "evidence": evidence or "No cross-source link established in entity resolution catalog.",
+                        "resolved_at": str(resolved_at) if resolved_at else None,
+                    }
+
+        # Step 2: Fallback to bridge_asteroid_identifier index only if no audit record exists
         if self._bridge_file.exists():
             bridge_path = str(self._bridge_file).replace("\\", "/")
             bridge_rows = conn.execute(
@@ -316,7 +372,8 @@ class LocalDuckDBDataProvider:
                     "match_state": "RESOLVED",
                     "asteroid_key": key,
                     "match_rule": "BRIDGE_EXACT_NEOWS_ID",
-                    "evidence": "Deterministic exact match in canonical entity bridge.",
+                    "evidence": "Deterministic exact match in canonical entity bridge fallback.",
+                    "resolved_at": None,
                 }
             elif len(bridge_rows) > 1:
                 conn.close()
@@ -325,60 +382,9 @@ class LocalDuckDBDataProvider:
                     "match_state": "AMBIGUOUS",
                     "asteroid_key": None,
                     "match_rule": "BRIDGE_MULTIPLE_CANDIDATE_KEYS",
-                    "evidence": f"Identifier maps to {len(bridge_rows)} distinct candidate entity keys in bridge.",
+                    "evidence": f"Identifier maps to {len(bridge_rows)} distinct candidate entity keys in bridge fallback.",
+                    "resolved_at": None,
                 }
-
-        # Step 2: Check fact_entity_resolution audit table
-        if self._resolution_file.exists():
-            res_path = str(self._resolution_file).replace("\\", "/")
-            res_rows = conn.execute(
-                f"""
-                SELECT match_state, assigned_asteroid_key, match_rule, evidence_json
-                FROM '{res_path}'
-                WHERE source_system = 'neows'
-                  AND identifier_name = 'id'
-                  AND source_identifier_value = ?
-                ORDER BY resolved_at DESC
-                LIMIT 1
-                """,
-                [clean_id],
-            ).fetchall()
-
-            if res_rows:
-                state, assigned_key, rule, evidence = res_rows[0]
-                conn.close()
-                if state == "RESOLVED" and assigned_key:
-                    return {
-                        "neows_id": clean_id,
-                        "match_state": "RESOLVED",
-                        "asteroid_key": assigned_key,
-                        "match_rule": rule,
-                        "evidence": evidence or "Resolved via entity resolution audit log.",
-                    }
-                elif state == "AMBIGUOUS":
-                    return {
-                        "neows_id": clean_id,
-                        "match_state": "AMBIGUOUS",
-                        "asteroid_key": None,
-                        "match_rule": rule,
-                        "evidence": evidence or "Ambiguous multi-source match detected in audit log.",
-                    }
-                elif state == "INVALID":
-                    return {
-                        "neows_id": clean_id,
-                        "match_state": "INVALID",
-                        "asteroid_key": None,
-                        "match_rule": rule,
-                        "evidence": evidence or "Identifier evaluated as invalid in audit log.",
-                    }
-                else:
-                    return {
-                        "neows_id": clean_id,
-                        "match_state": "UNRESOLVED",
-                        "asteroid_key": None,
-                        "match_rule": rule or "NO_CROSS_SOURCE_MATCH",
-                        "evidence": "No cross-source link established in entity resolution catalog.",
-                    }
 
         conn.close()
         return {
@@ -387,6 +393,7 @@ class LocalDuckDBDataProvider:
             "asteroid_key": None,
             "match_rule": "NO_RESOLUTION_RECORD",
             "evidence": "No crosswalk record found for this NeoWs identifier.",
+            "resolved_at": None,
         }
 
     def get_sbdb_profile(self, asteroid_key: str | None) -> dict[str, Any] | None:
