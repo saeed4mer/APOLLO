@@ -2,7 +2,7 @@
 
 An end-to-end planetary defense data engineering platform that ingests, validates, characterizes, resolves, and tracks Near-Earth Objects (NEOs) across multiple distinct NASA/JPL astronomical data sources. The platform unifies operational close approaches, long-term impact monitoring, and Keplerian orbital characterizations into an analytics-ready Amazon S3 lakehouse, Amazon Athena serverless SQL intelligence views, and an interactive Streamlit intelligence dossier.
 
-![Tests](https://img.shields.io/badge/tests-286%20passed-brightgreen)
+![Tests](https://img.shields.io/badge/tests-470%20passed-brightgreen)
 ![Python](https://img.shields.io/badge/python-3.11-blue)
 ![CI](https://img.shields.io/badge/CI-GitHub%20Actions-informational)
 ![Code Style](https://img.shields.io/badge/code%20style-ruff-000000.svg)
@@ -17,6 +17,7 @@ An end-to-end planetary defense data engineering platform that ingests, validate
 - [Core Architectural Principles](#core-architectural-principles)
 - [Analytical Intelligence Layer](#analytical-intelligence-layer)
 - [Interactive Streamlit Dossier](#interactive-streamlit-dossier)
+- [FastAPI Data Serving Layer](#fastapi-data-serving-layer)
 - [Production Orchestration](#production-orchestration)
 - [Historical Backfill Semantics](#historical-backfill-semantics)
 - [Data Quality & Reliability Gates](#data-quality--reliability-gates)
@@ -261,6 +262,152 @@ streamlit run dashboard.py
 
 ---
 
+## FastAPI Data Serving Layer
+
+The platform includes a dedicated, production-grade REST data serving layer implemented with **FastAPI** and **Uvicorn** located in [`api/`](api/).
+
+### 1. Purpose & Role
+The FastAPI serving layer exposes the unified multi-source intelligence produced by Milestones 1–5 through a stable, decoupled HTTP interface for downstream analytical consumers, particularly the upcoming **Milestone 7 API-driven dashboard**.
+
+> **Important Boundary:** The serving layer is strictly a data presentation and access boundary. It does **not** replace or re-implement any underlying ingestion pipelines (`nasa_asteroids.py`, `nasa_sentry.py`, `nasa_sbdb.py`), deterministic entity resolution (`entity_resolution.py`), historical risk calculation (`historical_risk.py`), or data quality enforcement (`pipeline_dq.py`). All analytical truths remain rooted in the authoritative Lakehouse assets.
+
+### 2. Architecture & Delegation
+The API decouples HTTP request handling from Lakehouse storage engines by delegating all data queries through the existing `DashboardDataProvider` facade:
+
+```
+NASA / External Observational Telemetry
+                   │
+                   ▼
+  Ingestion, Validation & Raw Forensics (M1-M5)
+                   │
+                   ▼
+  Lakehouse Storage (PyArrow Parquet Layer)
+                   │
+                   ▼
+  DashboardDataProvider (Unified Facade)
+         ├── LocalDuckDBDataProvider (Active Local Lakehouse)
+         └── AthenaDataProvider (Future Serverless Lakehouse)
+                   │
+                   ▼
+  FastAPI Serving Layer (api/service.py & api/routes/)
+         ├── Strict Pydantic v2 Schema Enforcement (extra="forbid")
+         ├── Canonical Identity Chain & Positive ID Validation
+         └── Uniform Error Envelope Standardization
+                   │
+                   ▼
+  HTTP Downstream Consumers / Milestone 7 Dashboard
+```
+
+API routes never read Parquet files directly from disk, never execute ad-hoc SQL, and never contact external NASA/JPL/AWS endpoints.
+
+### 3. Local Startup
+The API is designed for local-first operational serving. Start the server using Uvicorn:
+
+```bash
+uvicorn api.main:app --host 127.0.0.1 --port 8000 --reload
+```
+
+Alternatively, launch via the direct Python module entry point:
+```bash
+python -m api.main
+```
+
+Once running, interactive API documentation is available at:
+- **Swagger UI:** `http://127.0.0.1:8000/docs`
+- **ReDoc UI:** `http://127.0.0.1:8000/redoc`
+- **OpenAPI Schema:** `http://127.0.0.1:8000/openapi.json`
+
+### 4. API Endpoint Inventory
+
+The serving layer provides exactly seven public endpoints:
+
+| Method | Endpoint | Description | Query / Path Parameters | Response Shape / Data Grain |
+|---|---|---|---|---|
+| `GET` | `/health` | Lakehouse storage and DuckDB readiness probe | None | Readiness status, Parquet asset verification, DuckDB engine probe |
+| `GET` | `/asteroids` | Paginated, filterable threat watchlist | `limit` (1–500, def: 50), `offset` (≥0, def: 0), `is_potentially_hazardous_asteroid`, `has_sentry_monitoring`, `min_approach_date`, `max_approach_date` | `meta`, `pagination` (total, limit, offset, returned), `data` (list of close-approach events) |
+| `GET` | `/asteroids/{neows_id}` | Primary encounter object dossier + canonical identity state | `neows_id` (positive integer string `^[1-9]\d*$`) | `meta`, `data` (encounter dossier), `resolution` (`ResolutionEnvelope`) |
+| `GET` | `/asteroids/{neows_id}/sbdb` | Authoritative JPL SBDB physical parameters and Keplerian elements | `neows_id` (positive integer string `^[1-9]\d*$`) | `meta`, `data` (`SbdbProfile` or `null`), `resolution` (`ResolutionEnvelope`) |
+| `GET` | `/asteroids/{neows_id}/sentry` | Authoritative JPL Sentry impact risk profile | `neows_id` (positive integer string `^[1-9]\d*$`) | `meta`, `data` (`SentryProfile` or `null`), `resolution` (`ResolutionEnvelope`) |
+| `GET` | `/asteroids/{neows_id}/history` | Longitudinal Sentry risk history across catalog snapshots | `neows_id` (positive integer string `^[1-9]\d*$`) | `meta`, `data` (list of snapshots, `[]`, or `null`), `resolution` (`HistoryResolutionEnvelope`) |
+| `GET` | `/asteroids/{neows_id}/crosswalk` | Multi-source identifier mappings from resolution bridge | `neows_id` (positive integer string `^[1-9]\d*$`) | `meta`, `data` (list of identifier records or `[]`), `resolution` (`ResolutionEnvelope`) |
+
+### 5. HTTP Error Semantics
+All error responses adhere to a consistent machine-readable envelope:
+```json
+{
+  "meta": {
+    "api_version": "1.0.0",
+    "execution_mode": "LOCAL (DUCKDB / PARQUET LAKEHOUSE)",
+    "timestamp": "2026-09-29T23:00:00+00:00"
+  },
+  "error": {
+    "code": "TARGET_NOT_FOUND",
+    "message": "Asteroid with NeoWs ID 99999999 not found in telemetry"
+  }
+}
+```
+
+Standard HTTP status mappings:
+- **`HTTP 422 Unprocessable Entity`:** Path or query schema validation failure (e.g. non-positive integer paths such as `/asteroids/0`, `/asteroids/-1`, `/asteroids/abc`, or query parameter bound violations).
+- **`HTTP 404 Not Found`:** Syntactically valid positive integer NeoWs ID that does not exist in Lakehouse telemetry (`error.code = TARGET_NOT_FOUND`).
+- **`HTTP 200 OK`:** Syntactically valid and existing NeoWs object, **including** objects whose resolution state is `UNRESOLVED` or `AMBIGUOUS`. Domain resolution state is not an HTTP failure.
+- **`HTTP 503 Service Unavailable`:** Critical backend storage Parquet file missing or DuckDB query engine failure.
+- **`HTTP 500 Internal Server Error`:** Unhandled application failure.
+
+### 6. Entity Resolution Semantics
+Every asteroid-specific endpoint exposes an authoritative resolution envelope:
+- **`RESOLVED`:** Authoritative cross-catalog linkage established (`match_state = "RESOLVED"`). Contains the internal canonical `asteroid_key` (e.g. `ast_b8259bf1-e6e5-5059-853e-9434274cdf2c`), rule name, and match evidence. Child provider queries are executed with this authoritative key.
+- **`UNRESOLVED`:** Asteroid exists in NeoWs telemetry, but no authoritative linkage exists to SBDB or Sentry (`match_state = "UNRESOLVED"`, `asteroid_key = null`). Sub-resource queries are short-circuited and return `null` (or `[]` for crosswalk).
+- **`AMBIGUOUS`:** Telemetry matches multiple conflicting candidate entities (`match_state = "AMBIGUOUS"`, `asteroid_key = null`). Ambiguity evidence is preserved in `evidence`. The API never selects an arbitrary candidate key.
+
+### 7. Null vs. Empty Collection Semantics
+The API enforces strict semantic consistency across collections and optional linked sub-resources:
+- **`data: []` (Empty Array):** Indicates that the collection exists for this domain entity, but contains zero records:
+  - `GET /asteroids?limit=50&offset=1000` $\rightarrow$ `data: []`
+  - `GET /asteroids/{id}/crosswalk` (when entity is `UNRESOLVED` or has 0 bridge records) $\rightarrow$ `data: []`
+  - `GET /asteroids/{id}/history` (when entity is monitored in Sentry but has zero historical snapshots) $\rightarrow$ `data: []`
+- **`data: null` (JSON Null):** Indicates that the linked sub-resource or profile cannot be established because identity is missing, ambiguous, or unmonitored:
+  - `GET /asteroids/{id}/sbdb` (when `UNRESOLVED` or `AMBIGUOUS`) $\rightarrow$ `data: null`
+  - `GET /asteroids/{id}/sentry` (when `UNRESOLVED`, `AMBIGUOUS`, or unmonitored) $\rightarrow$ `data: null`
+  - `GET /asteroids/{id}/history` (when `UNRESOLVED`, `AMBIGUOUS`, or unmonitored) $\rightarrow$ `data: null`
+
+### 8. Watchlist Pagination
+The `GET /asteroids` endpoint supports bounded offset-based pagination:
+- `limit`: Number of records to return (Default: `50`, Minimum: `1`, Maximum: `500`).
+- `offset`: Starting index of records to return (Default: `0`, Minimum: `0`).
+- Response metadata:
+  ```json
+  "pagination": {
+    "total": 35,
+    "limit": 50,
+    "offset": 0,
+    "returned": 35
+  }
+  ```
+  `total` reflects the filtered record count across the entire Lakehouse dataset prior to pagination slicing.
+
+### 9. Canonical Acceptance Verification Objects
+The API contract is deterministically validated against two canonical objects:
+1. **2010 TW54 (NeoWs ID: `3548666`):**
+   - **Resolution State:** `RESOLVED`
+   - **Canonical Key:** `ast_b8259bf1-e6e5-5059-853e-9434274cdf2c`
+   - **SBDB:** Populated orbital and physical parameter profile.
+   - **Sentry:** Populated impact risk profile (`sentry_id = bK10T54W`).
+   - **History:** Populated snapshot trajectory (`data: list[SentryHistoryRecord]`).
+   - **Crosswalk:** Populated multi-source bridge records across `neows`, `sbdb`, and `sentry` (`data: list[CrosswalkRecord]`).
+2. **1998 FF14 (NeoWs ID: `2523934`):**
+   - **Resolution State:** `UNRESOLVED`
+   - **Canonical Key:** `null`
+   - **SBDB / Sentry / History:** `data: null` (unlinked profile cannot be established).
+   - **Crosswalk:** `data: []` (empty identifier mappings, no fabricated keys).
+
+### 10. Security & Runtime Isolation Caveat
+- **Local-First Boundary:** Milestone 6 establishes a clean local-first serving foundation.
+- **Zero Authentication / Rate Limiting:** The API is designed for internal network or container boundaries; no public authentication or token validation is implemented in this milestone.
+- **Zero In-Memory Caching:** Responses are deterministically derived from Lakehouse storage queries via `DashboardDataProvider` on every request, ensuring cache coherence across pipeline updates.
+
+---
+
 ## Production Orchestration
 
 Automated production orchestration is implemented in [`.github/workflows/scheduled_pipeline.yml`](.github/workflows/scheduled_pipeline.yml).
@@ -427,6 +574,14 @@ NASA-Intelligence-Platform/
 ├── pipeline_utils.py                        # Reusable HTTP, S3, PyArrow & redaction utils
 ├── pipeline_dq.py                           # Centralized operational data quality engine & CLI
 │
+├── api/                                     # M6 FastAPI REST data serving layer
+│   ├── main.py                              # Application factory & ASGI entry point
+│   ├── schemas.py                           # Pydantic v2 request/response schemas (extra="forbid")
+│   ├── service.py                           # Serving adapter & readiness probe service
+│   └── routes/
+│       ├── health.py                        # GET /health readiness probe route
+│       └── asteroids.py                     # GET /asteroids operational & sub-resource routes
+│
 ├── dashboard.py                             # Interactive 5-tab Streamlit intelligence dossier
 ├── dashboard_data.py                        # Data provider & caching layer for dashboard
 │
@@ -436,6 +591,7 @@ NASA-Intelligence-Platform/
 ├── athena_historical_risk.sql               # M5 historical Sentry risk lifecycle views
 ├── schema.sql                               # Local SQLite schema DDL
 │
+├── test_api.py                              # M6 FastAPI endpoint & contract test suite (184 tests)
 ├── test_nasa_asteroids.py                   # NeoWs ingestion test suite
 ├── test_nasa_sentry.py                      # Sentry Mode S ingestion test suite
 ├── test_nasa_sbdb.py                        # SBDB batch ingestion & failure gate test suite
@@ -459,6 +615,8 @@ NASA-Intelligence-Platform/
 | Component | Technology | Purpose |
 |---|---|---|
 | **Language** | Python 3.11 | Core ingestion, transformation, validation, and CLI tools |
+| **API Serving Layer** | FastAPI, Uvicorn, Pydantic v2 | High-performance REST data serving layer with strict schema validation |
+| **HTTP Client** | HTTPX | Asynchronous and synchronous HTTP client for API testing and consumption |
 | **Data Sources** | NASA NeoWs, JPL CNEOS Sentry, JPL SBDB | Planetary defense observation, impact risk, and Keplerian orbit APIs |
 | **Object Storage** | Amazon S3 | Serverless data lakehouse (raw JSON, partitioned Parquet, and run manifests) |
 | **Query Engine** | Amazon Athena (Trino) | Serverless interactive SQL analytics and multi-source views |
@@ -466,7 +624,7 @@ NASA-Intelligence-Platform/
 | **Identity Engine** | Python / PyArrow | Deterministic entity resolution, namespace isolation, primary pivot crosswalk |
 | **Quality Engine** | Python / PyArrow / Boto3 | Centralized operational DQ engine (`pipeline_dq.py`) & invariant enforcement |
 | **Dashboard** | Streamlit, Pandas | Interactive 5-tab mission intelligence dossier |
-| **Quality & Linting**| Ruff, Pytest | Code formatting, static linting, and 286-test automated regression suite |
+| **Quality & Linting**| Ruff, Pytest | Code formatting, static linting, and 470-test automated regression suite |
 | **CI / CD** | GitHub Actions | Hardened pull-request validation and daily production orchestration |
 
 ---
@@ -562,7 +720,7 @@ python pipeline_dq.py run-suite --execution-mode CURRENT_PRODUCTION
 
 ### 6. Run Quality Checks & Automated Tests
 ```bash
-# Run complete test suite (286 tests)
+# Run complete test suite (470 tests)
 pytest -v
 
 # Run linter
@@ -572,7 +730,20 @@ ruff check .
 git diff --check
 ```
 
-### 7. Launch the Streamlit Intelligence Dossier
+### 7. Launch the FastAPI Data Serving Layer
+```bash
+# Launch Uvicorn local ASGI server:
+uvicorn api.main:app --host 127.0.0.1 --port 8000 --reload
+
+# Or launch directly via Python module:
+python -m api.main
+```
+Interactive API documentation will be available at:
+- **Swagger UI:** `http://127.0.0.1:8000/docs`
+- **ReDoc UI:** `http://127.0.0.1:8000/redoc`
+- **OpenAPI Schema:** `http://127.0.0.1:8000/openapi.json`
+
+### 8. Launch the Streamlit Intelligence Dossier
 ```bash
 streamlit run dashboard.py
 ```
@@ -603,11 +774,22 @@ streamlit run dashboard.py
     - Phase 11B: Authoritative source summaries (`neows_summary.json`, `sbdb_batch_summary.json`) and centralized DQ engine (`pipeline_dq.py`)
     - Phase 11C: Scheduled workflow integration, multi-stage DQ enforcement, and zero-target failure provenance (`SBDB_NOT_EXECUTED_UPSTREAM_FAILURE`)
     - Phase 11D: Complete (Final regression verification, test expansion to 286 tests, and documentation hardening)
-  - **Phase 12:** Pending
+
+- **M6: Data Serving Layer (FastAPI) — Complete / Operational**
+  - **Slices 1–6:** Complete (184 dedicated API tests, 470 total repo regression tests)
+    - Established decoupled FastAPI serving layer (`api/`) querying Lakehouse via `DashboardDataProvider`
+    - Standardized 7 REST endpoints: `/health`, `/asteroids`, `/asteroids/{id}`, `/asteroids/{id}/sbdb`, `/asteroids/{id}/sentry`, `/asteroids/{id}/history`, `/asteroids/{id}/crosswalk`
+    - Strict Pydantic v2 models (`extra="forbid"`) enforcing positive integer path parameters and envelope consistency
+    - Decoupled domain identity missingness (`data: null`) from empty collections (`data: []`)
+    - Offline, deterministic testing architecture backed by in-memory DuckDB Lakehouse fixtures
+
+- **M7: API-Driven Dashboard Integration — Planned**
+  - Refactoring Streamlit dossier to consume FastAPI HTTP endpoints via an asynchronous HTTP client
+  - Dual-mode execution support (direct provider fallback or remote HTTP serving)
 
 ### Parked / Future Architectural Roadmap
 *The following items are explicitly parked and represent future potential enhancements:*
 - **Event-Driven Architecture:** Decoupling batch runs with Apache Kafka or AWS EventBridge.
 - **Multi-Region Disaster Recovery:** Automated S3 Cross-Region Replication (CRR) and multi-region Athena catalog sync.
 - **Ephemeris Calculations:** N-body gravitational trajectory simulation (the platform presents factual observational telemetry, not orbital integrations).
-- **Containerized Deployment:** Docker packaging and AWS ECS / Fargate deployment for the Streamlit dashboard.
+- **Containerized Deployment:** Docker packaging and AWS ECS / Fargate deployment for the Streamlit dashboard and FastAPI service.
