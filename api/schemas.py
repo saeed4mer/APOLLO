@@ -1,0 +1,401 @@
+"""Pydantic v2 response and entity schemas for M6 API.
+
+Adheres strictly to the locked M6.2 contract:
+- Root envelope with 'meta' and 'data'
+- Strict field validation (extra='forbid')
+- Deterministic UTC timestamps
+"""
+
+from __future__ import annotations
+
+from typing import Literal
+
+from pydantic import BaseModel, ConfigDict, Field
+
+
+class MetaEnvelope(BaseModel):
+    """Standard metadata envelope present on every API response."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    api_version: str = Field(
+        default="1.0.0",
+        description="Authoritative API contract version",
+    )
+    execution_mode: str = Field(
+        ...,
+        description="Active backend execution mode reported by provider",
+    )
+    timestamp: str = Field(
+        ...,
+        description="Timezone-aware UTC ISO-8601 timestamp of response generation",
+    )
+
+
+class HealthChecks(BaseModel):
+    """Readiness status of required subsystems."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    lakehouse_storage: bool = Field(
+        ...,
+        description="True if all required core Parquet assets exist on disk",
+    )
+    query_engine: bool = Field(
+        ...,
+        description="True if DuckDB query engine can execute basic queries",
+    )
+
+
+class HealthData(BaseModel):
+    """Payload for readiness probe /health."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    status: Literal["healthy", "unavailable"] = Field(
+        ...,
+        description="Overall readiness: 'healthy' (HTTP 200) or 'unavailable' (HTTP 503)",
+    )
+    checks: HealthChecks = Field(
+        ...,
+        description="Detailed subsystem check results",
+    )
+
+
+class HealthResponse(BaseModel):
+    """Standard response model for GET /health."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    meta: MetaEnvelope = Field(
+        ...,
+        description="Response metadata envelope",
+    )
+    data: HealthData = Field(
+        ...,
+        description="Health readiness data payload",
+    )
+
+
+class PaginationEnvelope(BaseModel):
+    """Pagination metadata envelope."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    total: int = Field(
+        ...,
+        ge=0,
+        description="Total matching records before pagination",
+    )
+    limit: int = Field(
+        ...,
+        ge=1,
+        le=500,
+        description="Requested page limit",
+    )
+    offset: int = Field(
+        ...,
+        ge=0,
+        description="Requested page offset",
+    )
+    returned: int = Field(
+        ...,
+        ge=0,
+        description="Count of records returned in this page",
+    )
+
+
+class WatchlistAsteroid(BaseModel):
+    """Encounter event row from the close-approach threat watchlist.
+
+    Grain: (closest_approach_date, neows_id).
+    Strict 21-column schema preserving genuine scientific nulls.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    closest_approach_date: str = Field(..., description="Date of closest approach (YYYY-MM-DD)")
+    neows_id: str = Field(..., description="NeoWs asteroid identifier")
+    name: str = Field(..., description="Primary asteroid name or designation")
+    miss_distance_km: float = Field(..., description="Miss distance in kilometers")
+    miss_distance_lunar: float = Field(..., description="Miss distance in lunar distances (LD)")
+    hazardous: bool = Field(..., description="Potentially hazardous asteroid flag")
+    asteroid_key: str | None = Field(default=None, description="Global UUID5 identifier if resolved")
+    match_state: str = Field(..., description="Entity resolution match state")
+    is_sentry_monitored: bool = Field(..., description="True if actively monitored by JPL Sentry")
+    is_sentry_ambiguous: bool = Field(..., description="True if reverse resolution to Sentry is ambiguous")
+    sentry_id: str | None = Field(default=None, description="Sentry object designation if resolved")
+    sentry_impact_probability: float | None = Field(default=None, description="Cumulative impact probability")
+    sentry_palermo_scale_max: float | None = Field(default=None, description="Maximum Palermo Technical Scale value")
+    sentry_torino_scale_max: int | None = Field(default=None, description="Maximum Torino Scale value")
+    sentry_potential_impacts_count: int | None = Field(default=None, description="Number of potential impact solutions")
+    sentry_impact_year_range: str | None = Field(default=None, description="Impact year span (e.g. 2088-2122)")
+    has_sbdb_characterization: bool = Field(..., description="True if characterized by JPL SBDB")
+    sbdb_spkid: str | None = Field(default=None, description="SBDB SPK-ID if linked")
+    sbdb_designation: str | None = Field(default=None, description="SBDB official designation")
+    sbdb_fullname: str | None = Field(default=None, description="SBDB full name string")
+    sbdb_orbit_class_name: str | None = Field(default=None, description="SBDB orbit class name")
+
+
+class WatchlistQueryParams(BaseModel):
+    """Validated query parameters for GET /asteroids."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    limit: int = Field(default=50, ge=1, le=500, description="Maximum number of records to return")
+    offset: int = Field(default=0, ge=0, description="Offset index for pagination")
+    hazardous: bool | None = Field(default=None, description="Filter by hazardous status")
+    sentry_monitored: bool | None = Field(default=None, description="Filter by Sentry monitoring status")
+    horizon_mkm: float | None = Field(default=None, gt=0, description="Filter by maximum miss distance in millions of km")
+
+
+class WatchlistResponse(BaseModel):
+    """Authoritative response model for GET /asteroids."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    meta: MetaEnvelope = Field(..., description="Standard response metadata envelope")
+    data: list[WatchlistAsteroid] = Field(..., description="List of encounter event records")
+    pagination: PaginationEnvelope = Field(..., description="Pagination metadata")
+
+
+class AsteroidDetail(BaseModel):
+    """Primary encounter and metadata for a single NeoWs asteroid.
+
+    Grain: (neows_id).
+    Primary encounter selected via CLOSEST_OBSERVED_APPROACH.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    neows_id: str = Field(..., description="NeoWs asteroid identifier")
+    name: str = Field(..., description="Primary asteroid name or designation")
+    closest_approach_date: str = Field(..., description="Date of closest observed approach (YYYY-MM-DD)")
+    miss_distance_km: float = Field(..., description="Miss distance in kilometers for closest approach")
+    miss_distance_lunar: float = Field(..., description="Miss distance in lunar distances (LD)")
+    hazardous: bool = Field(..., description="Potentially hazardous asteroid flag")
+    approaches_recorded_count: int = Field(..., ge=1, description="Number of observed close approach encounters recorded")
+    selection_rule: str = Field(default="CLOSEST_OBSERVED_APPROACH", description="Rule used to select the primary encounter")
+    asteroid_key: str | None = Field(default=None, description="Global UUID5 identifier if resolved")
+    match_state: str = Field(..., description="Entity resolution match state")
+    is_sentry_monitored: bool = Field(..., description="True if actively monitored by JPL Sentry")
+    is_sentry_ambiguous: bool = Field(..., description="True if reverse resolution to Sentry is ambiguous")
+    sentry_id: str | None = Field(default=None, description="Sentry object designation if resolved")
+    has_sbdb_characterization: bool = Field(..., description="True if characterized by JPL SBDB")
+    sbdb_spkid: str | None = Field(default=None, description="SBDB SPK-ID if linked")
+    sbdb_designation: str | None = Field(default=None, description="SBDB official designation")
+    sbdb_fullname: str | None = Field(default=None, description="SBDB full name string")
+    sbdb_orbit_class_name: str | None = Field(default=None, description="SBDB orbit class name")
+
+
+class ResolutionEnvelope(BaseModel):
+    """Entity resolution status and evidence block."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    match_state: str = Field(..., description="Identity resolution state: RESOLVED, UNRESOLVED, AMBIGUOUS")
+    asteroid_key: str | None = Field(default=None, description="Global UUID5 identifier if resolved")
+    match_rule: str | None = Field(default=None, description="Resolution rule applied by M3 entity resolution")
+    evidence: str | None = Field(default=None, description="Supporting resolution evidence")
+    resolved_at: str | None = Field(default=None, description="Timestamp of resolution execution")
+
+
+class AsteroidDetailResponse(BaseModel):
+    """Authoritative response envelope for GET /asteroids/{neows_id}."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    meta: MetaEnvelope = Field(..., description="Standard response metadata envelope")
+    data: AsteroidDetail = Field(..., description="Primary encounter object dossier")
+    resolution: ResolutionEnvelope = Field(..., description="Entity resolution state and evidence")
+
+
+class ErrorDetail(BaseModel):
+    """Machine-readable and human-readable error payload."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    code: str = Field(..., description="Machine-readable error code")
+    message: str = Field(..., description="Human-readable error description")
+
+
+class ErrorResponse(BaseModel):
+    """Standard error response envelope."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    meta: MetaEnvelope = Field(..., description="Standard response metadata envelope")
+    error: ErrorDetail = Field(..., description="Error payload")
+
+
+class SbdbProfile(BaseModel):
+    """Authoritative JPL SBDB physical and orbital characterization.
+
+    Grain: (spkid) resolved via canonical asteroid_key.
+    Preserves descriptive quality tier and genuine scientific nulls.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    spkid: str = Field(..., description="JPL SBDB SPK-ID")
+    asteroid_key: str = Field(..., description="Canonical internal entity UUID5 identifier")
+    designation: str | None = Field(default=None, description="Official small-body designation")
+    fullname: str | None = Field(default=None, description="Full object name string from SBDB")
+    shortname: str | None = Field(default=None, description="Short name or abbreviation")
+    object_kind: str | None = Field(default=None, description="Small-body kind code (e.g. au for asteroid)")
+    is_neo: bool = Field(..., description="True if classified as Near-Earth Object")
+    is_pha: bool = Field(..., description="True if classified as Potentially Hazardous Asteroid")
+    orbit_class_code: str | None = Field(default=None, description="Three-letter orbit class code (e.g. APO, AMO)")
+    orbit_class_name: str | None = Field(default=None, description="Full orbit class name")
+    orbit_id: str | None = Field(default=None, description="Orbit solution identifier")
+    epoch_jd: float | None = Field(default=None, description="Orbit epoch in Julian Days (TDB)")
+    soln_date: str | None = Field(default=None, description="Orbit solution calculation timestamp")
+    orbit_source: str | None = Field(default=None, description="Orbit solution provider/source")
+    producer: str | None = Field(default=None, description="Orbit computer / producer name")
+    first_obs: str | None = Field(default=None, description="Date of first observation used in orbit fit")
+    last_obs: str | None = Field(default=None, description="Date of last observation used in orbit fit")
+    data_arc_days: int | None = Field(default=None, description="Observation arc length in days")
+    n_obs_used: int | None = Field(default=None, description="Number of observations used in orbit determination")
+    condition_code: str | None = Field(default=None, description="Orbit condition code / U parameter")
+    rms: float | None = Field(default=None, description="Normalized RMS residual of orbit fit")
+    earth_moid_au: float | None = Field(default=None, description="Earth Minimum Orbit Intersection Distance in AU")
+    jupiter_moid_au: float | None = Field(default=None, description="Jupiter Minimum Orbit Intersection Distance in AU")
+    t_jup: float | None = Field(default=None, description="Tisserand parameter with respect to Jupiter")
+    eccentricity: float | None = Field(default=None, description="Orbital eccentricity (e)")
+    semi_major_axis_au: float | None = Field(default=None, description="Semi-major axis in AU (a)")
+    perihelion_distance_au: float | None = Field(default=None, description="Perihelion distance in AU (q)")
+    inclination_deg: float | None = Field(default=None, description="Orbital inclination in degrees (i)")
+    orbital_period_yr: float | None = Field(default=None, description="Sidereal orbital period in Julian years")
+    estimated_diameter_km: float | None = Field(default=None, description="Estimated physical diameter in kilometers")
+    absolute_magnitude: float | None = Field(default=None, description="Absolute visual magnitude (H)")
+    albedo: float | None = Field(default=None, description="Geometric albedo")
+    rotational_period_hr: float | None = Field(default=None, description="Rotational period in hours")
+    astrometric_data_quality_tier: str = Field(..., description="Astrometric data quality tier classification")
+
+
+class SbdbResponse(BaseModel):
+    """Authoritative response envelope for GET /asteroids/{neows_id}/sbdb."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    meta: MetaEnvelope = Field(..., description="Standard response metadata envelope")
+    data: SbdbProfile | None = Field(default=None, description="SBDB physical and orbital profile payload")
+    resolution: ResolutionEnvelope = Field(..., description="Entity resolution state and evidence")
+
+
+class SentryProfile(BaseModel):
+    """Authoritative NASA/JPL Sentry Mode S impact risk monitoring profile.
+
+    Grain: (asteroid_key) with reverse-cardinality defense.
+    All fields reflect factual provider attributes; zero synthetic risk scores.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    asteroid_key: str = Field(..., description="Canonical internal entity UUID5 identifier")
+    has_sentry_monitoring: bool = Field(..., description="True if asteroid has Sentry monitoring records")
+    is_sentry_ambiguous: bool = Field(..., description="True if multiple Sentry IDs map to this entity")
+    sentry_identifier_count: int = Field(..., description="Count of distinct Sentry IDs linked to this entity")
+    sentry_id: str | None = Field(default=None, description="NASA/JPL Sentry object identifier")
+    designation: str | None = Field(default=None, description="Official small-body designation in Sentry")
+    fullname: str | None = Field(default=None, description="Full object name string in Sentry")
+    latest_impact_probability: float | None = Field(default=None, description="Latest computed cumulative impact probability")
+    latest_palermo_scale_max: float | None = Field(default=None, description="Latest maximum Palermo technical scale value")
+    latest_palermo_scale_cum: float | None = Field(default=None, description="Latest cumulative Palermo technical scale value")
+    latest_torino_scale_max: int | None = Field(default=None, description="Latest maximum Torino scale integer value (0-10)")
+    latest_potential_impacts_count: int | None = Field(default=None, description="Count of potential future Earth impact solutions")
+    v_infinity_km_s: float | None = Field(default=None, description="Relative velocity at infinity in km/s")
+    impact_year_range: str | None = Field(default=None, description="Calendar year range of potential impact solutions (e.g. 2088-2122)")
+    last_obs_date: str | None = Field(default=None, description="Observation date of last data used in Sentry solution")
+    latest_snapshot_key: str | None = Field(default=None, description="Snapshot partition date key of latest record")
+    total_snapshots_observed: int = Field(..., description="Total count of distinct Sentry snapshots recorded")
+    all_time_max_impact_probability: float | None = Field(default=None, description="All-time maximum impact probability across snapshots")
+    all_time_max_palermo_scale_max: float | None = Field(default=None, description="All-time maximum Palermo scale across snapshots")
+    all_time_max_torino_scale_max: int | None = Field(default=None, description="All-time maximum Torino scale across snapshots")
+    is_currently_active: bool = Field(..., description="True if object appears in latest global Sentry snapshot")
+
+
+class SentryResponse(BaseModel):
+    """Authoritative response envelope for GET /asteroids/{neows_id}/sentry."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    meta: MetaEnvelope = Field(..., description="Standard response metadata envelope")
+    data: SentryProfile | None = Field(default=None, description="Sentry impact risk monitoring profile payload")
+    resolution: ResolutionEnvelope = Field(..., description="Entity resolution state and evidence")
+
+
+class SentryHistoryRecord(BaseModel):
+    """Authoritative historical risk snapshot record for a JPL Sentry object.
+
+    Grain: (snapshot_key, sentry_id).
+    Strict 16-field schema preserving non-causal change flags and genuine scientific nulls.
+    Zero synthetic risk, threat, or safety scores.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    snapshot_key: str = Field(..., description="Snapshot partition date key (YYYY-MM-DD)")
+    snapshot_time: str = Field(..., description="UTC ISO timestamp of the catalog snapshot run")
+    sentry_id: str = Field(..., description="NASA/JPL Sentry object identifier")
+    designation: str | None = Field(default=None, description="Official small-body designation in Sentry")
+    impact_probability: float | None = Field(default=None, description="Computed cumulative impact probability")
+    palermo_scale_max: float | None = Field(default=None, description="Maximum Palermo Technical Scale value")
+    palermo_scale_cum: float | None = Field(default=None, description="Cumulative Palermo Technical Scale value")
+    torino_scale_max: int | None = Field(default=None, description="Maximum Torino Scale integer value (0-10)")
+    potential_impacts_count: int | None = Field(default=None, description="Count of potential future Earth impact solutions")
+    v_infinity_km_s: float | None = Field(default=None, description="Relative velocity at infinity in km/s")
+    estimated_diameter_km: float | None = Field(default=None, description="Estimated physical diameter in kilometers")
+    absolute_magnitude: float | None = Field(default=None, description="Absolute visual magnitude (H)")
+    impact_year_range: str | None = Field(default=None, description="Calendar year span of potential impacts (e.g. 2088-2122)")
+    last_obs_date: str | None = Field(default=None, description="Date of last astrometric observation used in orbit fit")
+    is_impact_probability_changed: bool = Field(..., description="Non-causal flag indicating if impact probability changed from previous snapshot")
+    is_palermo_scale_max_changed: bool = Field(..., description="Non-causal flag indicating if maximum Palermo scale changed from previous snapshot")
+
+
+class HistoryResolutionEnvelope(ResolutionEnvelope):
+    """Entity resolution status and ambiguity metadata for GET /asteroids/{neows_id}/history."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    is_sentry_ambiguous: bool | None = Field(default=None, description="True if reverse resolution to Sentry is ambiguous")
+    warning: str | None = Field(default=None, description="Warning note regarding resolution or linkage ambiguity")
+    notes: str | None = Field(default=None, description="Operational notes regarding resolution or linkage ambiguity")
+
+
+class SentryHistoryResponse(BaseModel):
+    """Authoritative response envelope for GET /asteroids/{neows_id}/history."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    meta: MetaEnvelope = Field(..., description="Standard response metadata envelope")
+    data: list[SentryHistoryRecord] | None = Field(default=None, description="List of historical risk snapshot records or null")
+    resolution: HistoryResolutionEnvelope = Field(..., description="Entity resolution state and ambiguity metadata")
+
+
+class CrosswalkRecord(BaseModel):
+    """Authoritative identifier mapping record from bridge_asteroid_identifier.
+
+    Grain: (asteroid_key, source_system, identifier_name, identifier_value).
+    All fields reflect factual multi-source mappings; zero synthetic identities.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    asteroid_key: str = Field(..., description="Canonical internal entity UUID5 identifier")
+    source_system: str = Field(..., description="Origin source system (neows, sbdb, sentry)")
+    identifier_name: str = Field(..., description="System identifier attribute name (id, spkid, des, sentry_id)")
+    identifier_value: str = Field(..., description="Actual identifier value string in the source system")
+    is_primary_pivot: bool | None = Field(default=None, description="True if this identifier served as primary resolution anchor")
+    created_at: str | None = Field(default=None, description="UTC ISO timestamp of mapping creation")
+    updated_at: str | None = Field(default=None, description="UTC ISO timestamp of mapping update")
+
+
+class CrosswalkResponse(BaseModel):
+    """Authoritative response envelope for GET /asteroids/{neows_id}/crosswalk."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    meta: MetaEnvelope = Field(..., description="Standard response metadata envelope")
+    data: list[CrosswalkRecord] = Field(default_factory=list, description="List of multi-source identifier mapping records")
+    resolution: ResolutionEnvelope = Field(..., description="Entity resolution state and evidence")
