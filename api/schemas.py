@@ -119,7 +119,7 @@ class WatchlistAsteroid(BaseModel):
     name: str = Field(..., description="Primary asteroid name or designation")
     miss_distance_km: float = Field(..., description="Miss distance in kilometers")
     miss_distance_lunar: float = Field(..., description="Miss distance in lunar distances (LD)")
-    hazardous: bool = Field(..., description="Potentially hazardous asteroid flag")
+    hazardous: bool | None = Field(..., description="NeoWs potentially hazardous flag; null when not reported")
     asteroid_key: str | None = Field(default=None, description="Global UUID5 identifier if resolved")
     match_state: str = Field(..., description="Entity resolution match state")
     is_sentry_monitored: bool = Field(..., description="True if actively monitored by JPL Sentry")
@@ -173,7 +173,7 @@ class AsteroidDetail(BaseModel):
     closest_approach_date: str = Field(..., description="Date of closest observed approach (YYYY-MM-DD)")
     miss_distance_km: float = Field(..., description="Miss distance in kilometers for closest approach")
     miss_distance_lunar: float = Field(..., description="Miss distance in lunar distances (LD)")
-    hazardous: bool = Field(..., description="Potentially hazardous asteroid flag")
+    hazardous: bool | None = Field(..., description="NeoWs potentially hazardous flag; null when not reported")
     approaches_recorded_count: int = Field(..., ge=1, description="Number of observed close approach encounters recorded")
     selection_rule: str = Field(default="CLOSEST_OBSERVED_APPROACH", description="Rule used to select the primary encounter")
     asteroid_key: str | None = Field(default=None, description="Global UUID5 identifier if resolved")
@@ -421,6 +421,27 @@ class CrosswalkResponse(BaseModel):
 # ============================================================================
 
 
+MatchState = Literal["RESOLVED", "UNRESOLVED", "AMBIGUOUS", "INVALID"]
+SentryLinkageStatus = Literal["available", "not_resolved", "not_present", "ambiguous", "linked_no_record"]
+
+
+class NeowsProvenance(BaseModel):
+    """Lineage of the NeoWs dataset, as recorded in the processed Parquet's metadata. Shared by world and profile."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    source: Literal["nasa_neows"] = "nasa_neows"
+    dataset_run_id: str | None = Field(
+        default=None, description="Ingestion run ID stamped by the live pipeline; null if the dataset records none"
+    )
+    source_raw_file: str | None = Field(
+        default=None, description="Raw snapshot the dataset was re-derived from offline (--from-raw); null otherwise"
+    )
+    source_raw_sha256: str | None = Field(
+        default=None, description="SHA-256 of that raw snapshot; null unless the dataset was re-derived offline"
+    )
+
+
 class WorldEncounter(BaseModel):
     """NeoWs close-approach facts for the selected encounter. Source: NASA NeoWs only."""
 
@@ -451,7 +472,7 @@ class WorldResolution(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    match_state: Literal["RESOLVED", "UNRESOLVED", "AMBIGUOUS", "INVALID"] = Field(..., description="Identity resolution state")
+    match_state: MatchState = Field(..., description="Identity resolution state")
     match_rule: str | None = Field(default=None, description="Resolution rule applied")
     resolved_at: str | None = Field(default=None, description="Timestamp of the resolution run, if recorded")
 
@@ -478,7 +499,7 @@ class WorldSentryAvailability(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    status: Literal["available", "not_resolved", "not_present", "ambiguous", "linked_no_record"] = Field(
+    status: SentryLinkageStatus = Field(
         ...,
         description=(
             "available: one linked Sentry ID with stored snapshots; not_resolved: identity not resolved; "
@@ -548,9 +569,7 @@ class WorldSnapshotInfo(BaseModel):
     encounter_selection_rule: Literal["CLOSEST_OBSERVED_APPROACH"] = Field(
         default="CLOSEST_OBSERVED_APPROACH", description="Rule used to pick one encounter per NeoWs object"
     )
-    neows_run_id: str | None = Field(
-        default=None, description="NeoWs ingestion run ID from dataset metadata; null if the dataset does not record one"
-    )
+    neows: NeowsProvenance = Field(..., description="Lineage of the NeoWs dataset every record's encounter came from")
     sentry_latest_catalog_snapshot_key: str | None = Field(
         default=None, description="Latest stored Sentry catalog snapshot key; null if no Sentry data is stored"
     )
@@ -603,7 +622,7 @@ class ProfileIdentity(BaseModel):
 
     neows_id: str = Field(..., description="NeoWs asteroid identifier")
     name: str = Field(..., description="NeoWs name / designation")
-    match_state: Literal["RESOLVED", "UNRESOLVED", "AMBIGUOUS", "INVALID"] = Field(..., description="Identity resolution state")
+    match_state: MatchState = Field(..., description="Identity resolution state")
     asteroid_key: str | None = Field(default=None, description="Canonical UUID5 key; null unless resolved")
     sbdb_spkid: str | None = Field(default=None, description="JPL SBDB SPK-ID linked through the crosswalk")
     sbdb_designation: str | None = Field(default=None, description="Designation as published by SBDB")
@@ -757,7 +776,7 @@ class ProfileSentryLinkage(BaseModel):
     source_contract: Literal["sentry_mode_s_summary"] = Field(
         default="sentry_mode_s_summary", description="Sentry API mode ingested: per-object summary only (no Mode O detail)"
     )
-    status: Literal["available", "not_resolved", "not_present", "ambiguous", "linked_no_record"] = Field(
+    status: SentryLinkageStatus = Field(
         ..., description="Same statuses as the world snapshot's sentry block"
     )
     sentry_id: str | None = Field(default=None, description="Sentry object ID when exactly one is linked")
@@ -772,13 +791,6 @@ class ProfileSentryLinkage(BaseModel):
     assessment_endpoint: str | None = Field(
         default=None, description="Route serving the legacy Sentry profile (incl. all-time aggregates), when linked"
     )
-
-
-class NeowsProvenance(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    source: Literal["nasa_neows"] = "nasa_neows"
-    dataset_run_id: str | None = Field(default=None, description="NeoWs ingestion run ID from dataset metadata; null if not recorded")
 
 
 class ResolutionProvenance(BaseModel):

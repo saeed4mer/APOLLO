@@ -691,6 +691,15 @@ def _world_record(row: dict[str, Any], latest_catalog_key: str | None) -> WorldA
     )
 
 
+def _neows_provenance(snapshot: dict[str, Any]) -> NeowsProvenance:
+    """NeoWs dataset lineage, built once for both the world and the profile."""
+    return NeowsProvenance(
+        dataset_run_id=snapshot["neows_run_id"],
+        source_raw_file=snapshot["neows_source_raw_file"],
+        source_raw_sha256=snapshot["neows_source_raw_sha256"],
+    )
+
+
 def get_world(provider: DashboardDataProvider) -> WorldResponse:
     """Build the world snapshot from ONE set-based provider retrieval.
 
@@ -707,7 +716,7 @@ def get_world(provider: DashboardDataProvider) -> WorldResponse:
     )
     world = WorldSnapshotInfo(
         object_count=len(records),
-        neows_run_id=snapshot["neows_run_id"],
+        neows=_neows_provenance(snapshot),
         sentry_latest_catalog_snapshot_key=latest_catalog_key,
         neows_fields_not_in_dataset=snapshot["neows_missing_columns"],
         spatial_model=WorldSpatialModel(
@@ -721,14 +730,11 @@ def get_world(provider: DashboardDataProvider) -> WorldResponse:
     return WorldResponse(meta=meta, world=world, data=records)
 
 
-_PROFILE_ORBIT_FIELDS = (
-    "orbit_class_code", "orbit_class_name", "is_neo", "is_pha", "orbit_id", "epoch_jd", "equinox",
-    "semi_major_axis_au", "eccentricity", "perihelion_distance_au", "aphelion_distance_au", "inclination_deg",
-    "ascending_node_longitude_deg", "argument_of_perihelion_deg", "mean_anomaly_deg", "mean_motion_deg_per_day",
-    "orbital_period_days", "time_of_perihelion_jd_tdb", "soln_date", "first_obs", "last_obs", "data_arc_days",
-    "n_obs_used", "condition_code", "rms", "earth_moid_au", "jupiter_moid_au", "t_jup",
-)
-_PROFILE_PHYSICAL_FIELDS = ("absolute_magnitude", "estimated_diameter_km", "albedo", "rotational_period_hr")
+_SECTION_META_FIELDS = {"source", "availability"}
+# Value fields come from the schema models, so a field added to a section is populated (or reported missing).
+_PROFILE_ORBIT_FIELDS = tuple(f for f in ProfileOrbit.model_fields if f not in _SECTION_META_FIELDS)
+_PROFILE_PHYSICAL_FIELDS = tuple(f for f in ProfilePhysical.model_fields if f not in _SECTION_META_FIELDS)
+_PROFILE_NEOWS_PHYSICAL_FIELDS = tuple(f for f in ProfileNeowsPhysical.model_fields if f not in _SECTION_META_FIELDS)
 
 
 def _section_availability(
@@ -847,7 +853,7 @@ def get_asteroid_profile(
         "is_sentry_object": _nullable_bool(row["is_sentry_object"]),
     }
     neows_physical_values = {
-        field: row[field] for field in ("absolute_magnitude_h", "estimated_diameter_min_km", "estimated_diameter_max_km")
+        field: row[field] for field in _PROFILE_NEOWS_PHYSICAL_FIELDS
     }
 
     linked = world.sentry.status in ("available", "linked_no_record")
@@ -881,7 +887,7 @@ def get_asteroid_profile(
             assessment_endpoint=f"/asteroids/{world.neows_id}/sentry" if linked else None,
         ),
         provenance=ProfileProvenance(
-            neows=NeowsProvenance(dataset_run_id=snapshot["neows_run_id"]),
+            neows=_neows_provenance(snapshot),
             resolution=ResolutionProvenance(
                 match_rule=world.resolution.match_rule,
                 resolved_at=world.resolution.resolved_at,

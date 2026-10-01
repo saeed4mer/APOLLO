@@ -388,7 +388,8 @@ class LocalDuckDBDataProvider:
         availability comes from crosswalk membership, never from the NeoWs PHA flag.
         """
         if not self._asteroids_file.exists():
-            return {"records": pd.DataFrame(), "neows_run_id": None, "neows_missing_columns": []}
+            return {"records": pd.DataFrame(), "neows_run_id": None, "neows_source_raw_file": None,
+                    "neows_source_raw_sha256": None, "neows_missing_columns": []}
 
         ast = _parquet_relation(self._asteroids_file, {})
         bridge = _parquet_relation(self._bridge_file, _BRIDGE_COLUMNS)
@@ -489,11 +490,19 @@ class LocalDuckDBDataProvider:
 
         # NeoWs dataset provenance: save_to_parquet stamps run_id into file metadata
         # when available; older files carry none, which is reported as None.
+        # NeoWs dataset lineage from file metadata: run_id (live pipeline) or the raw
+        # snapshot + SHA-256 (offline --from-raw re-derivation). Absent keys are None.
         neows_meta = neows_schema.metadata or {}
-        neows_run_id = neows_meta.get(b"run_id")
+
+        def meta(key: bytes) -> str | None:
+            value = neows_meta.get(key)
+            return value.decode("utf-8") if value else None
+
         return {
             "records": df,
-            "neows_run_id": neows_run_id.decode("utf-8") if neows_run_id else None,
+            "neows_run_id": meta(b"run_id"),
+            "neows_source_raw_file": meta(b"source_raw_file"),
+            "neows_source_raw_sha256": meta(b"source_raw_sha256"),
             "neows_missing_columns": neows_missing,
         }
 

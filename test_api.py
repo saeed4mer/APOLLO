@@ -3236,10 +3236,10 @@ def test_world_neows_run_id_from_dataset_metadata_only(mock_lakehouse: Path):
     """No metadata -> null (never guessed); real run_id metadata written by ingestion -> served."""
     import nasa_asteroids
 
-    assert _world(_client_for(mock_lakehouse))["world"]["neows_run_id"] is None
+    assert _world(_client_for(mock_lakehouse))["world"]["neows"]["dataset_run_id"] is None
     nasa_asteroids.save_to_parquet(_FIXTURE_ASTEROIDS, filename=str(mock_lakehouse / "asteroids.parquet"),
                                    run_id="abc123def456")
-    assert _world(_client_for(mock_lakehouse))["world"]["neows_run_id"] == "abc123def456"
+    assert _world(_client_for(mock_lakehouse))["world"]["neows"]["dataset_run_id"] == "abc123def456"
 
 
 def test_world_survives_missing_enrichment_assets(mock_lakehouse: Path):
@@ -3557,7 +3557,8 @@ def test_profile_resolved_identity_and_provenance(mock_client: TestClient):
     assert ident["availability"] == {"status": "available", "unavailable": {}}
 
     prov = prof["provenance"]
-    assert prov["neows"] == {"source": "nasa_neows", "dataset_run_id": None}
+    assert prov["neows"] == {"source": "nasa_neows", "dataset_run_id": None,
+                             "source_raw_file": None, "source_raw_sha256": None}
     assert prov["resolution"]["source"] == "entity_resolution"
     assert prov["resolution"]["match_rule"] == "EXACT_DESIGNATION_MATCH"
     assert prov["sbdb"] == {"source": "jpl_sbdb", "spkid": "50548689", "snapshot_key": "2026-09-26",
@@ -4286,3 +4287,288 @@ def test_serving_optional_neows_columns_match_ingestion_schema():
     legacy = ("id", "name", "closest_approach_date", "miss_distance_km", "hazardous")
     ingestion = {f.name: arrow_to_sql[f.type] for f in _NEOWS_SCHEMA if f.name not in legacy}
     assert NEOWS_OPTIONAL_COLUMNS == ingestion
+
+
+# ============================================================================
+# PHASE 1 STEP 8 — FINAL CONTRACT INTEGRATION (renderer-facing guarantees)
+# ============================================================================
+# These tests pin the final world/profile contracts as a whole, rather than any
+# single implementation step. A failure here means the renderer-facing contract changed.
+
+_FINAL_WORLD_RECORD_SHAPE = {
+    "neows_id": None, "name": None, "asteroid_key": None,
+    "encounter": {"source", "closest_approach_date", "close_approach_datetime", "miss_distance_km",
+                  "relative_velocity_km_s", "estimated_diameter_min_km", "estimated_diameter_max_km",
+                  "is_potentially_hazardous"},
+    "resolution": {"match_state", "match_rule", "resolved_at"},
+    "sbdb": {"status", "spkid", "snapshot_key", "run_id"},
+    "sentry": {"status", "sentry_id", "latest_snapshot_key", "run_id", "in_latest_catalog"},
+    "illustrative_direction": {"x", "y", "z"},
+}
+_FINAL_WORLD_INFO_SHAPE = {
+    "object_count": None, "encounter_selection_rule": None, "sentry_latest_catalog_snapshot_key": None,
+    "neows_fields_not_in_dataset": None,
+    "neows": {"source", "dataset_run_id", "source_raw_file", "source_raw_sha256"},
+    "spatial_model": {"direction_semantics", "direction_algorithm", "direction_seed_field", "distance_field", "note"},
+}
+_FINAL_PROFILE_SECTIONS = {  # section -> declared source (None: section spans sources by design)
+    "identity": None, "orbit": "jpl_sbdb", "physical": "jpl_sbdb", "neows_physical": "nasa_neows",
+    "encounter": "nasa_neows", "sentry": "jpl_sentry", "provenance": None,
+}
+_FORBIDDEN_KEY_TOKENS = {"danger", "risk", "threat", "score", "energy", "solution", "solutions"}
+
+
+def _is_forbidden_key(name: str) -> bool:
+    """Whole-token match (so 'resolution' is fine, 'impact_solution' is not), plus impact dates."""
+    lowered = name.lower()
+    return bool(set(lowered.split("_")) & _FORBIDDEN_KEY_TOKENS) or "impact_date" in lowered
+
+
+def _assert_shape(obj: dict, shape: dict) -> None:
+    assert set(obj) == set(shape), set(obj) ^ set(shape)
+    for key, sub in shape.items():
+        if sub is not None:
+            assert set(obj[key]) == sub, (key, set(obj[key]) ^ sub)
+
+
+def _schema_property_names(openapi: dict, root: str) -> set[str]:
+    """All property names reachable from one OpenAPI component schema."""
+    schemas, seen, names, stack = openapi["components"]["schemas"], set(), set(), [root]
+    while stack:
+        name = stack.pop()
+        if name in seen:
+            continue
+        seen.add(name)
+        for prop, spec in schemas[name].get("properties", {}).items():
+            names.add(prop)
+            for ref in _all_refs(spec):
+                stack.append(ref.rsplit("/", 1)[-1])
+    return names
+
+
+def _all_refs(spec):
+    if isinstance(spec, dict):
+        for key, value in spec.items():
+            if key == "$ref":
+                yield value
+            else:
+                yield from _all_refs(value)
+    elif isinstance(spec, list):
+        for value in spec:
+            yield from _all_refs(value)
+
+
+# --- Final contract shapes ------------------------------------------------------------
+
+def test_final_world_contract_shape(mock_lakehouse: Path):
+    _write_neows(mock_lakehouse)
+    body = _world(_client_for(mock_lakehouse))
+    assert set(body) == {"meta", "world", "data"}
+    _assert_shape(body["world"], _FINAL_WORLD_INFO_SHAPE)
+    assert body["world"]["spatial_model"]["direction_semantics"] == "illustrative"
+    for rec in body["data"]:
+        _assert_shape(rec, _FINAL_WORLD_RECORD_SHAPE)
+        assert rec["encounter"]["source"] == "nasa_neows"
+
+
+def test_final_profile_contract_sections_and_sources(mock_lakehouse: Path):
+    _write_neows(mock_lakehouse)
+    client = _client_for(mock_lakehouse)
+    for neows_id in (_TW54_NEOWS, "2138971"):  # resolved+linked, and unresolved
+        prof = _profile(client, neows_id)
+        assert set(prof) == {"neows_id", *_FINAL_PROFILE_SECTIONS}
+        for section, source in _FINAL_PROFILE_SECTIONS.items():
+            if source is not None:
+                assert prof[section]["source"] == source, section
+        assert {k: v["source"] for k, v in prof["provenance"].items()} == {
+            "neows": "nasa_neows", "resolution": "entity_resolution", "sbdb": "jpl_sbdb", "sentry": "jpl_sentry"}
+        assert prof["sentry"]["source_contract"] == "sentry_mode_s_summary"
+        for section in ("identity", "orbit", "physical", "neows_physical", "encounter"):
+            assert prof[section]["availability"]["status"] in {"available", "partial", "unavailable"}
+        assert prof["sentry"]["assessment"]["availability"]["status"] in {"available", "partial", "unavailable"}
+
+
+def test_final_contracts_expose_no_synthetic_or_mode_o_fields(mock_client: TestClient):
+    """Regression guard over the published OpenAPI schemas of the renderer-facing contracts."""
+    openapi = mock_client.get("/openapi.json").json()
+    for root in ("WorldResponse", "AsteroidProfileResponse"):
+        names = _schema_property_names(openapi, root)
+        offending = {n for n in names if _is_forbidden_key(n)}
+        assert not offending, (root, offending)
+    world_names = _schema_property_names(openapi, "WorldResponse")
+    assert not world_names & {"impact_probability", "palermo_scale_max", "torino_scale_max"}, \
+        "Sentry assessment values belong to the profile, not the world"
+
+
+def test_final_routing_matrix(mock_client: TestClient):
+    """World is never captured by the ID routes; malformed IDs are 422, unknown well-formed IDs 404."""
+    assert mock_client.get("/asteroids/world").status_code == 200
+    for route in ("/asteroids/{}", "/asteroids/{}/profile", "/asteroids/{}/sentry"):
+        assert mock_client.get(route.format("0")).status_code == 422
+        assert mock_client.get(route.format("world")).status_code == 422 or route == "/asteroids/{}"
+        assert mock_client.get(route.format("99999999")).status_code == 404
+    assert mock_client.get("/asteroids/world/profile").status_code == 422
+
+
+# --- Integration bugs fixed in Step 8 ---------------------------------------------------
+
+def test_legacy_routes_serve_unknown_pha_as_null(mock_lakehouse: Path):
+    """Previously GET /asteroids and /asteroids/{id} returned 500 for an unknown NeoWs PHA flag,
+    while world/profile served null. All routes now agree: unknown stays null."""
+    rows = [{**a, "hazardous": None} if a["id"] == "2138971" else a for a in _FIXTURE_ASTEROIDS]
+    _write_table(mock_lakehouse, "asteroids.parquet", rows, ASTEROID_SCHEMA)
+    client = _client_for(mock_lakehouse)
+
+    listed = {r["neows_id"]: r for r in client.get("/asteroids", params={"limit": 500}).json()["data"]}
+    assert listed["2138971"]["hazardous"] is None
+    detail = client.get("/asteroids/2138971")
+    assert detail.status_code == 200 and detail.json()["data"]["hazardous"] is None
+    assert _by_id(_world(client))["2138971"]["encounter"]["is_potentially_hazardous"] is None
+    for flag in ("true", "false"):  # unknown is neither
+        ids = {r["neows_id"] for r in client.get("/asteroids", params={"limit": 500, "hazardous": flag}).json()["data"]}
+        assert "2138971" not in ids
+
+
+def test_neows_lineage_served_identically_by_world_and_profile(mock_lakehouse: Path):
+    """An offline re-derived dataset exposes its raw snapshot hash through both contracts."""
+    import hashlib
+    import json as _json
+    import nasa_asteroids
+
+    raw = mock_lakehouse / "asteroids_raw.json"
+    raw.write_text(_json.dumps({"near_earth_objects": {"2026-09-30": [{
+        "id": _TW54_NEOWS, "name": "(2010 TW54)", "is_potentially_hazardous_asteroid": False,
+        "absolute_magnitude_h": 27.6, "is_sentry_object": True,
+        "estimated_diameter": {"kilometers": {"estimated_diameter_min": 0.008, "estimated_diameter_max": 0.018}},
+        "close_approach_data": [{"close_approach_date": "2026-09-30", "close_approach_date_full": "2026-Sep-30 05:42",
+                                 "epoch_date_close_approach": 1790746920000,
+                                 "relative_velocity": {"kilometers_per_second": "4.5"},
+                                 "miss_distance": {"kilometers": "17457205.45181"}}],
+    }]}}), encoding="utf-8")
+    raw_sha = hashlib.sha256(raw.read_bytes()).hexdigest()
+    assert nasa_asteroids.reprocess_raw_snapshot(str(raw), str(mock_lakehouse / "asteroids.parquet")) == 0
+    client = _client_for(mock_lakehouse)
+
+    lineage = {"source": "nasa_neows", "dataset_run_id": None, "source_raw_file": "asteroids_raw.json",
+               "source_raw_sha256": raw_sha}
+    assert _world(client)["world"]["neows"] == lineage
+    assert _profile(client, _TW54_NEOWS)["provenance"]["neows"] == lineage
+
+
+# --- Full real-data validation -------------------------------------------------------------
+
+@pytest.mark.skipif(
+    not (_REAL_LAKEHOUSE / "asteroids.parquet").exists(),
+    reason="Local Parquet lakehouse not present (gitignored; absent in CI).",
+)
+def test_final_contract_real_data_end_to_end():
+    """Every real NeoWs object: world and profile agree, sources stay separated, all values trace to storage."""
+    import duckdb
+    import hashlib
+
+    lake = _REAL_LAKEHOUSE
+    con = duckdb.connect()
+
+    def rows(sql: str, params=()):
+        cur = con.execute(sql, list(params))
+        names = [d[0] for d in cur.description]
+        return [dict(zip(names, r)) for r in cur.fetchall()]
+
+    p = lambda name: str(lake / name).replace("\\", "/")
+    neows = {r["id"]: r for r in rows(f"SELECT * FROM '{p('asteroids.parquet')}'")}
+    if "relative_velocity_km_s" not in next(iter(neows.values())):
+        pytest.skip("Local asteroids.parquet predates Step 7; run: python nasa_asteroids.py --from-raw asteroids_raw.json")
+
+    client = _client_for(lake)
+    body = _world(client)
+    world = _by_id(body)
+    assert set(world) == set(neows) and body["world"]["object_count"] == len(neows)
+
+    raw_path = lake / "asteroids_raw.json"
+    if body["world"]["neows"]["source_raw_sha256"] is not None and raw_path.exists():
+        assert body["world"]["neows"]["source_raw_sha256"] == hashlib.sha256(raw_path.read_bytes()).hexdigest()
+
+    resolved, linked = set(), set()
+    for neows_id, rec in world.items():
+        src, enc = neows[neows_id], rec["encounter"]
+        # NeoWs facts trace to the stored NeoWs row, internally consistent.
+        for field in ("closest_approach_date", "close_approach_datetime", "miss_distance_km",
+                      "relative_velocity_km_s", "estimated_diameter_min_km", "estimated_diameter_max_km"):
+            assert enc[field] == src[field], (neows_id, field)
+        assert enc["is_potentially_hazardous"] is src["hazardous"]
+        assert enc["close_approach_datetime"][:10] == enc["closest_approach_date"]
+        assert enc["estimated_diameter_min_km"] <= enc["estimated_diameter_max_km"]
+        d = rec["illustrative_direction"]
+        assert (d["x"], d["y"], d["z"]) == illustrative_direction(neows_id)
+
+        prof = _profile(client, neows_id)
+        assert prof["identity"]["asteroid_key"] == rec["asteroid_key"]
+        assert prof["identity"]["match_state"] == rec["resolution"]["match_state"]
+        assert prof["encounter"]["miss_distance_km"] == enc["miss_distance_km"]
+        assert prof["encounter"]["close_approach_datetime"] == enc["close_approach_datetime"]
+        assert prof["encounter"]["is_sentry_object"] is src["is_sentry_object"]
+        assert prof["neows_physical"]["absolute_magnitude_h"] == src["absolute_magnitude_h"]
+        assert prof["sentry"]["status"] == rec["sentry"]["status"]
+        assert prof["provenance"]["sbdb"]["run_id"] == rec["sbdb"]["run_id"]
+        assert prof["provenance"]["neows"] == body["world"]["neows"]
+
+        if rec["resolution"]["match_state"] == "RESOLVED":
+            resolved.add(neows_id)
+            # SBDB: every orbit element served equals the single stored snapshot's row.
+            spkid, run_id = rec["sbdb"]["spkid"], rec["sbdb"]["run_id"]
+            elements = {r["element_name"]: r["element_value"] for r in rows(
+                f"SELECT element_name, element_value FROM '{p('fact_sbdb_orbit_element.parquet')}' "
+                "WHERE spkid = ? AND run_id = ?", (spkid, run_id))}
+            for field, element in _SBDB_ELEMENT_FIELDS.items():
+                assert prof["orbit"][field] == elements[element], (neows_id, field)
+            sbdb_h = rows(f"SELECT param_value_numeric FROM '{p('fact_sbdb_physical_parameter.parquet')}' "
+                          "WHERE spkid = ? AND run_id = ? AND param_name = 'H'", (spkid, run_id))
+            assert prof["physical"]["absolute_magnitude"] == sbdb_h[0]["param_value_numeric"]
+        if rec["sentry"]["status"] == "available":
+            linked.add(neows_id)
+            sentry_row = rows(f"SELECT * FROM '{p('fact_sentry_risk_snapshot.parquet')}' "
+                              "WHERE sentry_id = ? AND snapshot_key = ? AND run_id = ?",
+                              (rec["sentry"]["sentry_id"], rec["sentry"]["latest_snapshot_key"], rec["sentry"]["run_id"]))
+            assert len(sentry_row) == 1
+            _assert_assessment_equals_record(prof["sentry"]["assessment"], sentry_row[0])
+            # Three sources, three places: NeoWs H, SBDB H and Sentry H are each served from their own table.
+            assert prof["sentry"]["assessment"]["absolute_magnitude"] == sentry_row[0]["absolute_magnitude"]
+            assert prof["encounter"]["relative_velocity_km_s"] == src["relative_velocity_km_s"]
+            assert prof["sentry"]["assessment"]["v_infinity_km_s"] == sentry_row[0]["v_infinity_km_s"]
+        else:
+            assert all(v is None for k, v in prof["sentry"]["assessment"].items() if k != "availability")
+
+    # Present-day facts of the local dataset (not architectural assumptions).
+    assert resolved == linked == {_TW54_NEOWS, _ST_NEOWS}
+
+
+@pytest.mark.skipif(
+    not (_REAL_LAKEHOUSE / "asteroids.parquet").exists(),
+    reason="Local Parquet lakehouse not present (gitignored; absent in CI).",
+)
+def test_final_query_budget_on_real_data():
+    """World: 1 connection, 1 query. Profile: 3 connections resolved, 1 connection + 1 query unresolved."""
+    executed, opened, served = _instrumented_world_call(_REAL_LAKEHOUSE)
+    assert (opened, len(executed)) == (1, 1) and served > 0
+
+    counts = []
+    real_connect = LocalDuckDBDataProvider._get_connection
+    for neows_id in (_TW54_NEOWS, "2138971"):
+        log: list[str] = []
+        opened_box = [0]
+
+        def counting_connect(self, _log=log, _box=opened_box):
+            _box[0] += 1
+            return _CountingConnection(real_connect(self), _log)
+
+        with patch.object(LocalDuckDBDataProvider, "_get_connection", counting_connect):
+            _profile(_client_for(_REAL_LAKEHOUSE), neows_id)
+        counts.append((opened_box[0], len(log)))
+    assert counts[0][0] == 3
+    assert counts[1] == (1, 1)
+
+
+def test_forbidden_key_guard_is_token_based():
+    assert _is_forbidden_key("impact_solution_count") and _is_forbidden_key("danger_score")
+    assert _is_forbidden_key("impact_energy_mt") and _is_forbidden_key("impact_dates")
+    assert not _is_forbidden_key("resolution") and not _is_forbidden_key("match_rule")

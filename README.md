@@ -319,12 +319,14 @@ Once running, interactive API documentation is available at:
 
 ### 4. API Endpoint Inventory
 
-The serving layer provides exactly seven public endpoints:
+The serving layer provides nine public endpoints. `/asteroids/world` and `/asteroids/{neows_id}/profile` are the renderer-facing contracts (see [§11](#11-renderer-serving-contracts-m6)); the per-source routes below them are retained for compatibility.
 
 | Method | Endpoint | Description | Query / Path Parameters | Response Shape / Data Grain |
 |---|---|---|---|---|
 | `GET` | `/health` | Lakehouse storage and DuckDB readiness probe | None | Readiness status, Parquet asset verification, DuckDB engine probe |
-| `GET` | `/asteroids` | Paginated, filterable threat watchlist | `limit` (1–500, def: 50), `offset` (≥0, def: 0), `is_potentially_hazardous_asteroid`, `has_sentry_monitoring`, `min_approach_date`, `max_approach_date` | `meta`, `pagination` (total, limit, offset, returned), `data` (list of close-approach events) |
+| `GET` | `/asteroids/world` | **World snapshot:** every NeoWs object in one set-based response | None | `meta`, `world` (lineage, spatial model), `data` (one record per `neows_id`) |
+| `GET` | `/asteroids/{neows_id}/profile` | **Cross-source profile:** identity, orbit, physical, NeoWs physical, encounter, Sentry, provenance | `neows_id` (positive integer string `^[1-9]\d*$`) | `meta`, `data` (`AsteroidProfile`) |
+| `GET` | `/asteroids` | Paginated, filterable threat watchlist | `limit` (1–500, def: 50), `offset` (≥0, def: 0), `hazardous` (bool), `sentry_monitored` (bool), `horizon_mkm` (>0, max miss distance in millions of km) | `meta`, `pagination` (total, limit, offset, returned), `data` (list of close-approach events) |
 | `GET` | `/asteroids/{neows_id}` | Primary encounter object dossier + canonical identity state | `neows_id` (positive integer string `^[1-9]\d*$`) | `meta`, `data` (encounter dossier), `resolution` (`ResolutionEnvelope`) |
 | `GET` | `/asteroids/{neows_id}/sbdb` | Authoritative JPL SBDB physical parameters and Keplerian elements | `neows_id` (positive integer string `^[1-9]\d*$`) | `meta`, `data` (`SbdbProfile` or `null`), `resolution` (`ResolutionEnvelope`) |
 | `GET` | `/asteroids/{neows_id}/sentry` | Authoritative JPL Sentry impact risk profile | `neows_id` (positive integer string `^[1-9]\d*$`) | `meta`, `data` (`SentryProfile` or `null`), `resolution` (`ResolutionEnvelope`) |
@@ -405,6 +407,37 @@ The API contract is deterministically validated against two canonical objects:
 - **Local-First Boundary:** Milestone 6 establishes a clean local-first serving foundation.
 - **Zero Authentication / Rate Limiting:** The API is designed for internal network or container boundaries; no public authentication or token validation is implemented in this milestone.
 - **Zero In-Memory Caching:** Responses are deterministically derived from Lakehouse storage queries via `DashboardDataProvider` on every request, ensuring cache coherence across pipeline updates.
+
+### 11. Renderer Serving Contracts (M6)
+
+A renderer can be built entirely on two endpoints, without reading Parquet, knowing resolution rules, or calling NASA/JPL.
+
+**`GET /asteroids/world`** — the initial load. One request, one DuckDB connection, one SQL query, regardless of population size.
+- Per record: `neows_id`, `name`, `asteroid_key`; `encounter` (NeoWs only: date, minute-precision `close_approach_datetime`, real `miss_distance_km`, `relative_velocity_km_s`, estimated diameter min/max, PHA flag); `resolution`; `sbdb` and `sentry` availability with snapshot/run provenance; `illustrative_direction` (unit vector).
+- Snapshot level: `neows` lineage, latest Sentry catalog key, `neows_fields_not_in_dataset`, and the `spatial_model` declaring that **direction is illustrative and distance is real**. Directions come from `sha256-uniform-sphere-v1` seeded only by `neows_id`, so an object never moves when its identity later resolves.
+
+**`GET /asteroids/{neows_id}/profile`** — the detail view. Each section names its source and carries an `availability` block.
+
+| Section | Source | Holds |
+|---|---|---|
+| `identity` | resolution + crosswalk | match state, `asteroid_key`, SPK-ID, SBDB names, Sentry ID, crosswalk |
+| `orbit` | JPL SBDB | a, e, q, Q, i, Ω, ω, M, n, period (days, as published), tp, epoch, equinox, fit metadata, SBDB NEO/PHA flags |
+| `physical` | JPL SBDB | H, diameter, albedo, rotation period |
+| `neows_physical` | NASA NeoWs | H, estimated diameter range |
+| `encounter` | NASA NeoWs | approach date/time and epoch, miss distance, relative velocity, PHA flag, `is_sentry_object` |
+| `sentry` | JPL Sentry (Mode S) | linkage status and the published assessment (`ip`, `n_imp`, `range`, Palermo/Torino, `v_inf`, H, diameter, last observation) |
+| `provenance` | — | NeoWs lineage, resolution rule/time, SBDB snapshot, Sentry record |
+
+**Rules the contracts guarantee**
+- **Source separation:** similar quantities from different sources are never merged. NeoWs H, SBDB H and Sentry H each live in their own section; so do the three diameters, and NeoWs relative velocity vs Sentry `v_inf`.
+- **Sentry membership comes only from the crosswalk.** Neither the NeoWs PHA flag nor NeoWs `is_sentry_object` changes `sentry.status` (`available`, `not_resolved`, `not_present`, `ambiguous`, `linked_no_record`); disagreements are served as-is.
+- **Unknown is not false:** missing values are `null`, with a reason — `not_resolved`, `not_in_source`, `not_in_current_contract` (the stored dataset predates the field), or `ambiguous_linkage`.
+- **Coherent snapshots:** all SBDB orbit/physical values come from one `(snapshot_key, run_id)`; the Sentry assessment and its provenance come from one record; NeoWs encounter fields come from one approach in one dataset.
+- **Nothing synthetic:** no danger/risk/threat score; Sentry values are copied from Mode S; Mode O detail (individual impacts, dates, energies) is not ingested and not served.
+
+**Re-deriving NeoWs fields offline.** `python nasa_asteroids.py --from-raw asteroids_raw.json` rebuilds `asteroids.parquet` from an existing raw snapshot without any network call, recording the raw file's SHA-256 (served as `neows.source_raw_sha256`). The raw file is only read.
+
+**Storage shapes.** The processed Parquet (and the Athena `asteroids` table) carries the full NeoWs field set; the CSV, its Athena table and SQLite intentionally keep the original five columns. The API reads only Parquet and serves older 5-column Parquet files, reporting the newer fields as `not_in_current_contract`.
 
 ---
 
