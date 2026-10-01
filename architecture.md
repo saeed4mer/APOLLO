@@ -1,6 +1,6 @@
 # NASA Planetary Defense Platform — System Architecture
 
-This document describes the end-to-end technical architecture of the **NASA Planetary Defense Risk Intelligence Platform**, detailing data ingestion, Lakehouse storage, deterministic entity resolution, analytical modeling, the **FastAPI Data Serving Layer (Milestone 6)**, and future consumer integrations.
+This document describes the end-to-end technical architecture of the **NASA Planetary Defense Risk Intelligence Platform**, detailing data ingestion, Lakehouse storage, deterministic entity resolution, analytical modeling, the **FastAPI Data Serving Layer (Milestone 6)**, and the **APOLLO renderer (Milestone 7)** that consumes it.
 
 ---
 
@@ -51,20 +51,19 @@ This document describes the end-to-end technical architecture of the **NASA Plan
 │         └── AthenaDataProvider (Future Serverless Cloud Lakehouse)               │
 └──────────────────────────────────────────────────────────────────────────────────┘
                                │
-                ┌──────────────┴──────────────┐
-                ▼                             ▼
-┌──────────────────────────────┐┌──────────────────────────────┐
-│  FASTAPI DATA SERVING LAYER  ││  INTERACTIVE MISSION DOSSIER │
-│         (Milestone 6)        ││         (Milestone 5)        │
-│ • Production REST Endpoints  ││ • 5-Tab Streamlit Dashboard  │
-│ • Strict Pydantic v2 Schemas ││ • Local in-process provider  │
-│ • Uniform Error Envelopes    ││   integration                │
-│ • Local Uvicorn ASGI Server  ││                              │
-└──────────────────────────────┘└──────────────────────────────┘
-                │                             ▲
-                │     Milestone 7 Planned     │
-                └─────────────────────────────┘
-                     (HTTP API Integration)
+                               ▼
+┌──────────────────────────────────────────────────────────────────────────────────┐
+│                     FASTAPI DATA SERVING LAYER (Milestone 6)                     │
+│  • Production REST endpoints incl. GET /asteroids/world and /{id}/profile        │
+│  • Strict Pydantic v2 schemas, uniform error envelopes, local Uvicorn server     │
+└──────────────────────────────────────────────────────────────────────────────────┘
+                               │  HTTP (one world request; a profile per selection)
+                               ▼
+┌──────────────────────────────────────────────────────────────────────────────────┐
+│                       APOLLO RENDERER (Milestone 7, frontend/)                   │
+│  • TypeScript + Three.js; consumes only the API, never storage                   │
+│  • Distance world, reversible reveal, focus callouts (see frontend/README.md)     │
+└──────────────────────────────────────────────────────────────────────────────────┘
 ```
 
 ---
@@ -114,7 +113,7 @@ DashboardDataProvider (Unified Facade Provider)
          ↓
 FastAPI Routes + Pydantic Schemas (api/service.py, api/routes/)
          ↓
-HTTP Consumers / Milestone 7 Dashboard
+APOLLO renderer (frontend/) & other HTTP consumers
 ```
 
 > **Design Principle:** The API layer is strictly a serving boundary. It does not replace the underlying ingestion, validation, entity-resolution, historical risk, or data quality pipelines. Routes delegate exclusively through the `DashboardDataProvider` abstraction.
@@ -143,7 +142,7 @@ HTTP Consumers / Milestone 7 Dashboard
 ### 1. Active Mode: Local DuckDB / Parquet Lakehouse
 - **Execution Mode Label:** `LOCAL (DUCKDB / PARQUET LAKEHOUSE)`
 - **Behavior:** Queries local Parquet files via an in-memory DuckDB connection (`duckdb.connect(":memory:")`).
-- **Readiness:** Storage verification checks physical existence of the four critical Parquet assets, and query engine verification executes `SELECT 1` against DuckDB.
+- **Readiness:** Storage verification checks physical existence of the four critical Parquet assets, and query engine verification executes `SELECT 1` against DuckDB. On a fresh checkout with none of those assets, the module-level app serves an empty, schema-valid placeholder lakehouse from a temporary directory outside the repository (`api.main.resolve_default_lakehouse`).
 
 ### 2. Future Mode: Amazon Athena / S3 Lakehouse
 - **Execution Mode Label:** `ATHENA (LIVE AWS S3 LAKEHOUSE)`
@@ -158,17 +157,14 @@ HTTP Consumers / Milestone 7 Dashboard
 
 ---
 
-## 5. Downstream Consumer Readiness (Milestone 7)
+## 5. APOLLO Renderer (Milestone 7)
 
-### Current Streamlit Integration (Milestone 5)
-[`dashboard.py`](dashboard.py) currently imports and instantiates `DashboardDataProvider` directly in-process:
-```python
-from dashboard_data import DashboardDataProvider
-provider = DashboardDataProvider()
-```
+The presentation layer is [`frontend/`](frontend/), the APOLLO renderer (TypeScript, Three.js, Vite). It is
+a pure HTTP consumer of the serving layer: one `GET /asteroids/world` at load and one
+`GET /asteroids/{neows_id}/profile` per selection, proxied in development from `/api` to the local
+Uvicorn server. It never reads Parquet or re-derives backend logic; Sentry linkage, identity resolution
+and the illustrative direction are consumed exactly as served. Its spatial model, lifecycle guarantees
+and tests are documented in [`frontend/README.md`](frontend/README.md).
 
-### Planned Milestone 7 API Consumer Architecture
-In Milestone 7, the frontend architecture will be updated to consume the FastAPI HTTP endpoints:
-- **HTTP Client Adapter:** An asynchronous client (using `httpx`) will query `http://127.0.0.1:8000/asteroids...`.
-- **Decoupled Deployment:** Enables running the FastAPI serving layer and Streamlit dashboard in independent processes or containers.
-- **Local Fallback:** Preserves direct provider instantiation as an offline fallback when the HTTP service is not running.
+The earlier Streamlit dossier (`dashboard.py`), which used `DashboardDataProvider` in-process, has been
+retired. `dashboard_data.py` keeps its historical name and remains the API's data-access provider.

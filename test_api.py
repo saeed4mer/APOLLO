@@ -56,7 +56,7 @@ from nasa_sbdb import (
     SBDB_PHYS_PAR_SCHEMA,
 )
 from nasa_sentry import SENTRY_RISK_SNAPSHOT_SCHEMA
-from test_dashboard import (
+from test_data_provider import (
     _FIXTURE_ASTEROIDS,
     _FIXTURE_BRIDGE,
     _FIXTURE_RESOLUTION,

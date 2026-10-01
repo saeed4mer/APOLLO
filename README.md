@@ -1,8 +1,7 @@
 # NASA Planetary Defense Risk Intelligence Platform
 
-An end-to-end planetary defense data engineering platform that ingests, validates, characterizes, resolves, and tracks Near-Earth Objects (NEOs) across multiple distinct NASA/JPL astronomical data sources. The platform unifies operational close approaches, long-term impact monitoring, and Keplerian orbital characterizations into an analytics-ready Amazon S3 lakehouse, Amazon Athena serverless SQL intelligence views, and an interactive Streamlit intelligence dossier.
+An end-to-end planetary defense data engineering platform that ingests, validates, characterizes, resolves, and tracks Near-Earth Objects (NEOs) across multiple distinct NASA/JPL astronomical data sources. The platform unifies operational close approaches, long-term impact monitoring, and Keplerian orbital characterizations into an analytics-ready Amazon S3 lakehouse, Amazon Athena serverless SQL intelligence views, a FastAPI serving layer, and **APOLLO** (*Asteroid Proximity & Orbital Logistics Lookout Operation*), an immersive Three.js renderer of the real asteroid data.
 
-![Tests](https://img.shields.io/badge/tests-470%20passed-brightgreen)
 ![Python](https://img.shields.io/badge/python-3.11-blue)
 ![CI](https://img.shields.io/badge/CI-GitHub%20Actions-informational)
 ![Code Style](https://img.shields.io/badge/code%20style-ruff-000000.svg)
@@ -16,9 +15,8 @@ An end-to-end planetary defense data engineering platform that ingests, validate
 - [End-to-End Architecture](#end-to-end-architecture)
 - [Core Architectural Principles](#core-architectural-principles)
 - [Analytical Intelligence Layer](#analytical-intelligence-layer)
-- [Interactive Streamlit Dossier](#interactive-streamlit-dossier)
 - [FastAPI Data Serving Layer](#fastapi-data-serving-layer)
-- [Immersive Renderer (M7)](#immersive-renderer-m7)
+- [APOLLO Renderer (M7)](#apollo-renderer-m7)
 - [Production Orchestration](#production-orchestration)
 - [Historical Backfill Semantics](#historical-backfill-semantics)
 - [Data Quality & Reliability Gates](#data-quality--reliability-gates)
@@ -116,8 +114,10 @@ bridge_asteroid_identifier                    fact_entity_resolution
                (External tables & partition projection)
                                │
                                ▼
-                 Interactive Streamlit Dossier
-                   (5-Tab Mission Intelligence)
+                FastAPI Serving Layer (api/)
+                               │
+                               ▼
+         APOLLO Renderer (frontend/, Three.js + TypeScript)
 ```
 
 ---
@@ -125,7 +125,7 @@ bridge_asteroid_identifier                    fact_entity_resolution
 ## Core Architectural Principles
 
 ### 1. Parquet is the Authoritative Storage Contract
-All downstream analytics, Athena queries, entity resolution logic, and dashboard providers consume **processed Parquet files** with explicit PyArrow schemas.
+All downstream analytics, Athena queries, entity resolution logic, and the API's data-access provider consume **processed Parquet files** with explicit PyArrow schemas.
 - Raw JSON responses are archived for auditability, lineage, and replay.
 - SQLite and CSV files serve as local development inspection targets and transient operational exports.
 - Cloud analytics strictly query Snappy-compressed Parquet.
@@ -229,48 +229,14 @@ The platform provides unified serverless SQL analytics in Amazon Athena across t
 
 ---
 
-## Interactive Streamlit Dossier
-
-The platform includes an interactive mission intelligence dossier implemented in [`dashboard.py`](dashboard.py) with cached data access in [`dashboard_data.py`](dashboard_data.py):
-
-```bash
-streamlit run dashboard.py
-```
-
-### The 5-Tab Multi-Source Dossier
-
-1. **TAB 1 — OVERVIEW:**
-   - Planetary defense KPI summary cards (imminent approaches, PHAs, monitored impact threats).
-   - Multi-source identity coverage matrix showing resolution state (`RESOLVED`, `UNRESOLVED`, `AMBIGUOUS`).
-   - Close-approach geometry telemetry (miss distance, relative velocity, estimated diameter bounds).
-   - Observational protocol and safety guidance disclosures.
-2. **TAB 2 — SBDB (Small-Body Database):**
-   - Full Keplerian orbit elements ($a$, $e$, $i$, $\Omega$, $\omega$, $M$, period, perihelion, aphelion).
-   - Physical characteristics ($H$ absolute magnitude, estimated diameter, geometric albedo, rotation period).
-   - Orbit solution quality tier, solution ID, and data-arc parameters.
-3. **TAB 3 — SENTRY (Impact Risk Monitor):**
-   - Published Palermo Technical Scale (maximum and cumulative).
-   - Torino Scale maximum hazard classification.
-   - Cumulative and maximum impact probabilities with encounter paths count.
-   - Potential impact year range and velocity at infinity ($v_\infty$).
-4. **TAB 4 — HISTORY (Risk Metric Lifecycles):**
-   - Longitudinal tracking of risk parameters across catalog snapshots.
-   - Observational delta change log highlighting when impact probabilities or Palermo ratings shift across published epochs.
-5. **TAB 5 — CROSSWALK (Identity Provenance):**
-   - Full identity bridge audit displaying exact match rules (`EXACT_SPKID_MATCH`, `EXACT_DESIGNATION_MATCH`) and evidence.
-   - Side-by-side namespace isolation grid displaying raw keys across NeoWs, SBDB, and Sentry.
-   - Verification of the canonical anchor and primary pivot assignment.
-
----
-
 ## FastAPI Data Serving Layer
 
 The platform includes a dedicated, production-grade REST data serving layer implemented with **FastAPI** and **Uvicorn** located in [`api/`](api/).
 
 ### 1. Purpose & Role
-The FastAPI serving layer exposes the unified multi-source intelligence produced by Milestones 1–5 through a stable, decoupled HTTP interface for downstream analytical consumers, particularly the upcoming **Milestone 7 API-driven dashboard**.
+The FastAPI serving layer exposes the unified multi-source intelligence produced by Milestones 1–5 through a stable, decoupled HTTP interface for downstream analytical consumers, particularly the **APOLLO renderer (Milestone 7)**.
 
-> **Important Boundary:** The serving layer is strictly a data presentation and access boundary. It does **not** replace or re-implement any underlying ingestion pipelines (`nasa_asteroids.py`, `nasa_sentry.py`, `nasa_sbdb.py`), deterministic entity resolution (`entity_resolution.py`), historical risk calculation (`historical_risk.py`), or data quality enforcement (`pipeline_dq.py`). All analytical truths remain rooted in the authoritative Lakehouse assets.
+> **Important Boundary:** The serving layer is strictly a data presentation and access boundary. It does **not** replace or re-implement any underlying ingestion pipelines (`nasa_asteroids.py`, `nasa_sentry.py`, `nasa_sbdb.py`), deterministic entity resolution (`entity_resolution.py`), historical risk views (`athena_historical_risk.sql`), or data quality enforcement (`pipeline_dq.py`). All analytical truths remain rooted in the authoritative Lakehouse assets.
 
 ### 2. Architecture & Delegation
 The API decouples HTTP request handling from Lakehouse storage engines by delegating all data queries through the existing `DashboardDataProvider` facade:
@@ -296,7 +262,7 @@ NASA / External Observational Telemetry
          └── Uniform Error Envelope Standardization
                    │
                    ▼
-  HTTP Downstream Consumers / Milestone 7 Dashboard
+  APOLLO Renderer (frontend/) & other HTTP consumers
 ```
 
 API routes never read Parquet files directly from disk, never execute ad-hoc SQL, and never contact external NASA/JPL/AWS endpoints.
@@ -442,9 +408,9 @@ A renderer can be built entirely on two endpoints, without reading Parquet, know
 
 ---
 
-## Immersive Renderer (M7)
+## APOLLO Renderer (M7)
 
-The new presentation layer lives in [`frontend/`](frontend/): a Three.js + TypeScript world (Earth's curved horizon below; a long scroll journey through a virtual distance world (each million km has real spacing; the viewport shows only the local region, and the Earth is left behind and returns) that reveals real distance outward from Earth, so each real asteroid falls in — closest first — only once the frontier reaches its exact NeoWs miss distance, and retreats again on scrolling back; the Moon-distance landmark appearing at night as the journey passes 384,400 km, dashed distance guides every 1,000,000 km under the same mapping as the asteroids, a ⚠ badge for the NeoWs PHA flag; and click-to-focus intelligence callouts) that consumes **only** `GET /asteroids/world` (once, at load) and `GET /asteroids/{neows_id}/profile` (on selection). It never reads storage or re-derives backend logic. Architecture, spatial model, state model and lifecycle guarantees are documented in [`frontend/README.md`](frontend/README.md). The Streamlit dashboard remains available as the reference until the renderer is validated.
+The new presentation layer lives in [`frontend/`](frontend/): a Three.js + TypeScript world (Earth's curved horizon below; a long scroll journey through a virtual distance world (each million km has real spacing; the viewport shows only the local region, and the Earth is left behind and returns) that reveals real distance outward from Earth, so each real asteroid falls in — closest first — only once the frontier reaches its exact NeoWs miss distance, and retreats again on scrolling back; the Moon-distance landmark appearing at night as the journey passes 384,400 km, dashed distance guides every 1,000,000 km under the same mapping as the asteroids, a ⚠ badge for the NeoWs PHA flag; and click-to-focus intelligence callouts) that consumes **only** `GET /asteroids/world` (once, at load) and `GET /asteroids/{neows_id}/profile` (on selection). It never reads storage or re-derives backend logic. Architecture, spatial model, state model and lifecycle guarantees are documented in [`frontend/README.md`](frontend/README.md). It replaces the earlier Streamlit dashboard, which has been retired.
 
 ```bash
 uvicorn api.main:app --host 127.0.0.1 --port 8000   # terminal 1: API
@@ -591,7 +557,7 @@ The repository includes a fast, fully isolated quality gate in [`.github/workflo
 - **Environment:** `ubuntu-latest`, Python 3.11 with pip caching.
 - **Formatting Gate:** `git diff --check` with zero tolerance for trailing whitespace or newline discrepancies.
 - **Linter Gate:** `ruff check .` with zero tolerance for lint or syntax errors.
-- **Full Test Suite:** `pytest -v` executing all **286 automated tests**.
+- **Full Test Suite:** `pytest -v` executing the complete Python suite (the renderer's own tests run locally with `npm test` in `frontend/`; CI covers the Python platform only).
 - **Isolation Guarantee:** Runs with **zero AWS credentials**, **zero NASA API keys**, and **zero live network calls**. All external APIs and cloud operations are strictly mocked.
 
 ---
@@ -630,8 +596,9 @@ NASA-Intelligence-Platform/
 │       ├── health.py                        # GET /health readiness probe route
 │       └── asteroids.py                     # GET /asteroids operational & sub-resource routes
 │
-├── dashboard.py                             # Interactive 5-tab Streamlit intelligence dossier
-├── dashboard_data.py                        # Data provider & caching layer for dashboard
+├── dashboard_data.py                        # Data-access provider behind the API (local DuckDB / Athena)
+│
+├── frontend/                                # M7 APOLLO renderer (TypeScript, Three.js, Vite); see frontend/README.md
 │
 ├── athena_schema.sql                        # Foundation Athena external table DDL
 ├── athena_queries.sql                       # Standard operational Athena SQL queries
@@ -639,20 +606,21 @@ NASA-Intelligence-Platform/
 ├── athena_historical_risk.sql               # M5 historical Sentry risk lifecycle views
 ├── schema.sql                               # Local SQLite schema DDL
 │
-├── test_api.py                              # M6 FastAPI endpoint & contract test suite (184 tests)
+├── test_api.py                              # FastAPI endpoint & contract test suite
 ├── test_nasa_asteroids.py                   # NeoWs ingestion test suite
 ├── test_nasa_sentry.py                      # Sentry Mode S ingestion test suite
 ├── test_nasa_sbdb.py                        # SBDB batch ingestion & failure gate test suite
 ├── test_entity_resolution.py                # Entity resolution & invariant test suite
 ├── test_historical_risk.py                  # Historical risk view validation test suite
 ├── test_intelligence_layer.py               # Multi-source intelligence view test suite
-├── test_dashboard.py                        # Streamlit dashboard & data provider test suite
+├── test_data_provider.py                    # Data-access provider test suite (fixtures shared with test_api.py)
 ├── test_pipeline_utils.py                   # Shared utilities & manifest test suite
 ├── test_pipeline_dq.py                      # Centralized data quality engine test suite
 │
 ├── requirements.txt                         # Pinned production and test dependencies
 ├── .env.example                             # Configuration environment variable template
 ├── .gitignore                               # Git exclusion rules
+├── architecture.md                          # System architecture
 └── README.md                                # Authoritative platform documentation
 ```
 
@@ -671,8 +639,8 @@ NASA-Intelligence-Platform/
 | **Columnar Engine** | PyArrow / Apache Parquet | Explicit schemas, Snappy compression, authoritative lakehouse datasets |
 | **Identity Engine** | Python / PyArrow | Deterministic entity resolution, namespace isolation, primary pivot crosswalk |
 | **Quality Engine** | Python / PyArrow / Boto3 | Centralized operational DQ engine (`pipeline_dq.py`) & invariant enforcement |
-| **Dashboard** | Streamlit, Pandas | Interactive 5-tab mission intelligence dossier |
-| **Quality & Linting**| Ruff, Pytest | Code formatting, static linting, and 470-test automated regression suite |
+| **Renderer** | TypeScript, Three.js, Vite, Vitest | APOLLO immersive renderer consuming the API |
+| **Quality & Linting**| Ruff, Pytest, Vitest, Playwright | Linting, the Python regression suite, renderer unit tests and a browser torture test |
 | **CI / CD** | GitHub Actions | Hardened pull-request validation and daily production orchestration |
 
 ---
@@ -768,8 +736,11 @@ python pipeline_dq.py run-suite --execution-mode CURRENT_PRODUCTION
 
 ### 6. Run Quality Checks & Automated Tests
 ```bash
-# Run complete test suite (470 tests)
+# Run the complete Python test suite
 pytest -v
+
+# Run the renderer unit tests (from frontend/)
+npm test
 
 # Run linter
 ruff check .
@@ -791,9 +762,9 @@ Interactive API documentation will be available at:
 - **ReDoc UI:** `http://127.0.0.1:8000/redoc`
 - **OpenAPI Schema:** `http://127.0.0.1:8000/openapi.json`
 
-### 8. Launch the Streamlit Intelligence Dossier
+### 8. Launch the APOLLO Renderer
 ```bash
-streamlit run dashboard.py
+cd frontend && npm install && npm run dev   # with the API running; open http://127.0.0.1:5173
 ```
 
 ---
@@ -815,7 +786,7 @@ streamlit run dashboard.py
     - Deterministic multi-source entity resolution and canonical `asteroid_key` / SPK-ID crosswalk
     - Historical Sentry risk intelligence and snapshot lifecycle tracking
     - Cross-source intelligence views in Amazon Athena
-    - Mission intelligence dashboard expansion (5-tab dossier)
+    - Mission intelligence dashboard expansion (5-tab Streamlit dossier; retired in M7)
     - Phase 10 production orchestration, native SBDB batch ingestion, and CI hardening
   - **Phase 11:** Complete
     - Phase 11A: Unified pipeline execution manifest (`run_manifest.json`) and metadata S3 publication
@@ -824,20 +795,21 @@ streamlit run dashboard.py
     - Phase 11D: Complete (Final regression verification, test expansion to 286 tests, and documentation hardening)
 
 - **M6: Data Serving Layer (FastAPI) — Complete / Operational**
-  - **Slices 1–6:** Complete (184 dedicated API tests, 470 total repo regression tests)
+  - **Slices 1–6:** Complete (184 dedicated API tests and 470 repository tests at M6 completion)
     - Established decoupled FastAPI serving layer (`api/`) querying Lakehouse via `DashboardDataProvider`
     - Standardized 7 REST endpoints: `/health`, `/asteroids`, `/asteroids/{id}`, `/asteroids/{id}/sbdb`, `/asteroids/{id}/sentry`, `/asteroids/{id}/history`, `/asteroids/{id}/crosswalk`
     - Strict Pydantic v2 models (`extra="forbid"`) enforcing positive integer path parameters and envelope consistency
     - Decoupled domain identity missingness (`data: null`) from empty collections (`data: []`)
     - Offline, deterministic testing architecture backed by in-memory DuckDB Lakehouse fixtures
 
-- **M7: API-Driven Dashboard Integration — Planned**
-  - Refactoring Streamlit dossier to consume FastAPI HTTP endpoints via an asynchronous HTTP client
-  - Dual-mode execution support (direct provider fallback or remote HTTP serving)
+- **M7: APOLLO Renderer — Complete**
+  - Renderer serving contracts (`GET /asteroids/world`, `GET /asteroids/{id}/profile`) and normalized NeoWs fields
+  - APOLLO, a TypeScript / Three.js renderer consuming only those endpoints (see [`frontend/README.md`](frontend/README.md))
+  - The Streamlit dossier (`dashboard.py`) and its tests were retired; the data-access provider (`dashboard_data.py`) remains the API's provider
 
 ### Parked / Future Architectural Roadmap
 *The following items are explicitly parked and represent future potential enhancements:*
 - **Event-Driven Architecture:** Decoupling batch runs with Apache Kafka or AWS EventBridge.
 - **Multi-Region Disaster Recovery:** Automated S3 Cross-Region Replication (CRR) and multi-region Athena catalog sync.
 - **Ephemeris Calculations:** N-body gravitational trajectory simulation (the platform presents factual observational telemetry, not orbital integrations).
-- **Containerized Deployment:** Docker packaging and AWS ECS / Fargate deployment for the Streamlit dashboard and FastAPI service.
+- **Containerized Deployment:** Docker packaging and AWS ECS / Fargate deployment for the FastAPI service and the APOLLO renderer.

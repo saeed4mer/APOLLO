@@ -5,6 +5,7 @@ __pycache__/
 *.db
 *.parquet
 asteroids_raw.json
+asteroids.csv
 *_summary.json
 sbdb_raw_*.json
 sentry_risk_snapshot_raw.json

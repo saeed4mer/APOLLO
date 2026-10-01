@@ -1,5 +1,5 @@
 import type { FieldSpec, FieldValue, UnavailableReason } from "../models/profile";
-import type { MatchState, SbdbStatus, SentryLinkageStatus } from "../models/world";
+import type { MatchState, SentryLinkageStatus } from "../models/world";
 
 /**
  * Presentation only. Raw values are never changed in the model; formatting happens here.
@@ -68,12 +68,6 @@ export const SENTRY_STATUS_TEXT: Record<SentryLinkageStatus, string> = {
   not_present: "No Sentry record linked",
   ambiguous: "Ambiguous: several Sentry records linked",
   linked_no_record: "Linked, but no Sentry record stored",
-};
-
-export const SBDB_STATUS_TEXT: Record<SbdbStatus, string> = {
-  available: "SBDB snapshot available",
-  not_resolved: "Not linkable: identity not resolved",
-  not_present: "No SBDB snapshot stored",
 };
 
 export const MATCH_STATE_TEXT: Record<MatchState, string> = {

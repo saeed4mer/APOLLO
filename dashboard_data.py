@@ -1,7 +1,8 @@
-"""Phase 9 Data Access Layer for the NASA Planetary Defense Platform.
+"""Data Access Layer for the NASA Planetary Defense Platform.
 
-Provides a unified, decoupled data-access abstraction between the Streamlit UI
-and the lakehouse storage (Local DuckDB / Parquet and AWS Athena).
+Provides the unified, decoupled data-access abstraction between the FastAPI serving
+layer (api/) and the lakehouse storage (Local DuckDB / Parquet and AWS Athena). The
+module name is historical: it originally also served the retired Streamlit dashboard.
 
 Strict Scientific Safety Guardrails:
 - Prohibition of synthetic formulas or composite ranking indexes.
