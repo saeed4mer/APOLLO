@@ -1,6 +1,6 @@
 import type { WorldSnapshotInfo } from "../models/world";
 import { introOpacity } from "../scene/atmosphere";
-import { ALTITUDE_DOMAIN_KM, SKY_PROJECTION } from "../scene/skyLayout";
+import { DISTANCE_MIN_KM, SKY_PROJECTION } from "../scene/skyLayout";
 import type { WorldState } from "../state/store";
 import { el } from "./dom";
 import { formatKmCompact } from "./format";
@@ -74,14 +74,18 @@ export class WorldHud {
   private renderAbout(snapshot: WorldSnapshotInfo | null, shown: number, rejected: number): void {
     const lines = [
       "This is an illustrative visualization, not a physics simulation or an orbit propagator.",
-      "Height above the Earth arc follows each asteroid's real NeoWs miss distance on a logarithmic scale " +
-        `(${formatKmCompact(ALTITUDE_DOMAIN_KM.min)} to ${formatKmCompact(ALTITUDE_DOMAIN_KM.max)}): nearer objects always sit lower. ` +
-        "Dashed arcs mark real reference distances.",
-      `Horizontal placement is the longitude of the backend's deterministic illustrative direction (${snapshot?.spatial_model.direction_algorithm ?? "…"}; renderer projection ${SKY_PROJECTION}). It is not an observed approach direction.`,
+      "Scrolling travels outward from Earth: it reveals real distance, from 0 km to beyond the farthest asteroid. " +
+        "An asteroid appears only once the revealed distance reaches its exact NeoWs miss distance (closest first), " +
+        "and retreats again if you scroll back below it.",
+      "Height above the Earth arc follows each asteroid's exact miss distance on a logarithmic scale starting at " +
+        `Earth's radius (${formatKmCompact(DISTANCE_MIN_KM)}): nearer objects always rest lower. The ruler on the right marks every 1,000,000 km; labels are rounded, positions never are.`,
+      "The Moon marks the Earth-Moon distance (384,400 km) for scale. It is not part of the asteroid data.",
+      "The warning badge marks asteroids whose NASA NeoWs 'potentially hazardous' flag is true. It is not an impact prediction, a Sentry result or a risk score.",
+      `Horizontal placement is the longitude of the backend's deterministic illustrative direction (${snapshot?.spatial_model.direction_algorithm ?? "..."}; renderer projection ${SKY_PROJECTION}). It is not an observed approach direction.`,
       "The falling motion and fiery trail are a visual metaphor for approach, identical for every asteroid. They are not trajectories.",
-      "Every asteroid is drawn the same size and colour: neither encodes diameter, hazard or Sentry status. Facts appear as text on hover and in focus.",
-      "Stars and terrain are decoration, not data.",
-      snapshot ? `${shown} NeoWs object(s) shown from GET /asteroids/world${rejected ? `; ${rejected} rejected by validation` : ""}.` : "Loading the asteroid population…",
+      "Every asteroid is drawn the same size and colour: neither encodes diameter, hazard or Sentry status.",
+      "Stars, terrain and the Moon are context, not data.",
+      snapshot ? `${shown} NeoWs object(s) shown from GET /asteroids/world${rejected ? `; ${rejected} rejected by validation` : ""}.` : "Loading the asteroid population...",
     ];
     this.aboutBody.replaceChildren(...lines.map((text) => el("p", { text })));
   }

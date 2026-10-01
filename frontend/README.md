@@ -52,45 +52,60 @@ react-three-fiber; see M7.1 report.) Dependencies are exact-pinned: `three` at r
 
 Orthographic camera in CSS-pixel units (origin bottom-left, +Y up), so the world is a 2.5D
 composition and DOM overlays line up exactly. Scene layers, back to front: sky gradient (container
-CSS) · decorative stars · real-distance reference arcs · Earth arc (body, grass band, rim, haze,
-lakes, tiny trees/houses/people) · fall trails · asteroid rocks · invisible hit discs · focus glow.
+CSS) · decorative stars · Moon landmark + arc · revealed-distance frontier arc · 1M-km ruler · Earth arc (body, grass band, rim, haze,
+lakes, tiny trees/houses/people) · fall trails · asteroid rocks · PHA badges · focus glow.
 
 | Concern | Rule | Where |
 |---|---|---|
 | Earth | Large-radius arc; crest at 30% of viewport height, sinking to 17% as you rise; sag 10% of height; geometry rebuilt only on resize | `scene/skyLayout.ts`, `renderer/earthArt.ts` |
-| Height (real distance) | Altitude above the surface **directly below** = `MIN + log10-fraction(miss km) × range`, domain 6,371 km (Earth radius) → 1e8 km, fixed constants. Strictly increasing, same range at every x, so **nearer always rests lower** | `scene/skyLayout.ts` |
+| Height (real distance) | Altitude above the surface **directly below** = `MIN + log10-fraction(miss km) × range`, over a domain derived from the data: 6,371 km (Earth radius) → max(1e8 km, next 10M-km boundary above 1.05 × the farthest real miss distance), so no real record is ever clipped. Uses the exact value (never rounded). Strictly increasing, same range at every x, so **nearer always rests lower** | `scene/skyLayout.ts` |
 | Horizontal (illustrative) | Longitude of the served `illustrative_direction`: `atan2(y, x) / π` (projection `longitude-fan-v1`). The served vector is used as-is, never regenerated; latitude (z) is unused | `scene/skyLayout.ts` |
-| Appearance | Every asteroid: same low-poly rock, same on-screen size, same colour. Size and colour encode nothing (no PHA/Sentry/danger encoding); facts are text | `renderer/WorldRenderer.ts` |
+| Appearance | Every asteroid: same low-poly rock, same on-screen size, same colour. Size and colour encode nothing; facts are text | `renderer/WorldRenderer.ts` |
+| Hazard badge | A small ⚠ beside the rock **only** when NeoWs `is_potentially_hazardous === true` (not for `false`, not for `null`). It is the NeoWs PHA flag, not an impact prediction, Sentry result or risk score; nothing else encodes hazard | `renderer/WorldRenderer.ts` |
 | Trail | Only while falling; identical for every asteroid; a visual metaphor for approach, not a trajectory | `renderer/WorldRenderer.ts` |
-| Reference arcs | Moon distance (384,400 km), 1M, 10M, 100M km, drawn at their true altitudes on the same scale | `scene/skyLayout.ts` |
+| Moon landmark | A visual Moon on a dashed arc at the altitude of 384,400 km, labelled "MOON DISTANCE / 384,400 km". Context, not data: not a record, no direction semantics, never uses `illustrative_direction` | `renderer/WorldRenderer.ts`, `ui/LabelLayer.ts` |
+| Distance scale | A ruler at the right edge with a tick every 1,000,000 km up to the revealed frontier (longer every 10M), labels thinned to stay ≥ 15 px apart; a frontier arc and "REVEALED TO n km" label (floored to whole millions). Labels are presentation only — positions always use exact distances | `scene/skyLayout.ts`, `ui/LabelLayer.ts` |
 
 ## Scroll model
 
 One authoritative `explorationProgress` in [0, 1] (`scene/exploration.ts`): the wheel changes only
-the target (0.04 per 100 px, ≤ 240 px per event); the single loop eases the current value toward it
+the target (0.03 per 100 px, ≤ 240 px per event); the single loop eases the current value toward it
 (τ = 140 ms) and settles exactly; NaN/Infinity are ignored. While an asteroid is focused, the wheel
 does not change exploration.
 
+Progress maps to a **revealed distance** (`revealedDistanceKm`, the exact inverse of the altitude
+scale, so the frontier arc always sits where an asteroid at that distance rests):
+
+```
+revealedKm(p) = 0                                   if p = 0
+              = minKm × (maxKm / minKm)^p           otherwise      (deterministic, monotonic, finite, ≤ maxKm)
+eligible(a)   = a.miss_distance_km <= revealedKm    (exact source value)
+```
+
 | Progress | What changes (all continuous functions of progress) |
 |---|---|
-| 0 | Sky blue, Earth crest at 30%, title + "Scroll to explore", the farthest few asteroids falling in |
-| 0 → 0.6 | Asteroids revealed farthest-first, evenly spread over [−0.08, 0.6] (ties by `neows_id`) |
+| 0 | Sky blue, Earth crest at 30%, title + "Scroll to explore", the Moon landmark; revealed distance 0 km, **no asteroid visible or falling** |
+| 0 → 1 | Asteroids appear **closest first** as the frontier reaches each exact miss distance (ties by `neows_id`) |
 | 0.25 / 0.45 / 0.7 / 1 | Sky colour stops: upper atmosphere · twilight · space · deep space (per-channel interpolation, no thresholds) |
-| 0.3 → 0.5 | Reference arcs fade in |
+| 0.42 → 0.5 | 1M-km ruler fades in (frontier ≈ 1M km) |
 | 0.4 → 0.9 | Stars fade in |
-| 0.55 → 0.65 | Names for up to 24 settled asteroids, nearest first, skipping any that would overlap a nearer label |
-| 0.78 → 0.86 | Miss distances added under names |
+| 0.45 → 0.55 | Names for up to 24 settled asteroids, nearest first, skipping any that would overlap a nearer label or the scale |
+| 0.62 → 0.7 | Miss distances added under names |
 
-## Asteroid lifecycle
+## Asteroid lifecycle (reversible)
 
 ```
-HIDDEN ──(deepest progress ≥ its threshold)──▶ FALLING (1.6 s, ease-out) ──▶ SETTLED (stays settled)
+eligible:      HIDDEN ──▶ FALLING (1.6 s, ease-out) ──▶ SETTLED
+not eligible:  SETTLED ──▶ RETREATING (0.7 s, same path back up) ──▶ HIDDEN
 ```
 
-Reveal follows the **deepest** progress reached, so scrolling back up, focusing, resizing or
-re-loading the same population never re-hides or re-drops an asteroid. Simultaneous reveals are
-staggered 140 ms apart but within ≤ 1.2 s total. A deep-linked asteroid not yet revealed appears
-settled immediately.
+Each asteroid has one animation value in [0, 1] advanced by frame time inside the single render
+loop (no timers, no per-asteroid loops, no copies); a reversal mid-animation continues from the
+current value. Scrolling back retreats everything beyond the new frontier (farthest first);
+scrolling forward re-reveals the same asteroids at the same positions. Resizing or re-supplying the
+same population restarts nothing. While focused, the selected asteroid is pinned visible (a
+deep-linked asteroid beyond the frontier appears for its focus) and the wheel does not move the
+exploration; on return the unchanged revealed distance applies again, so nothing re-falls.
 
 ## Focus (selection)
 
@@ -110,15 +125,18 @@ only path that changes selection, so one click is one selection and refresh rest
 - **Cleanup:** `dispose()` cancels the frame, disconnects the ResizeObserver, removes every listener (canvas, `hashchange`, `keydown`), frees GPU resources, clears the sky and DOM. Vite HMR disposes the old app first.
 - **No N+1:** one world request at load; a profile request only on selection; hover uses loaded data.
 - **No invented values:** `null` is *Unavailable* (measurements) or *Unknown* (flags); loading is *Loading…*; numbers carry units; formatting never changes the model; every shown asteroid is a real API record.
-- **Performance:** one instanced draw per layer; canvas rect cached on resize; hit bounds computed lazily on pick. Measured JS cost per frame while scrolling: ~0.2 ms (35 real objects), ~1.6 ms (1,035 incl. synthetic).
+- **Performance:** one instanced draw per layer; canvas rect cached on resize; picking is an O(n) screen-space disc test (no raycast).
 
 ## Interaction torture test
 
 `npm run e2e` starts its own API (port 8765) and Vite server (port 5174), drives the installed
 Chrome/Edge (`CHROME_PATH` to override), and fails on any unexpected console error, page error,
-NaN/Infinity, duplicated loop/listener, broken distance ordering, restarted fall, or displayed value
-that differs from the API. It checks the composition (Earth arc, sky, tiny world), the scroll
-journey with screenshots of six defined states, distance ordering for every real object, rapid
-up/down scrolling, click-to-focus centring, rapid A→B→C selection, callout values for three objects,
+NaN/Infinity, duplicated loop/listener/object, broken distance ordering, an asteroid visible beyond
+the revealed distance, a fall at load or on return from focus, or a displayed value that differs
+from the API. It checks the composition (Earth arc, sky, tiny world), nothing falling before scroll,
+distance-eligible reveal at several frontiers, the 1M frontier label progression, the Moon landmark,
+the PHA badge on real PHA objects, backward retreat and deterministic re-reveal, an exact threshold
+on a real non-round distance, distance ordering for every real object, focus return preserving the
+revealed distance, rapid up/down scrolling, click-to-focus centring, rapid A→B→C selection, callout values for three objects,
 Escape/focus cycles, resizes, refresh, rapid reloads, a 404, an API outage with recovery, and
 performance at 35 and 1,035 objects. Output: `e2e/artifacts/` (git-ignored).

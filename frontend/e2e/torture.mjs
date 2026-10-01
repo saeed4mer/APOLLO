@@ -1,12 +1,14 @@
 /**
- * Interaction torture test (real browser, real API, real data) for the M7.2 immersive world.
+ * Interaction torture test (real browser, real API, real data) for the M7.2 immersive world
+ * (distance-driven, reversible reveal).
  *
  *   npm run e2e                      (from frontend/)
  *
  * Starts its own FastAPI server (port 8765) and Vite dev server (port 5174), drives the installed
  * Chrome/Edge via playwright-core (no browser download), and fails on any unexpected console error,
- * page error, NaN/Infinity, failed assertion, duplicated loop/listener, broken distance ordering,
- * restarted fall, or displayed value that does not match the API. Screenshots of the defined
+ * page error, NaN/Infinity, failed assertion, duplicated loop/listener/object, broken distance
+ * ordering, an asteroid visible before the revealed distance reaches its exact miss distance, a
+ * fall on load or on return from focus, or a displayed value that does not match the API. Screenshots of the defined
  * progression states and report.json are written to e2e/artifacts/ (git-ignored).
  *
  * Browser selection: CHROME_PATH env var, else the standard Chrome / Edge install locations.
@@ -125,7 +127,39 @@ async function main() {
     if (path.startsWith("/api/")) report.requests[path] = (report.requests[path] ?? 0) + 1;
   });
 
-  const dbg = (fn, ...args) => page.evaluate(([f, a]) => window.__ASTEROID_DEBUG__[f](...a), [fn, args]);
+  // Watchdog: a hung browser call fails the run with the call that hung, instead of stalling silently.
+  let lastCall = { what: "start", at: Date.now() };
+  const watchdog = setInterval(() => {
+    if (Date.now() - lastCall.at > 45_000) {
+      failures.push(`watchdog: no progress for 45 s; last call ${lastCall.what}`);
+      console.log(`  ✗ watchdog: stuck in ${lastCall.what}`);
+      process.exitCode = 1;
+      clearInterval(watchdog);
+      for (const child of children) stop(child);
+      setTimeout(() => process.exit(1), 1000);
+    }
+  }, 5_000);
+  watchdog.unref?.();
+  // Wheel input and screenshots also count as progress (and name themselves if they hang).
+  const wheelRaw = page.mouse.wheel.bind(page.mouse);
+  page.mouse.wheel = async (...a) => {
+    lastCall = { what: `wheel(${a.join(",")})`, at: Date.now() };
+    await wheelRaw(...a);
+    lastCall = { what: "after wheel", at: Date.now() };
+  };
+  const screenshotRaw = page.screenshot.bind(page);
+  page.screenshot = async (...a) => {
+    lastCall = { what: "screenshot", at: Date.now() };
+    const shot = await screenshotRaw(...a);
+    lastCall = { what: "after screenshot", at: Date.now() };
+    return shot;
+  };
+  const dbg = async (fn, ...args) => {
+    lastCall = { what: `dbg ${fn}(${JSON.stringify(args)})`, at: Date.now() };
+    const result = await page.evaluate(([f, a]) => window.__ASTEROID_DEBUG__[f](...a), [fn, args]);
+    lastCall = { what: `after dbg ${fn}`, at: Date.now() };
+    return result;
+  };
   const waitFor = async (predicate, label, timeoutMs = 15_000) => {
     const started = Date.now();
     while (Date.now() - started < timeoutMs) {
@@ -139,9 +173,7 @@ async function main() {
     report.diagnostics.push({ label, ...d });
     check(d.activeLoops === 1 && d.inputListeners === 6 && d.storeListeners === 1 && d.keyListeners === 1, `${label}: diagnostics ${JSON.stringify(d)}`);
   };
-  const phases = async () => Object.fromEntries(await Promise.all(worldApi.data.map(async (r) => [r.neows_id, await dbg("phaseOf", r.neows_id)])));
   const counts = (ph) => Object.values(ph).reduce((acc, p) => ({ ...acc, [p]: (acc[p] ?? 0) + 1 }), {});
-  const waitSettled = (label) => waitFor(async () => !Object.values(await phases()).includes("FALLING"), `${label}: falls settle`, 10_000);
   const pixelAt = async (x, y) => {
     const shot = await page.screenshot({ clip: { x: Math.round(x) - 1, y: Math.round(y) - 1, width: 3, height: 3 } });
     return page.evaluate(async (b64) => {
@@ -156,21 +188,9 @@ async function main() {
       return [...ctx.getImageData(1, 1, 1, 1).data].slice(0, 3);
     }, shot.toString("base64"));
   };
-  const scrollTo = async (target) => {
-    await page.mouse.move(VIEW.width / 2, VIEW.height * 0.45);
-    for (let i = 0; i < 80; i++) {
-      const p = (await dbg("progress")).target;
-      if (Math.abs(p - target) < 0.03) break;
-      await page.mouse.wheel(0, p < target ? 120 : -120);
-    }
-    await waitFor(async () => {
-      const p = await dbg("progress");
-      return p.current === p.target;
-    }, `progress settles near ${target}`);
-  };
   const captureState = async (name, label) => {
     const p = await dbg("progress");
-    const ph = counts(await phases());
+    const ph = counts(await dbg("phases"));
     const sky = await dbg("skyBackground");
     report.states.push({ name, label, progress: p.current, phases: ph, zenith: rgbOf(sky, "zenith") });
     await page.screenshot({ path: join(ARTIFACTS, `${name}.png`) });
@@ -182,127 +202,256 @@ async function main() {
     return performance.memory?.usedJSHeapSize ?? null;
   });
 
-  // ── Composition: Earth below, sky above, tiny world, a few distant hints ─────────────────
+  const allPhases = () => dbg("phases");
+  const realIds = worldApi.data.map((r) => r.neows_id);
+  const missKm = (id) => apiById.get(id).encounter.miss_distance_km;
+  const moving = (ph) => Object.values(ph).some((p) => p === "FALLING" || p === "RETREATING");
+  const waitStill = (label) => waitFor(async () => {
+    const p = await dbg("progress");
+    return p.current === p.target && !moving(await allPhases());
+  }, `${label}: progress and animations settle`, 15_000);
+  /** At rest, an asteroid is SETTLED exactly when its real miss distance <= the revealed distance. */
+  const checkEligibility = async (label) => {
+    const { revealedKm } = await dbg("progress");
+    const ph = await allPhases();
+    const wrong = realIds.filter((id) => (ph[id] === "SETTLED") !== (missKm(id) <= revealedKm) || (ph[id] !== "SETTLED" && ph[id] !== "HIDDEN"));
+    check(wrong.length === 0, `${label}: eligibility exact at ${revealedKm.toFixed(0)} km (wrong: ${wrong.join(",")})`);
+    return { revealedKm, shown: realIds.filter((id) => ph[id] === "SETTLED") };
+  };
+  /** While the frontier moves, nothing may be visible beyond it unless it is on its way out. */
+  const watchTransition = async (label, frames = 40) => {
+    const seen = {};
+    for (let i = 0; i < frames; i++) {
+      const [{ revealedKm }, ph] = await Promise.all([dbg("progress"), allPhases()]);
+      for (const id of realIds) {
+        (seen[id] ??= new Set()).add(ph[id]);
+        if ((ph[id] === "FALLING" || ph[id] === "SETTLED") && missKm(id) > revealedKm) {
+          check(false, `${label}: ${id} visible (${ph[id]}) beyond the frontier (${missKm(id)} > ${revealedKm})`);
+        }
+      }
+      await sleep(40);
+    }
+    return seen;
+  };
+  const wheel = async (notches, delta = 120) => {
+    await page.mouse.move(VIEW.width * 0.4, VIEW.height * 0.45);
+    for (let i = 0; i < Math.abs(notches); i++) await page.mouse.wheel(0, Math.sign(notches) * delta);
+  };
+  /** Wheel toward the progress whose revealed distance is `km` (real user input, so approximate). */
+  const scrollToKm = async (km) => {
+    const domain = await dbg("distanceDomain");
+    const target = km <= 0 ? 0 : Math.log(km / domain.minKm) / Math.log(domain.maxKm / domain.minKm);
+    for (let i = 0; i < 80; i++) {
+      const p = (await dbg("progress")).target;
+      if (Math.abs(p - target) < 0.02) break;
+      await wheel(1 * Math.sign(target - p), 60);
+    }
+  };
+  const parseKm = (text) => Number(text.replace(/[^0-9]/g, ""));
+  const positionsOf = async (ids) => Object.fromEntries(await Promise.all(ids.map(async (id) => [id, await dbg("screenPositionOf", id)])));
+
+  // ── 1-3. Fresh load: Earth arc, and NO asteroid falls before the user scrolls ─────────────
   await page.goto(`${WEB}/#/`);
   await waitFor(async () => (await page.evaluate(() => window.__ASTEROID_DEBUG__?.worldStatus())) === "ready", "world ready");
-  const initialPhases = counts(await phases());
-  const revealedAtLoad = worldApi.data.length - (initialPhases.HIDDEN ?? 0);
-  check(revealedAtLoad >= 1 && revealedAtLoad < worldApi.data.length / 4, `a few distant hints at load: ${JSON.stringify(initialPhases)}`);
-  check((initialPhases.FALLING ?? 0) > 0, "asteroids fall in at load");
-  await waitSettled("load");
+  step("1. fresh load", { records: realIds.length });
   const crest = await dbg("earthCrestY");
   check(Math.abs(crest / VIEW.height - 0.3) < 0.01, `Earth crest in the lower third: ${crest}`);
   const earth = await dbg("earthCounts");
   check(earth && earth.trees > 0 && earth.houses > 0 && earth.people > 0 && earth.lakes > 0, `tiny world exists: ${JSON.stringify(earth)}`);
   const grass = await pixelAt(VIEW.width / 2, VIEW.height - crest + 20);
   check(grass[1] > grass[0] && grass[1] > grass[2], `green Earth below the crest: rgb ${grass}`);
-  const sky0 = await captureState("state0-earth-sky", "Initial Earth + sky");
+  step("2. Earth arc with its tiny world", { crest, earth });
+  for (let i = 0; i < 6; i++) {
+    const ph = await allPhases();
+    check(Object.values(ph).every((p) => p === "HIDDEN"), `load sample ${i}: nothing visible before scroll ${JSON.stringify(counts(ph))}`);
+    check((await dbg("progress")).revealedKm === 0, `load sample ${i}: revealed distance is 0 km`);
+    await sleep(500);
+  }
+  const sky0 = await captureState("state0-earth-sky", "Initial Earth + sky, nothing falling");
   check(sky0.zenith && sky0.zenith[2] > sky0.zenith[0] && luminance(sky0.zenith) > 120, `initial background is sky blue: ${sky0.zenith}`);
-  const settledNow = await phases();
-  const settledIds = Object.keys(settledNow).filter((id) => settledNow[id] === "SETTLED");
-  const positions = await Promise.all(settledIds.map(async (id) => [id, await dbg("screenPositionOf", id)]));
-  const isolated = positions.find(([, a]) => positions.every(([, b]) => a === b || Math.hypot(a.x - b.x, a.y - b.y) > 40));
-  const firstId = (isolated ?? positions[0])[0];
-  const rockPos = await dbg("screenPositionOf", firstId);
-  const rock = await pixelAt(rockPos.x, rockPos.y);
-  check(rock[0] > rock[2], `rock drawn at its position (not sky): rgb ${rock}`);
   check(await page.isVisible(".intro"), "title and scroll hint visible");
-  step("composition: Earth arc, sky, tiny world, distant hints", { revealedAtLoad, crest, earth, rock });
+  check((await dbg("frontierLabel")) === null, "no frontier label before scrolling");
+  step("3. no asteroid falls before scroll (3 s observed)");
   await diagnostics("after load");
   report.memory.heapAfterLoad = await heap();
 
-  // ── Hover: lightweight facts from loaded world data, checked against the API ────────────
-  await page.mouse.move(rockPos.x, rockPos.y);
-  await waitFor(async () => (await dbg("hoveredId")) === firstId, "hover");
+  // ── 4-5. A small scroll reveals only distance-eligible asteroids ──────────────────────────
+  await wheel(4);
+  await watchTransition("small scroll", 20);
+  await waitStill("small scroll");
+  const small = await checkEligibility("small scroll");
+  check(small.shown.length === 0, `small scroll (${small.revealedKm.toFixed(0)} km) is short of the nearest asteroid (${Math.min(...realIds.map(missKm)).toFixed(0)} km): nothing shown`);
+  step("4. scroll a small amount", { revealedKm: Math.round(small.revealedKm) });
+  await scrollToKm(9e6);
+  await watchTransition("to ~9M km");
+  await waitStill("to ~9M km");
+  const near = await checkEligibility("~9M km");
+  check(near.shown.length > 0 && near.shown.length < realIds.length / 4, `only the nearest few are shown at ${near.revealedKm.toFixed(0)} km: ${near.shown.join(",")}`);
+  const s1 = await captureState("state1-first-reveal", "First distance-eligible asteroids");
+  step("5. only distance-eligible asteroids appear", { revealedKm: Math.round(near.revealedKm), shown: near.shown.map((id) => [id, Math.round(missKm(id))]) });
+
+  // ── 6-8. Farther: more appear; the frontier label counts up in 1M steps ──────────────────
+  const frontierSeen = [];
+  let lastShown = near.shown.length;
+  let lastLum = luminance(s1.zenith);
+  for (const [km, name, label] of [[25e6, "state2-intermediate", "Intermediate field (~25M km)"], [50e6, "state3-space-transition", "Sky/space transition (~50M km)"], [1.2e8, "state4-deep", "Deep field: every asteroid"]]) {
+    await scrollToKm(km);
+    const seen = await watchTransition(name);
+    await waitStill(name);
+    const e = await checkEligibility(name);
+    check(e.shown.length >= lastShown, `${name}: more asteroids as the frontier moves out (${lastShown} -> ${e.shown.length})`);
+    check(Object.values(seen).some((set) => set.has("FALLING")) || e.shown.length === lastShown, `${name}: newly reached asteroids fall in`);
+    const text = await dbg("frontierLabel");
+    frontierSeen.push([Math.round(e.revealedKm), text]);
+    check(/^REVEALED TO [\d,]+ km$/.test(text ?? ""), `${name}: frontier label "${text}"`);
+    const shownKm = parseKm(text ?? "");
+    check(shownKm % 1e6 === 0 && shownKm <= e.revealedKm && e.revealedKm - shownKm < 1e6, `${name}: frontier label floors to whole millions (${shownKm} vs ${e.revealedKm.toFixed(0)})`);
+    const ruler = await dbg("rulerLabels");
+    check(ruler.length > 0 && ruler.every((t) => /^\d+M km$/.test(t)), `${name}: ruler labels in 1M units ${JSON.stringify(ruler)}`);
+    const s = await captureState(name, label);
+    check(luminance(s.zenith) < lastLum, `${name}: sky darkens toward space (${lastLum.toFixed(1)} -> ${luminance(s.zenith).toFixed(1)})`);
+    lastLum = luminance(s.zenith);
+    lastShown = e.shown.length;
+  }
+  check(lastShown === realIds.length, `every real asteroid revealed at depth (${lastShown}/${realIds.length})`);
+  const labelSteps = [];
+  await scrollToKm(9e6);
+  await waitStill("back to 9M for label sampling");
+  for (let i = 0; i < 14; i++) {
+    await wheel(1, 60);
+    await waitFor(async () => { const p = await dbg("progress"); return p.current === p.target; }, "label step settles");
+    labelSteps.push(parseKm((await dbg("frontierLabel")) ?? "0"));
+  }
+  check(labelSteps.every((v, i) => i === 0 || v >= labelSteps[i - 1]), `frontier label is monotonic while scrolling out: ${labelSteps.join(" ")}`);
+  check(labelSteps.every((v) => v % 1e6 === 0) && new Set(labelSteps).size >= 5, `frontier label moves through 1M steps: ${labelSteps.join(" ")}`);
+  step("6-7. farther objects appear as the frontier moves out", { frontier: frontierSeen });
+  step("8. distance label progression", { labels: labelSteps.map((v) => `${v / 1e6}M`) });
+
+  // ── 9. Moon distance reference ─────────────────────────────────────────────────────────
+  const moonPos = await dbg("moonScreenPosition");
+  check(await page.isVisible(".moon-label"), "Moon label visible");
+  check((await page.textContent(".moon-title")) === "MOON DISTANCE" && (await page.textContent(".moon-km")) === "384,400 km", "Moon labelled MOON DISTANCE / 384,400 km");
+  const moonLabelBox = await page.$eval(".moon-label", (n) => n.getBoundingClientRect().toJSON());
+  check(Math.abs(moonLabelBox.left - (moonPos.x + 16)) < 3 && Math.abs(moonLabelBox.top - (moonPos.y - 14)) < 3, `Moon label next to the Moon ${JSON.stringify(moonPos)}`);
+  check(!(await dbg("worldIds")).includes("moon") && (await dbg("worldIds")).length === realIds.length, "Moon is not a data record");
+  const ladder = [];
+  for (const id of realIds) ladder.push([missKm(id), await dbg("restAltitudeOf", id)]);
+  const domain = await dbg("distanceDomain");
+  const layout = await page.evaluate(() => window.__ASTEROID_DEBUG__.earthCrestY());
+  step("9. Moon distance reference", { moonScreen: moonPos, domain, earthCrest: layout });
+
+  // ── 10. PHA hazard badge on real PHA=true objects only ───────────────────────────────────
+  await scrollToKm(1.2e8);
+  await waitStill("deep for hazard");
+  const hazardRows = [];
+  for (const r of worldApi.data) {
+    const shown = await dbg("hazardShownOf", r.neows_id);
+    hazardRows.push([r.neows_id, r.encounter.is_potentially_hazardous, shown]);
+    check(shown === (r.encounter.is_potentially_hazardous === true), `${r.neows_id}: hazard badge ${shown} for PHA ${r.encounter.is_potentially_hazardous}`);
+  }
+  const pha = worldApi.data.find((r) => r.neows_id === "2138971") ?? worldApi.data.find((r) => r.encounter.is_potentially_hazardous === true);
+  const phaPos = await dbg("screenPositionOf", pha.neows_id);
+  const badge = await page.screenshot({ clip: { x: Math.round(phaPos.x) - 4, y: Math.round(phaPos.y) - 30, width: 34, height: 34 } });
+  writeFileSync(join(ARTIFACTS, "hazard-badge.png"), badge);
+  const yellow = await page.evaluate(async (b64) => {
+    const img = new Image();
+    img.src = `data:image/png;base64,${b64}`;
+    await img.decode();
+    const c = document.createElement("canvas");
+    c.width = img.width;
+    c.height = img.height;
+    const ctx = c.getContext("2d");
+    ctx.drawImage(img, 0, 0);
+    const d = ctx.getImageData(0, 0, c.width, c.height).data;
+    let n = 0;
+    for (let i = 0; i < d.length; i += 4) if (d[i] > 200 && d[i + 1] > 150 && d[i + 2] < 120) n++;
+    return n;
+  }, badge.toString("base64"));
+  check(yellow > 10, `hazard badge drawn beside real PHA object ${pha.neows_id} (${yellow} badge pixels)`);
+  // Hover: lightweight facts from loaded world data, checked against the API.
+  await page.mouse.move(phaPos.x, phaPos.y);
+  await waitFor(async () => (await dbg("hoveredId")) === pha.neows_id, "hover the PHA object");
   const tip = await page.textContent(".hover-tooltip");
-  const hov = apiById.get(firstId);
   for (const [field, value] of Object.entries({
-    name: hov.name, neows_id: hov.neows_id, miss: fmt(hov.encounter.miss_distance_km, 0, "km"),
-    pha: hov.encounter.is_potentially_hazardous === null ? "Unknown" : hov.encounter.is_potentially_hazardous ? "Yes" : "No",
+    name: pha.name, neows_id: pha.neows_id, miss: fmt(pha.encounter.miss_distance_km, 0, "km"), pha: "Yes",
   })) {
     const ok = check(tip.includes(value), `hover ${field} "${value}"`);
-    report.dataAccuracy.push({ view: "hover", neows_id: firstId, field, api: value, shown: ok });
+    report.dataAccuracy.push({ view: "hover", neows_id: pha.neows_id, field, api: value, shown: ok });
   }
   await page.mouse.move(3, 3);
   await waitFor(async () => (await dbg("hoveredId")) === null, "hover cleared");
-  step("hover shows API facts and clears");
+  step("10. PHA hazard badge", { phaTrue: hazardRows.filter((r) => r[1] === true).map((r) => r[0]), badgePixels: yellow });
 
-  // ── Scroll journey: progressive reveal + continuous sky -> space ────────────────────────
-  let lastRevealed = revealedAtLoad;
-  let lastLum = luminance(sky0.zenith);
-  for (const [target, name, label] of [[0.2, "state1-early-reveal", "Early asteroid appearance"], [0.45, "state2-intermediate", "Intermediate field"], [0.7, "state3-space-transition", "Sky/space transition"], [1, "state4-deep", "Deep asteroid environment"]]) {
-    await scrollTo(target);
-    await waitSettled(name);
-    const s = await captureState(name, label);
-    const revealed = worldApi.data.length - (s.ph.HIDDEN ?? 0);
-    check(revealed >= lastRevealed, `${name}: reveal is monotonic (${lastRevealed} -> ${revealed})`);
-    check(luminance(s.zenith) < lastLum, `${name}: sky darkens toward space (${lastLum.toFixed(1)} -> ${luminance(s.zenith).toFixed(1)})`);
-    check(s.p.current >= 0 && s.p.current <= 1, `${name}: progress bounded ${s.p.current}`);
-    lastRevealed = revealed;
-    lastLum = luminance(s.zenith);
-  }
-  check(lastRevealed === worldApi.data.length, `every real asteroid revealed at depth (${lastRevealed}/${worldApi.data.length})`);
-  check(await page.isHidden(".intro") || Number(await page.$eval(".intro", (e) => getComputedStyle(e).opacity)) < 0.05, "intro faded at depth");
-  const labelCount = await page.$$eval(".asteroid-label:not([hidden])", (n) => n.length);
-  check(labelCount > 0, `labels appear at depth (${labelCount})`);
-  step("scroll journey: progressive reveal, sky -> space", { states: report.states.map((s) => [s.name, s.progress.toFixed(2), s.zenith]) });
+  // ── 11-12. Scroll backward: farther asteroids retreat and disappear ───────────────────────
+  const deepShown = (await checkEligibility("before backward")).shown;
+  const deepPositions = await positionsOf(realIds);
+  await scrollToKm(16e6);
+  const back = await watchTransition("backward to ~16M km", 50);
+  await waitStill("backward");
+  const backE = await checkEligibility("after backward");
+  const retreated = realIds.filter((id) => missKm(id) > backE.revealedKm);
+  check(retreated.length > 0 && retreated.every((id) => back[id].has("RETREATING") || back[id].has("HIDDEN")), "asteroids beyond the frontier retreated");
+  check(retreated.every((id) => !back[id].has("FALLING")), "nothing falls on a backward scroll");
+  check(backE.shown.every((id) => [...back[id]].every((p) => p === "SETTLED")), "asteroids within the frontier stay settled on the way back");
+  await captureState("state6-backward", "Scrolled back: farther asteroids retreated");
+  step("11-12. backward scroll retreats farther asteroids", { revealedKm: Math.round(backE.revealedKm), stillShown: backE.shown.length, retreated: retreated.length });
+
+  // ── 13-14. Forward again: the same asteroids re-reveal at the same positions ─────────────
+  await scrollToKm(1.2e8);
+  await watchTransition("forward again");
+  await waitStill("forward again");
+  const again = await checkEligibility("forward again");
+  check(JSON.stringify(again.shown.sort()) === JSON.stringify([...deepShown].sort()), "the same asteroids are shown again");
+  const againPositions = await positionsOf(realIds);
+  check(realIds.every((id) => JSON.stringify(againPositions[id]) === JSON.stringify(deepPositions[id])), "re-revealed asteroids rest at identical positions");
+  step("13-14. forward again re-reveals deterministically");
 
   // ── Distance ordering on the real population ─────────────────────────────────────────
-  const altitudes = [];
-  for (const r of worldApi.data) altitudes.push([r.encounter.miss_distance_km, await dbg("restAltitudeOf", r.neows_id), r.neows_id]);
-  altitudes.sort((a, b) => a[0] - b[0]);
-  let ordered = true;
-  for (let i = 1; i < altitudes.length; i++) if (!(altitudes[i][1] > altitudes[i - 1][1])) ordered = false;
-  check(ordered, "rest altitude strictly increases with real miss distance (all objects)");
-  const nearest = altitudes[0];
-  const farthest = altitudes.at(-1);
-  step("distance ordering preserved", { nearest: [nearest[2], nearest[0], nearest[1].toFixed(1)], farthest: [farthest[2], farthest[0], farthest[1].toFixed(1)] });
+  const altitudes = realIds.map((id) => [missKm(id), ladder.find(([km]) => km === missKm(id))[1], id]).sort((a, b) => a[0] - b[0]);
+  check(altitudes.every((a, i) => i === 0 || a[1] > altitudes[i - 1][1]), "rest altitude strictly increases with real miss distance (all objects)");
+  step("distance ordering preserved", { nearest: altitudes[0], farthest: altitudes.at(-1) });
 
-  // ── Rapid up/down: bounded, settles, never re-drops anything ─────────────────────────
-  const before = await phases();
-  await page.mouse.move(VIEW.width / 2, VIEW.height * 0.45);
-  for (let round = 0; round < 20; round++) {
-    for (let i = 0; i < 6; i++) await page.mouse.wheel(0, round % 2 ? 240 : -240);
+  // ── Exact threshold on a real non-round distance (exact target, then real phases) ────────
+  const demoId = pha.neows_id;
+  const demoKm = missKm(demoId);
+  const progressFor = (km) => Math.log(km / domain.minKm) / Math.log(domain.maxKm / domain.minKm);
+  const threshold = {};
+  for (const [label, km] of [["below", demoKm - 1], ["at", demoKm * (1 + 1e-12)]]) {
+    await dbg("exploreTo", progressFor(km));
+    await waitStill(`threshold ${label}`);
+    const { revealedKm } = await dbg("progress");
+    threshold[label] = { revealedKm, phase: await dbg("phaseOf", demoId), labelText: await dbg("frontierLabel") };
   }
-  for (let i = 0; i < 30; i++) await page.mouse.wheel(0, 240);
-  await waitFor(async () => {
-    const p = await dbg("progress");
-    return p.current === p.target;
-  }, "progress settles after rapid scrolling");
-  const p = await dbg("progress");
-  check(p.current >= 0 && p.current <= 1 && Number.isFinite(p.current), `progress bounded after rapid scroll ${JSON.stringify(p)}`);
-  const after = await phases();
-  check(Object.keys(before).every((id) => before[id] === "SETTLED" && after[id] === "SETTLED"), "no asteroid restarted its fall during rapid scrolling");
-  await diagnostics("after rapid scroll");
-  step("rapid up/down scrolling is bounded and restarts nothing", { progress: p });
+  check(threshold.below.revealedKm < demoKm && threshold.below.phase === "HIDDEN", `below threshold: ${demoId} hidden at ${threshold.below.revealedKm}`);
+  check(threshold.at.revealedKm >= demoKm && threshold.at.phase === "SETTLED", `at threshold: ${demoId} revealed at ${threshold.at.revealedKm}`);
+  report.thresholdDemo = { neows_id: demoId, miss_distance_km: demoKm, ...threshold };
+  step("exact threshold on a real non-round distance", report.thresholdDemo);
+  await scrollToKm(1.2e8);
+  await waitStill("deep before focus");
 
-  // ── Real click focuses an asteroid; it becomes the visual subject at the centre ──────────
+  // ── 15-16. Select a real asteroid by clicking it; callouts match the API ─────────────────
+  const preFocus = { progress: await dbg("progress"), phases: await allPhases() };
   const clickPos = await dbg("screenPositionOf", ST);
   await page.mouse.click(clickPos.x, clickPos.y);
   await waitFor(async () => (await dbg("profileStatus")) === "ready" && (await dbg("focusSettled")) && (await dbg("focusProgress")) === 1, "click focuses ST");
   check((await dbg("selectedId")) === ST, `click selected ST (got ${await dbg("selectedId")})`);
   const center = await dbg("screenPositionOf", ST);
   check(Math.abs(center.x - VIEW.width / 2) < 4 && Math.abs(center.y - VIEW.height / 2) < 4, `focused asteroid is the visual subject at the centre: ${JSON.stringify(center)}`);
-  check(await page.isHidden(".hover-tooltip"), "no hover card over the focus view");
-  step("click -> focus: asteroid centred, intelligence around it");
+  await wheel(10, 240); // wheel during focus must not move the exploration
+  check((await dbg("progress")).target === preFocus.progress.target, "wheel during focus leaves the exploration untouched");
+  step("15. select an asteroid by click");
 
-  // ── Rapid A -> B -> C selection (URL-driven, as clicks are): the latest always wins ───────
-  const pick = [TW54, ST, worldApi.data.find((r) => r.resolution.match_state === "UNRESOLVED").neows_id];
-  for (const id of pick) await page.evaluate((target) => (location.hash = `#/asteroid/${target}`), id);
-  await waitFor(async () => (await dbg("profileStatus")) === "ready" && (await dbg("focusProgress")) === 1, "focus on C");
-  await sleep(600);
-  check((await dbg("selectedId")) === pick[2], `C remains selected (got ${await dbg("selectedId")})`);
-  check((await page.textContent(".focus-title")).includes(apiById.get(pick[2]).name), "focus title is C");
-  check((await page.textContent('[data-callout="identity"]')).includes(pick[2]), "C's identity callout shows C");
-  step("A -> B -> C rapid selection keeps C", { selected: pick[2] });
-
-  // ── Data accuracy in focus for three real objects ─────────────────────────────────────
   const calloutValue = (key, label) => page.evaluate(([k, l]) => {
     for (const row of document.querySelectorAll(`[data-callout="${k}"] .fact`)) {
       if (row.querySelector(".fact-label")?.textContent === l) return row.querySelector(".fact-value")?.textContent;
     }
     return null;
   }, [key, label]);
+  const pick = [TW54, ST, worldApi.data.find((r) => r.resolution.match_state === "UNRESOLVED").neows_id];
+  for (const id of pick) await page.evaluate((target) => (location.hash = `#/asteroid/${target}`), id);
+  await waitFor(async () => (await dbg("profileStatus")) === "ready" && (await dbg("focusProgress")) === 1, "focus on C");
+  await sleep(600);
+  check((await dbg("selectedId")) === pick[2], `rapid A -> B -> C keeps C (got ${await dbg("selectedId")})`);
   for (const id of [TW54, ST, "3830890"]) {
     await page.evaluate((target) => (location.hash = `#/asteroid/${target}`), id);
     await waitFor(async () => (await dbg("selectedId")) === id && (await dbg("profileStatus")) === "ready", `focus ${id}`);
@@ -327,13 +476,19 @@ async function main() {
     report.dataAccuracy.push({ view: "focus", neows_id: id, field: "sentry", api: prof.sentry.status, shown: sentryShown });
     if (id === TW54) await page.screenshot({ path: join(ARTIFACTS, "state5-focus.png") });
   }
-  step("focus callouts match the API for three objects");
+  step("16. callouts match the API for three objects (and rapid A -> B -> C keeps C)");
 
-  // ── Escape returns; nothing re-drops; open/close cycles stay clean ──────────────────────
+  // ── 17-18. Return: same exploration distance, same states, nothing re-falls ──────────────
   await page.keyboard.press("Escape");
+  const returning = await watchTransition("return from focus", 30);
   await waitFor(async () => (await dbg("selectedId")) === null && (await dbg("focusProgress")) === 0, "Escape returns to the world");
-  check(Object.values(await phases()).every((ph) => ph === "SETTLED"), "returning from focus re-drops nothing");
-  for (let i = 0; i < 10; i++) {
+  await waitStill("after return");
+  check(realIds.every((id) => !returning[id].has("FALLING")), "nothing re-falls when returning from focus");
+  const postFocus = { progress: await dbg("progress"), phases: await allPhases() };
+  check(postFocus.progress.revealedKm === preFocus.progress.revealedKm && postFocus.progress.target === preFocus.progress.target, `same exploration distance after focus (${preFocus.progress.revealedKm} -> ${postFocus.progress.revealedKm})`);
+  check(JSON.stringify(postFocus.phases) === JSON.stringify(preFocus.phases), "same asteroid states after focus");
+  step("17. return to world");
+  for (let i = 0; i < 6; i++) {
     const id = i % 2 ? TW54 : ST;
     const pos = await dbg("screenPositionOf", id);
     await page.mouse.click(pos.x, pos.y);
@@ -341,22 +496,51 @@ async function main() {
     await page.keyboard.press("Escape");
     await waitFor(async () => (await dbg("focusProgress")) === 0, `cycle ${i} back`);
   }
-  await diagnostics("after 10 focus cycles");
+  await waitStill("after focus cycles");
+  check((await dbg("progress")).revealedKm === preFocus.progress.revealedKm, "focus cycles keep the revealed distance");
+  await scrollToKm(16e6);
+  await waitStill("backward after focus");
+  const afterFocusBack = await checkEligibility("backward after focus");
+  check(afterFocusBack.shown.length < realIds.length, "backward scroll after focus retreats the farther asteroids");
+  await diagnostics("after focus cycles");
   report.memory.heapAfterCycles = await heap();
-  check(Object.values(await phases()).every((ph) => ph === "SETTLED"), "10 focus cycles re-drop nothing");
-  step("Escape / focus cycles stable");
+  step("18. the world keeps its exploration distance through focus", { revealedKm: Math.round(preFocus.progress.revealedKm) });
 
-  // ── Resize repeatedly: composition holds, nothing restarts ─────────────────────────────
+  // ── 19-20. Rapid up/down: bounded, consistent, no duplicates, no runaway animation ───────
+  const objectsBefore = await dbg("objectCounts");
+  await page.mouse.move(VIEW.width * 0.4, VIEW.height * 0.45);
+  for (let round = 0; round < 24; round++) {
+    for (let i = 0; i < 6; i++) await page.mouse.wheel(0, round % 2 ? 240 : -240);
+    await sleep(round % 3 === 0 ? 120 : 0);
+  }
+  for (let i = 0; i < 12; i++) await page.mouse.wheel(0, 240);
+  await waitStill("after rapid scrolling");
+  const p = await dbg("progress");
+  check(p.current >= 0 && p.current <= 1 && Number.isFinite(p.current) && Number.isFinite(p.revealedKm), `progress bounded after rapid scroll ${JSON.stringify(p)}`);
+  await checkEligibility("after rapid scrolling");
+  const objectsAfter = await dbg("objectCounts");
+  check(objectsAfter.asteroidInstances === realIds.length && JSON.stringify(objectsAfter) === JSON.stringify(objectsBefore), `no duplicate objects ${JSON.stringify(objectsBefore)} -> ${JSON.stringify(objectsAfter)}`);
+  const still1 = await positionsOf(realIds);
+  await sleep(1000);
+  const still2 = await positionsOf(realIds);
+  check(JSON.stringify(still1) === JSON.stringify(still2) && !moving(await allPhases()), "no runaway animation: everything is stationary once input stops");
+  await diagnostics("after rapid scroll");
+  step("19-20. rapid up/down: bounded, no duplicates, no runaway animation", { progress: p, objects: objectsAfter });
+
+  // ── Resize repeatedly: composition holds, eligibility unchanged ──────────────────────────
   for (const [w, h] of [[1920, 1080], [900, 1200], [2560, 1440], [700, 500], [1280, 720], [VIEW.width, VIEW.height]]) {
     await page.setViewportSize({ width: w, height: h });
     await sleep(200);
     const crestNow = await dbg("earthCrestY");
-    const expected = h * (0.3 + (0.17 - 0.3) * 1); // progress is at 1 here
+    const pr = (await dbg("progress")).current;
+    const sm = pr * pr * (3 - 2 * pr);
+    const expected = h * (0.3 + (0.17 - 0.3) * sm);
     check(Math.abs(crestNow - expected) < 2, `${w}x${h}: Earth stays the lower anchor (${crestNow.toFixed(1)} vs ${expected.toFixed(1)})`);
   }
-  check(Object.values(await phases()).every((ph) => ph === "SETTLED"), "resizing re-drops nothing");
+  await waitStill("after resizes");
+  await checkEligibility("after resizes");
   await diagnostics("after resizes");
-  step("resizes keep the composition and the lifecycle");
+  step("resizes keep the composition and the reveal state");
 
   // ── Refresh restores focus; rapid reloads are clean ────────────────────────────────────
   await page.goto(`${WEB}/#/asteroid/${TW54}`);
@@ -415,7 +599,7 @@ async function main() {
     await perf.mouse.move(VIEW.width / 2, VIEW.height * 0.45);
     const idle = await sample("idle", () => sleep(2000));
     const idleTiming = await perf.evaluate(() => window.__ASTEROID_DEBUG__.timing());
-    const scroll = await sample("scrolling + falling", async () => {
+    const scroll = await sample("scrolling + revealing", async () => {
       for (let i = 0; i < 30; i++) {
         await perf.mouse.wheel(0, 120);
         await sleep(60);

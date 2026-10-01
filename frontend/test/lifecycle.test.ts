@@ -1,11 +1,9 @@
-import * as THREE from "three";
 import { validateProfileResponse } from "../src/api/validateProfile";
 import { validateWorldResponse } from "../src/api/validateWorld";
 import { createApp, type AppHandle } from "../src/app";
 import type { AsteroidProfile } from "../src/models/profile";
 import type { WorldRecord } from "../src/models/world";
-import { ROCK_PX, WorldRenderer } from "../src/renderer/WorldRenderer";
-import { FALL_MS, revealOrder } from "../src/scene/reveal";
+import { WorldRenderer } from "../src/renderer/WorldRenderer";
 import {
   FakeGL, FakeResizeObserver, fixture, flushPromises, installFakeRaf, installFakeResizeObserver, trackListeners,
 } from "./helpers";
@@ -23,7 +21,6 @@ const worldRecords = (): WorldRecord[] => validateWorldResponse(fixture("world.j
 const frames = (n: number) => {
   for (let i = 0; i < n; i++) raf.frame(16);
 };
-const settleFrames = Math.ceil(FALL_MS / 16) + 40;
 
 function newRenderer(host = document.createElement("div")) {
   let gl!: FakeGL;
@@ -80,89 +77,6 @@ describe("WorldRenderer lifecycle", () => {
     renderer.start();
     frames(30);
     expect(gl().renders).toBe(30);
-    renderer.dispose();
-  });
-});
-
-describe("falling animation", () => {
-  it("only the farthest few appear at load; they fall, then SETTLE and stay settled", () => {
-    const { renderer } = newRenderer();
-    const records = worldRecords();
-    renderer.setRecords(records);
-    renderer.start();
-    frames(2);
-    const phases = () => records.map((r) => renderer.phaseOf(r.neows_id));
-    const revealed = phases().filter((p) => p !== "HIDDEN").length;
-    expect(revealed).toBeGreaterThan(0);
-    expect(revealed).toBeLessThan(records.length / 4);
-    expect(phases()).toContain("FALLING");
-    frames(settleFrames);
-    expect(phases().filter((p) => p === "SETTLED").length).toBe(revealed);
-    renderer.dispose();
-  });
-
-  it("settled positions are stationary, and focus / resize / re-supplied records never restart a fall", () => {
-    const { renderer } = newRenderer();
-    const records = worldRecords();
-    renderer.setRecords(records);
-    renderer.start();
-    renderer.exploration.setTarget(1);
-    frames(settleFrames * 2);
-    const ids = records.map((r) => r.neows_id);
-    expect(ids.every((id) => renderer.phaseOf(id) === "SETTLED")).toBe(true);
-    const before = ids.map((id) => renderer.screenPositionOf(id));
-    frames(20);
-    expect(ids.map((id) => renderer.screenPositionOf(id))).toEqual(before); // stationary
-
-    renderer.setFocus(ids[0]!);
-    frames(80);
-    renderer.setFocus(null);
-    frames(80);
-    renderer.setRecords(records);
-    FakeResizeObserver.instances.at(-1)!.trigger(); // the renderer's real resize path (Earth/stars rebuilt)
-    frames(2);
-    expect(ids.every((id) => renderer.phaseOf(id) === "SETTLED")).toBe(true);
-    renderer.dispose();
-  });
-
-  it("scrolling back up never re-hides or re-drops asteroids", () => {
-    const { renderer } = newRenderer();
-    const records = worldRecords();
-    renderer.setRecords(records);
-    renderer.start();
-    renderer.exploration.setTarget(0.6);
-    frames(settleFrames * 2);
-    renderer.exploration.setTarget(0);
-    frames(settleFrames);
-    expect(records.every((r) => renderer.phaseOf(r.neows_id) === "SETTLED")).toBe(true);
-    renderer.dispose();
-  });
-
-  it("every settled asteroid has the same rock size (size encodes nothing)", () => {
-    const { renderer } = newRenderer();
-    renderer.setRecords(worldRecords());
-    renderer.start();
-    renderer.exploration.setTarget(1);
-    frames(settleFrames * 2);
-    const rocks = (renderer as unknown as { rocks: THREE.InstancedMesh }).rocks;
-    const matrix = new THREE.Matrix4();
-    const scale = new THREE.Vector3();
-    for (let i = 0; i < rocks.count; i++) {
-      rocks.getMatrixAt(i, matrix);
-      matrix.decompose(new THREE.Vector3(), new THREE.Quaternion(), scale);
-      expect(scale.x).toBeCloseTo(ROCK_PX, 5); // decompose() with a rotation leaves ~1e-7 float noise
-    }
-    renderer.dispose();
-  });
-
-  it("the farthest asteroid falls first (reveal order is by real distance)", () => {
-    const { renderer } = newRenderer();
-    const records = worldRecords();
-    renderer.setRecords(records);
-    renderer.start();
-    frames(1);
-    expect(renderer.phaseOf(revealOrder(records)[0]!)).not.toBe("HIDDEN");
-    expect(renderer.phaseOf(revealOrder(records).at(-1)!)).toBe("HIDDEN");
     renderer.dispose();
   });
 });

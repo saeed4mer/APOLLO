@@ -8,8 +8,8 @@ import { clamp01 } from "./skyLayout";
  *   wheel -> applyWheel() -> target (clamped)
  *   frame -> step(dt)     -> current eases to target, returns whether it moved
  */
-/** Progress gained per 100 normalized wheel pixels: a full journey is ~25 wheel notches. */
-export const PROGRESS_PER_100PX = 0.04;
+/** Progress gained per 100 normalized wheel pixels: a full journey is ~33 wheel notches. */
+export const PROGRESS_PER_100PX = 0.03;
 /** Largest per-event wheel delta honoured (px), so one burst cannot jump the whole journey. */
 export const MAX_WHEEL_DELTA = 240;
 export const PROGRESS_EASING_TAU_MS = 140;
@@ -18,7 +18,6 @@ const SETTLE_EPSILON = 1e-4;
 export class ExplorationController {
   private target = 0;
   private current = 0;
-  private deepest = 0;
 
   get targetProgress(): number {
     return this.target;
@@ -26,11 +25,6 @@ export class ExplorationController {
 
   get currentProgress(): number {
     return this.current;
-  }
-
-  /** Deepest progress ever reached. Drives reveal, so scrolling back never re-hides or re-drops asteroids. */
-  get deepestProgress(): number {
-    return this.deepest;
   }
 
   get settled(): boolean {
@@ -56,7 +50,6 @@ export class ExplorationController {
     const blend = 1 - Math.exp(-dt / PROGRESS_EASING_TAU_MS);
     const next = this.current + (this.target - this.current) * blend;
     this.current = Math.abs(this.target - next) < SETTLE_EPSILON ? this.target : clamp01(next);
-    this.deepest = Math.max(this.deepest, this.current);
     return true;
   }
 }

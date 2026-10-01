@@ -1,11 +1,12 @@
 import * as THREE from "three";
 import { InputController } from "../interaction/InputController";
 import type { WorldRecord } from "../models/world";
-import { referenceOpacity, skyColors, smoothstep, starOpacity } from "../scene/atmosphere";
+import { rulerOpacity, skyColors, smoothstep, starOpacity } from "../scene/atmosphere";
 import { ExplorationController } from "../scene/exploration";
-import { fallEase, RevealTracker, type AsteroidPhase } from "../scene/reveal";
+import { fallEase, RevealAnimator, type AsteroidPhase } from "../scene/reveal";
 import {
-  altitudePx, computeLayout, REFERENCE_DISTANCES_KM, restPosition, surfaceY, type RestPosition, type SkyLayout,
+  altitudePx, computeLayout, DEFAULT_DOMAIN, distanceDomain, MOON_DISTANCE_KM, MOON_X_FRACTION, restPosition,
+  revealedDistanceKm, scaleTicks, SCALE_STEP_KM, surfaceY, type DistanceDomain, type RestPosition, type SkyLayout,
 } from "../scene/skyLayout";
 import { buildEarth, type EarthArt } from "./earthArt";
 
@@ -21,7 +22,8 @@ export interface GLRendererLike {
 
 export interface ViewSnapshot {
   progress: number;
-  deepestProgress: number;
+  /** Real distance (km) revealed by the current exploration progress. */
+  revealedKm: number;
   /** 0 = world view, 1 = fully focused on an asteroid. */
   focus: number;
   layout: SkyLayout;
@@ -37,16 +39,19 @@ export interface WorldRendererOptions {
 
 /**
  * Visual encoding (stated in "About this view"):
- * - Every asteroid uses the same rock and the same on-screen size: size and colour encode NOTHING
- *   (no PHA, Sentry or danger encoding). Facts are shown as text on hover and in focus.
- * - The fiery trail appears only while an asteroid falls into place. It is a visual metaphor for
- *   "approach", identical for every asteroid, not an observed trajectory.
+ * - Every asteroid uses the same rock, on-screen size and colour: these encode NOTHING.
+ * - A ⚠ badge is attached only where NASA NeoWs is_potentially_hazardous === true (never for false
+ *   or unknown). It states that flag; it is not an impact prediction, a Sentry result or a score.
+ * - The fiery trail appears only while an asteroid approaches its resting place. It is a visual
+ *   metaphor, identical for every asteroid, not an observed trajectory.
+ * - The Moon is a distance landmark at 384,400 km; it is not data and has no direction semantics.
  */
 export const ROCK_PX = 9;
 export const HIT_PX = 16;
 export const FOCUS_ZOOM = 2.2;
 export const FOCUS_ROCK_SCALE = 5;
 export const FOCUS_MS = 750;
+export const MOON_PX = 11;
 const TRAIL_LENGTH_PX = 58;
 const TRAIL_WIDTH_PX = 8;
 const SPAWN_MARGIN_PX = 70;
@@ -55,6 +60,8 @@ const TRAIL_COLOR = new THREE.Color(0xff9a3c);
 const DIMMED = 0.3;
 const OFFSCREEN = -1e6;
 const CAMERA_TAU_MS = 110;
+const ARC_POINTS = 97;
+const RULER_X_INSET_PX = 26;
 
 let activeLoopCount = 0;
 
@@ -80,6 +87,15 @@ function trailGeometry(): THREE.BufferGeometry {
   return geometry;
 }
 
+/** Warning-triangle badge (unit size) and its "!" mark, drawn as two instanced layers. */
+function hazardGeometries(): { triangle: THREE.BufferGeometry; mark: THREE.BufferGeometry } {
+  const triangle = new THREE.ShapeGeometry(new THREE.Shape([new THREE.Vector2(0, 1.05), new THREE.Vector2(-1, -0.7), new THREE.Vector2(1, -0.7)]));
+  const bar = new THREE.Shape([new THREE.Vector2(-0.11, -0.05), new THREE.Vector2(0.11, -0.05), new THREE.Vector2(0.08, 0.62), new THREE.Vector2(-0.08, 0.62)]);
+  const dot = new THREE.Shape();
+  dot.absarc(0, -0.36, 0.12, 0, Math.PI * 2, false);
+  return { triangle, mark: new THREE.ShapeGeometry([bar, dot]) };
+}
+
 /** Deterministic decorative star field (not data): fixed-seed LCG, regenerated only on resize. */
 function starPositions(width: number, height: number): Float32Array {
   const count = Math.min(900, Math.round((width * height) / 2200));
@@ -98,7 +114,7 @@ const easeInOut = (t: number): number => (t < 0.5 ? 4 * t * t * t : 1 - (-2 * t 
 
 /**
  * Owns the Three.js scene, the orthographic pixel camera, picking and THE single render loop.
- * Every animation (exploration easing, falls, trails, focus) is state evaluated inside that loop.
+ * Every animation (exploration easing, reveal/retreat, trails, focus) is state evaluated inside it.
  */
 export class WorldRenderer {
   static get activeLoops(): number {
@@ -106,27 +122,32 @@ export class WorldRenderer {
   }
 
   readonly exploration = new ExplorationController();
-  private readonly reveal = new RevealTracker();
+  private readonly animator = new RevealAnimator();
   private readonly gl: GLRendererLike;
   private readonly scene = new THREE.Scene();
   private readonly camera = new THREE.OrthographicCamera(-1, 1, 1, -1, -100, 100);
-  private readonly raycaster = new THREE.Raycaster();
   private readonly input: InputController;
   private readonly resizeObserver: ResizeObserver;
   private readonly owned: { dispose(): void }[] = [];
   private readonly rockMaterial = this.own(new THREE.MeshStandardMaterial({ color: 0xffffff, roughness: 0.95, metalness: 0, flatShading: true }));
   private readonly trailMaterial = this.own(new THREE.MeshBasicMaterial({ color: 0xffffff, transparent: true, blending: THREE.AdditiveBlending, depthWrite: false }));
-  private readonly hitMaterial = this.own(new THREE.MeshBasicMaterial({ visible: false }));
+  private readonly hazardMaterial = this.own(new THREE.MeshBasicMaterial({ color: 0xffc53d }));
+  private readonly hazardMarkMaterial = this.own(new THREE.MeshBasicMaterial({ color: 0x1b1b1b }));
   private readonly rockGeo = this.own(rockGeometry());
   private readonly trailGeo = this.own(trailGeometry());
-  private readonly hitGeo = this.own(new THREE.CircleGeometry(1, 12));
+  private readonly hazardGeo = hazardGeometries();
   private readonly hoverRing: THREE.Mesh;
   private readonly focusGlow = new THREE.Group();
-  private readonly references: THREE.Line<THREE.BufferGeometry, THREE.LineDashedMaterial>[] = [];
+  private readonly moon = new THREE.Group();
+  private readonly moonArc: THREE.Line<THREE.BufferGeometry, THREE.LineDashedMaterial>;
+  private readonly frontierArc: THREE.Line<THREE.BufferGeometry, THREE.LineDashedMaterial>;
+  private readonly ruler: THREE.LineSegments<THREE.BufferGeometry, THREE.LineBasicMaterial>;
 
   private width = 1;
   private height = 1;
   private layout: SkyLayout = computeLayout(1, 1, 0);
+  private domain: DistanceDomain = DEFAULT_DOMAIN;
+  private revealed = 0;
   private records: WorldRecord[] = [];
   private readonly index = new Map<string, number>();
   private rest: RestPosition[] = [];
@@ -134,14 +155,14 @@ export class WorldRenderer {
   private current: ({ x: number; y: number } | null)[] = [];
   private rocks: THREE.InstancedMesh | null = null;
   private trails: THREE.InstancedMesh | null = null;
-  private hits: THREE.InstancedMesh | null = null;
+  private hazards: THREE.InstancedMesh | null = null;
+  private hazardMarks: THREE.InstancedMesh | null = null;
   private earth: EarthArt | null = null;
   private stars: THREE.Points<THREE.BufferGeometry, THREE.PointsMaterial> | null = null;
   private background = "";
 
   private focusedId: string | null = null;
   private anchorId: string | null = null;
-  private pendingSettle: string | null = null;
   private focusT = 0;
   private camX = 0;
   private camY = 0;
@@ -152,9 +173,9 @@ export class WorldRenderer {
   private pointerDirty = false;
   private frameHandle: number | null = null;
   private lastFrameTime: number | null = null;
-  private now = 0;
   private viewDirty = true;
-  private hitBoundsDirty = true;
+  /** Pick radius (world px) of each shown asteroid; 0 while hidden. Picking is a screen-space distance test. */
+  private hitRadius: number[] = [];
   /** Canvas client rect, cached on resize: per-call getBoundingClientRect() forced layout thrash. */
   private rect: { left: number; top: number; width: number; height: number } = { left: 0, top: 0, width: 0, height: 0 };
   private disposed = false;
@@ -163,6 +184,8 @@ export class WorldRenderer {
   readonly timing = { updateMs: 0, renderMs: 0 };
 
   constructor(private readonly container: HTMLElement, private readonly options: WorldRendererOptions) {
+    this.own(this.hazardGeo.triangle);
+    this.own(this.hazardGeo.mark);
     this.gl = options.createGLRenderer?.() ?? new THREE.WebGLRenderer({ antialias: true, alpha: true });
     this.gl.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
     this.gl.setClearColor(0x000000, 0); // transparent: the sky gradient is the container's background
@@ -188,14 +211,33 @@ export class WorldRenderer {
     this.focusGlow.position.z = 3;
     this.scene.add(this.hoverRing, this.focusGlow);
 
-    for (let i = 0; i < REFERENCE_DISTANCES_KM.length; i++) {
-      const geometry = this.own(new THREE.BufferGeometry());
-      geometry.setAttribute("position", new THREE.BufferAttribute(new Float32Array(97 * 3), 3));
-      const line = new THREE.Line(geometry, this.own(new THREE.LineDashedMaterial({ color: 0xffffff, dashSize: 6, gapSize: 7, transparent: true, opacity: 0 })));
-      line.position.z = -4;
-      this.references.push(line);
-      this.scene.add(line);
+    // Moon landmark: a small cratered disc. Decorative scale reference, never an asteroid record.
+    const moonBody = new THREE.Mesh(this.own(new THREE.CircleGeometry(1, 40)), this.own(new THREE.MeshBasicMaterial({ color: 0xdfe3ea })));
+    this.moon.add(moonBody);
+    const crater = this.own(new THREE.MeshBasicMaterial({ color: 0xb9bfc9 }));
+    for (const [x, y, r] of [[-0.35, 0.25, 0.22], [0.3, -0.2, 0.28], [0.15, 0.45, 0.12], [-0.25, -0.45, 0.14]] as const) {
+      const c = new THREE.Mesh(this.own(new THREE.CircleGeometry(r, 20)), crater);
+      c.position.set(x, y, 0.01);
+      this.moon.add(c);
     }
+    this.moon.position.z = -2;
+    this.scene.add(this.moon);
+
+    const dashedArc = (opacity: number): THREE.Line<THREE.BufferGeometry, THREE.LineDashedMaterial> => {
+      const geometry = this.own(new THREE.BufferGeometry());
+      geometry.setAttribute("position", new THREE.BufferAttribute(new Float32Array(ARC_POINTS * 3), 3));
+      const line = new THREE.Line(geometry, this.own(new THREE.LineDashedMaterial({ color: 0xffffff, dashSize: 6, gapSize: 7, transparent: true, opacity })));
+      line.position.z = -4;
+      this.scene.add(line);
+      return line;
+    };
+    this.moonArc = dashedArc(0.35);
+    this.frontierArc = dashedArc(0.55);
+
+    this.ruler = new THREE.LineSegments(new THREE.BufferGeometry(), this.own(new THREE.LineBasicMaterial({ color: 0xffffff, transparent: true, opacity: 0 })));
+    this.ruler.position.z = -3;
+    this.ruler.frustumCulled = false;
+    this.scene.add(this.ruler);
 
     this.input = new InputController(this.gl.domElement, {
       onWheel: (deltaY, deltaMode) => {
@@ -217,32 +259,37 @@ export class WorldRenderer {
     this.resize();
   }
 
-  /** Replace the population. Asteroids still present keep their lifecycle (no re-fall). */
+  /** Replace the population. Asteroids still present keep their animation state (no restart, no copies). */
   setRecords(records: readonly WorldRecord[]): void {
-    for (const mesh of [this.rocks, this.trails, this.hits]) if (mesh) {
+    for (const mesh of [this.rocks, this.trails, this.hazards, this.hazardMarks]) if (mesh) {
       this.scene.remove(mesh);
       mesh.dispose();
     }
-    this.rocks = this.trails = this.hits = null;
+    this.rocks = this.trails = this.hazards = this.hazardMarks = null;
     this.records = [...records];
     this.index.clear();
     this.records.forEach((r, i) => this.index.set(r.neows_id, i));
-    this.reveal.setRecords(this.records);
+    this.domain = this.records.length ? distanceDomain(this.records) : DEFAULT_DOMAIN;
+    this.animator.setRecords(this.records);
     this.rotations = this.records.map((r) => {
       const d = r.illustrative_direction; // decorative orientation only; deterministic per asteroid
       return new THREE.Quaternion().setFromEuler(new THREE.Euler(d.x * 3, d.y * 3, d.z * 3));
     });
     this.current = this.records.map(() => null);
+    this.hitRadius = this.records.map(() => 0);
     this.hoveredId = null;
     const n = this.records.length;
     if (n > 0) {
       this.rocks = new THREE.InstancedMesh(this.rockGeo, this.rockMaterial, n);
       this.trails = new THREE.InstancedMesh(this.trailGeo, this.trailMaterial, n);
-      this.hits = new THREE.InstancedMesh(this.hitGeo, this.hitMaterial, n);
+      this.hazards = new THREE.InstancedMesh(this.hazardGeo.triangle, this.hazardMaterial, n);
+      this.hazardMarks = new THREE.InstancedMesh(this.hazardGeo.mark, this.hazardMarkMaterial, n);
       this.rocks.position.z = 6;
       this.trails.position.z = 5;
-      this.hits.position.z = 7;
-      for (const mesh of [this.rocks, this.trails, this.hits]) {
+      // Above any rock depth (a focused rock spans z ≈ 6 ± ROCK_PX × FOCUS_ROCK_SCALE).
+      this.hazards.position.z = 70;
+      this.hazardMarks.position.z = 70.1;
+      for (const mesh of [this.rocks, this.trails, this.hazards, this.hazardMarks]) {
         mesh.frustumCulled = false;
         mesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
         this.scene.add(mesh);
@@ -256,14 +303,15 @@ export class WorldRenderer {
     this.viewDirty = true;
   }
 
-  /** Focus an asteroid (camera glides onto it) or return to the world (null). Never re-drops anything. */
+  /**
+   * Focus an asteroid (camera glides onto it) or return to the world (null). Focus never changes the
+   * revealed distance. While focused, the subject is shown even if a deep link opened it beyond the
+   * frontier; on return, normal eligibility applies again (it retreats if beyond the frontier).
+   */
   setFocus(neowsId: string | null): void {
     if (neowsId !== null && !this.index.has(neowsId)) neowsId = null; // unknown here (e.g. a 404 deep link)
     this.focusedId = neowsId;
-    if (neowsId !== null) {
-      this.anchorId = neowsId;
-      this.pendingSettle = neowsId; // a deep-linked asteroid not yet revealed appears in place
-    }
+    if (neowsId !== null) this.anchorId = neowsId;
     this.viewDirty = true;
   }
 
@@ -279,12 +327,26 @@ export class WorldRenderer {
   }
 
   phaseOf(neowsId: string): AsteroidPhase | null {
-    return this.index.has(neowsId) ? this.reveal.phase(neowsId, this.now) : null;
+    return this.index.has(neowsId) ? this.animator.phase(neowsId) : null;
   }
 
   restAltitudeOf(neowsId: string): number | null {
     const i = this.index.get(neowsId);
     return i === undefined ? null : this.rest[i]?.altitude ?? null;
+  }
+
+  /** True when the NeoWs PHA badge is currently drawn on this asteroid. */
+  hazardShownOf(neowsId: string): boolean {
+    const i = this.index.get(neowsId);
+    return i !== undefined && this.records[i]!.encounter.is_potentially_hazardous === true && this.current[i] !== null;
+  }
+
+  get revealedKm(): number {
+    return this.revealed;
+  }
+
+  get distanceDomain(): DistanceDomain {
+    return this.domain;
   }
 
   get focusProgress(): number {
@@ -305,6 +367,13 @@ export class WorldRenderer {
     return this.layout;
   }
 
+  /** Asteroid instances drawn (one per record) and total scene objects: proves nothing is duplicated. */
+  get objectCounts(): { asteroidInstances: number; sceneObjects: number } {
+    let sceneObjects = 0;
+    this.scene.traverse(() => void sceneObjects++);
+    return { asteroidInstances: this.rocks?.count ?? 0, sceneObjects };
+  }
+
   get earthCounts(): EarthArt["counts"] | null {
     return this.earth?.counts ?? null;
   }
@@ -316,10 +385,22 @@ export class WorldRenderer {
     return p ? this.toScreen(p.x, p.y) : null;
   }
 
-  /** Client-pixel anchor for each reference-distance label (right end of its arc). */
-  referenceAnchors(): { label: string; x: number; y: number }[] {
-    const x = this.layout.width * 0.985;
-    return REFERENCE_DISTANCES_KM.map(({ km, label }) => ({ label, ...this.toScreen(x, surfaceY(this.layout, x) + altitudePx(this.layout, km)) }));
+  /** Client-pixel centre of the Moon landmark. */
+  moonScreenPosition(): { x: number; y: number } {
+    return this.toScreen(this.moon.position.x, this.moon.position.y);
+  }
+
+  /** Client-pixel point at the right end of the revealed-distance frontier (null at 0 km). */
+  frontierScreenPosition(): { x: number; y: number } | null {
+    if (this.revealed <= 0) return null;
+    const x = this.layout.width - RULER_X_INSET_PX;
+    return this.toScreen(x, surfaceY(this.layout, x) + altitudePx(this.layout, Math.max(this.revealed, this.domain.minKm), this.domain));
+  }
+
+  /** Client-pixel y of each distance on the ruler at the right edge. */
+  rulerScreenPositions(kms: readonly number[]): { km: number; x: number; y: number }[] {
+    const x = this.layout.width - RULER_X_INSET_PX;
+    return kms.map((km) => ({ km, ...this.toScreen(x, surfaceY(this.layout, x) + altitudePx(this.layout, km, this.domain)) }));
   }
 
   get inputListenerCount(): number {
@@ -338,6 +419,7 @@ export class WorldRenderer {
     this.input.dispose();
     this.setRecords([]);
     this.earth?.dispose();
+    this.ruler.geometry.dispose();
     this.stars?.geometry.dispose();
     this.stars?.material.dispose();
     for (const resource of this.owned) resource.dispose();
@@ -350,19 +432,14 @@ export class WorldRenderer {
     if (this.disposed) return;
     const dt = this.lastFrameTime === null ? 16 : now - this.lastFrameTime;
     this.lastFrameTime = now;
-    this.now = now;
     this.frames++;
 
     let changed = this.exploration.step(dt);
-    if (this.pendingSettle) {
-      this.reveal.settleNow(this.pendingSettle, now);
-      this.pendingSettle = null;
-      changed = true;
-    }
-    if (this.reveal.update(this.exploration.deepestProgress, now)) changed = true;
+    this.revealed = revealedDistanceKm(this.exploration.currentProgress, this.domain);
+    if (this.animator.update(this.records, this.revealed, dt, this.focusedId)) changed = true;
     if (this.stepFocus(dt)) changed = true;
     const t0 = performance.now();
-    if (changed || this.viewDirty || this.reveal.anyFalling(now)) this.updateView();
+    if (changed || this.viewDirty) this.updateView();
     if (this.pointerDirty) this.updateHover();
     const t1 = performance.now();
     this.gl.render(this.scene, this.camera);
@@ -403,7 +480,7 @@ export class WorldRenderer {
     this.viewDirty = false;
     const progress = this.exploration.currentProgress;
     this.layout = computeLayout(this.width, this.height, progress);
-    this.rest = this.records.map((r) => restPosition(this.layout, r));
+    this.rest = this.records.map((r) => restPosition(this.layout, r, this.domain));
 
     const focus = easeInOut(this.focusT);
     this.camera.position.set(this.camX, this.camY, 10);
@@ -418,10 +495,10 @@ export class WorldRenderer {
       this.earth.haze.material.color.set(skyColors(progress).horizon);
     }
     if (this.stars) this.stars.material.opacity = starOpacity(progress) * (1 - 0.5 * focus);
-    this.updateReferences(progress, focus);
+    this.updateScale(progress, focus);
     this.updateInstances(focus);
     this.pointerDirty = this.pointer !== null; // things may have moved under a stationary pointer
-    this.options.onViewChange?.({ progress, deepestProgress: this.exploration.deepestProgress, focus, layout: this.layout });
+    this.options.onViewChange?.({ progress, revealedKm: this.revealed, focus, layout: this.layout });
   }
 
   private updateBackground(progress: number): void {
@@ -434,27 +511,60 @@ export class WorldRenderer {
     }
   }
 
-  private updateReferences(progress: number, focus: number): void {
-    const opacity = referenceOpacity(progress) * (1 - focus);
-    REFERENCE_DISTANCES_KM.forEach(({ km }, i) => {
-      const line = this.references[i]!;
-      line.material.opacity = opacity;
-      line.visible = opacity > 0.001;
-      if (!line.visible) return;
-      const position = line.geometry.attributes.position as THREE.BufferAttribute;
-      const alt = altitudePx(this.layout, km);
-      for (let k = 0; k < position.count; k++) {
-        const x = -20 + ((this.width + 40) * k) / (position.count - 1);
-        position.setXYZ(k, x, surfaceY(this.layout, x) + alt, 0);
-      }
-      position.needsUpdate = true;
-      line.geometry.computeBoundingSphere();
-      line.computeLineDistances();
+  private placeArc(line: THREE.Line<THREE.BufferGeometry, THREE.LineDashedMaterial>, km: number): void {
+    const position = line.geometry.attributes.position as THREE.BufferAttribute;
+    const alt = altitudePx(this.layout, km, this.domain);
+    for (let k = 0; k < position.count; k++) {
+      const x = -20 + ((this.width + 40) * k) / (position.count - 1);
+      position.setXYZ(k, x, surfaceY(this.layout, x) + alt, 0);
+    }
+    position.needsUpdate = true;
+    line.geometry.computeBoundingSphere();
+    line.computeLineDistances();
+  }
+
+  /** Moon landmark + arc, revealed-distance frontier arc, and the 1M-km tick ruler (up to the frontier). */
+  private updateScale(progress: number, focus: number): void {
+    const fade = 1 - focus;
+    const moonX = this.layout.width * MOON_X_FRACTION;
+    this.moon.position.set(moonX, surfaceY(this.layout, moonX) + altitudePx(this.layout, MOON_DISTANCE_KM, this.domain), -2);
+    this.moon.scale.setScalar(MOON_PX);
+    this.placeArc(this.moonArc, MOON_DISTANCE_KM);
+    this.moonArc.material.opacity = 0.35 * fade;
+
+    this.frontierArc.visible = this.revealed > 0 && fade > 0.001;
+    if (this.frontierArc.visible) {
+      this.placeArc(this.frontierArc, Math.max(this.revealed, this.domain.minKm));
+      this.frontierArc.material.opacity = 0.55 * fade;
+    }
+
+    const ticks = scaleTicks(this.revealed, this.domain);
+    // Fixed-capacity buffer sized to the domain (one tick per 1M km), updated in place each frame;
+    // reallocated only if the domain grows, so no GPU buffers accumulate.
+    const capacity = Math.ceil(this.domain.maxKm / SCALE_STEP_KM) + 1;
+    let attribute = this.ruler.geometry.getAttribute("position") as THREE.BufferAttribute | undefined;
+    if (!attribute || attribute.count < capacity * 2) {
+      this.ruler.geometry.dispose();
+      this.ruler.geometry = new THREE.BufferGeometry();
+      attribute = new THREE.BufferAttribute(new Float32Array(capacity * 6), 3);
+      attribute.setUsage(THREE.DynamicDrawUsage);
+      this.ruler.geometry.setAttribute("position", attribute);
+    }
+    const x = this.layout.width - RULER_X_INSET_PX;
+    ticks.forEach((km, i) => {
+      const y = surfaceY(this.layout, x) + altitudePx(this.layout, km, this.domain);
+      const half = km % (10 * SCALE_STEP_KM) === 0 ? 8 : 4; // longer tick every 10M km
+      attribute!.setXYZ(i * 2, x - half, y, 0);
+      attribute!.setXYZ(i * 2 + 1, x + half, y, 0);
     });
+    attribute.needsUpdate = true;
+    this.ruler.geometry.setDrawRange(0, ticks.length * 2);
+    this.ruler.material.opacity = rulerOpacity(progress) * fade;
+    this.ruler.visible = ticks.length > 0 && this.ruler.material.opacity > 0.001;
   }
 
   private updateInstances(focus: number): void {
-    if (!this.rocks || !this.trails || !this.hits) return;
+    if (!this.rocks || !this.trails || !this.hazards || !this.hazardMarks) return;
     const matrix = new THREE.Matrix4();
     const position = new THREE.Vector3();
     const scale = new THREE.Vector3();
@@ -462,22 +572,22 @@ export class WorldRenderer {
     const color = new THREE.Color();
     const spawnY = this.height + SPAWN_MARGIN_PX;
     const focusIndex = this.anchorId === null ? -1 : this.index.get(this.anchorId) ?? -1;
+    const hidden = matrix.clone().compose(new THREE.Vector3(OFFSCREEN, OFFSCREEN, 0), identity, new THREE.Vector3(1, 1, 1));
 
     for (let i = 0; i < this.records.length; i++) {
-      const id = this.records[i]!.neows_id;
-      const f = this.reveal.fallFraction(id, this.now);
-      if (f === null) {
+      const record = this.records[i]!;
+      const id = record.neows_id;
+      const f = this.animator.fraction(id);
+      if (f <= 0) {
         this.current[i] = null;
-        matrix.compose(position.set(OFFSCREEN, OFFSCREEN, 0), identity, scale.set(1, 1, 1));
-        this.rocks.setMatrixAt(i, matrix);
-        this.trails.setMatrixAt(i, matrix);
-        this.hits.setMatrixAt(i, matrix);
+        this.hitRadius[i] = 0;
+        for (const mesh of [this.rocks, this.trails, this.hazards, this.hazardMarks]) mesh.setMatrixAt(i, hidden);
         continue;
       }
       const rest = this.rest[i]!;
       const e = fallEase(f);
       const x = rest.x;
-      const y = spawnY + (rest.y - spawnY) * e;
+      const y = spawnY + (rest.y - spawnY) * e; // retreat runs the same path back up
       this.current[i] = { x, y };
 
       const appear = Math.min(1, f / 0.12);
@@ -487,20 +597,32 @@ export class WorldRenderer {
       this.rocks.setMatrixAt(i, matrix);
       this.rocks.setColorAt(i, color.copy(ROCK_COLOR).multiplyScalar(isFocus ? 1 : 1 - (1 - DIMMED) * focus));
 
-      const trailFade = f < 1 ? (1 - f) * (1 - focus) : 0;
+      // Trail only while approaching (visual metaphor); none while settled or retreating.
+      const approaching = this.animator.isApproaching(id);
+      const trailFade = approaching ? (1 - f) * (1 - focus) : 0;
       matrix.compose(position.set(x, y + ROCK_PX * 0.4, 0), identity,
-        scale.set(TRAIL_WIDTH_PX * appear, Math.max(TRAIL_LENGTH_PX * Math.sqrt(1 - e) * (f < 1 ? 1 : 0), 1e-3), 1));
+        scale.set(TRAIL_WIDTH_PX * appear, Math.max(approaching ? TRAIL_LENGTH_PX * Math.sqrt(1 - e) : 0, 1e-3), 1));
       this.trails.setMatrixAt(i, matrix);
       this.trails.setColorAt(i, color.copy(TRAIL_COLOR).multiplyScalar(trailFade));
 
-      matrix.compose(position.set(x, y, 0), identity, scale.setScalar(Math.max(HIT_PX, radius)));
-      this.hits.setMatrixAt(i, matrix);
+      this.hitRadius[i] = Math.max(HIT_PX, radius);
+
+      if (record.encounter.is_potentially_hazardous === true) {
+        // A fixed-size flag at the rock's upper-right edge: it never grows with the focus zoom (it
+        // marks a NeoWs flag, not a magnitude). Other asteroids' badges shrink away during focus.
+        const badge = Math.max(ROCK_PX * appear * 0.85 * (isFocus ? 1 : 1 - focus), 1e-3);
+        matrix.compose(position.set(x + radius * 0.9 + badge * 0.6, y + radius * 0.9 + badge * 0.75, 0), identity, scale.set(badge, badge, 1));
+        this.hazards.setMatrixAt(i, matrix);
+        this.hazardMarks.setMatrixAt(i, matrix);
+      } else {
+        this.hazards.setMatrixAt(i, hidden);
+        this.hazardMarks.setMatrixAt(i, hidden);
+      }
     }
-    for (const mesh of [this.rocks, this.trails, this.hits]) {
+    for (const mesh of [this.rocks, this.trails, this.hazards, this.hazardMarks]) {
       mesh.instanceMatrix.needsUpdate = true;
       if (mesh.instanceColor) mesh.instanceColor.needsUpdate = true;
     }
-    this.hitBoundsDirty = true; // recomputed lazily in pick(); rendering does not need it (no culling)
 
     const anchor = focusIndex >= 0 ? this.current[focusIndex] : null;
     this.focusGlow.visible = anchor !== null && focus > 0;
@@ -528,29 +650,31 @@ export class WorldRenderer {
     this.options.onHover(id, this.pointer?.x ?? 0, this.pointer?.y ?? 0);
   }
 
-  /** Raycast the hit discs of revealed asteroids; returns the NeoWs ID under the client point. */
+  /**
+   * The NeoWs ID under a client point: shown asteroids whose pick disc (HIT_PX, or the rock radius
+   * if larger) contains the point; when discs overlap, the centre nearest the pointer wins. A plain
+   * O(n) screen-space test: the camera is orthographic and the discs face it, so this is exactly
+   * what a raycast against the discs would return, without per-instance matrix work.
+   */
   private pick(clientX: number, clientY: number): string | null {
-    if (!this.hits) return null;
     const rect = this.rect;
     if (rect.width === 0 || rect.height === 0) return null;
-    const ndc = new THREE.Vector2(((clientX - rect.left) / rect.width) * 2 - 1, -((clientY - rect.top) / rect.height) * 2 + 1);
-    if (this.hitBoundsDirty) {
-      this.hits.computeBoundingSphere();
-      this.hitBoundsDirty = false;
+    const zoom = this.camera.zoom;
+    // Same mapping as toScreen(), inlined so the loop allocates nothing.
+    const cx = rect.left + this.width / 2;
+    const cy = rect.top + this.height / 2;
+    let best = -1;
+    let bestD = Infinity;
+    for (let i = 0; i < this.current.length; i++) {
+      const p = this.current[i];
+      if (!p) continue;
+      const d = Math.hypot(cx + (p.x - this.camX) * zoom - clientX, cy - (p.y - this.camY) * zoom - clientY);
+      if (d <= this.hitRadius[i]! * zoom && d < bestD) {
+        best = i;
+        bestD = d;
+      }
     }
-    this.raycaster.setFromCamera(ndc, this.camera);
-    // Hit discs of nearby asteroids can overlap; choose the one whose centre is nearest the pointer.
-    let best: { id: string; d: number } | null = null;
-    for (const hit of this.raycaster.intersectObject(this.hits, false)) {
-      if (hit.instanceId === undefined) continue;
-      const p = this.current[hit.instanceId];
-      const id = this.records[hit.instanceId]?.neows_id;
-      if (!p || !id) continue;
-      const screen = this.toScreen(p.x, p.y);
-      const d = Math.hypot(screen.x - clientX, screen.y - clientY);
-      if (!best || d < best.d) best = { id, d };
-    }
-    return best?.id ?? null;
+    return best < 0 ? null : this.records[best]!.neows_id;
   }
 
   private toScreen(x: number, y: number): { x: number; y: number } {

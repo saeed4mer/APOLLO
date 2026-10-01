@@ -33,11 +33,23 @@ if (import.meta.env.DEV) {
     profileStatus: () => app.store.getState().profile.status,
     screenPositionOf: (id: string) => app.renderer.screenPositionOf(id),
     phaseOf: (id: string) => app.renderer.phaseOf(id),
+    phases: () => {
+      const world = app.store.getState().world;
+      return world.status === "ready" ? Object.fromEntries(world.data.records.map((r) => [r.neows_id, app.renderer.phaseOf(r.neows_id)])) : {};
+    },
+    objectCounts: () => app.renderer.objectCounts,
+    frontierLabel: () => (document.querySelector(".frontier-label:not([hidden])") as HTMLElement | null)?.textContent ?? null,
+    rulerLabels: () => [...document.querySelectorAll(".ruler-label:not([hidden])")].map((n) => n.textContent),
+    /** Sets the exploration TARGET exactly (used only to demonstrate an exact threshold; wheel input drives everything else). */
+    exploreTo: (progress: number) => app.renderer.exploration.setTarget(progress),
     restAltitudeOf: (id: string) => app.renderer.restAltitudeOf(id),
+    hazardShownOf: (id: string) => app.renderer.hazardShownOf(id),
+    moonScreenPosition: () => app.renderer.moonScreenPosition(),
+    distanceDomain: () => app.renderer.distanceDomain,
     progress: () => ({
       target: app.renderer.exploration.targetProgress,
       current: app.renderer.exploration.currentProgress,
-      deepest: app.renderer.exploration.deepestProgress,
+      revealedKm: app.renderer.revealedKm,
     }),
     focusProgress: () => app.renderer.focusProgress,
     focusSettled: () => app.renderer.focusSettled,

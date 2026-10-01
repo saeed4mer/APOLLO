@@ -14,13 +14,28 @@ import type { UnitVector, WorldRecord } from "../models/world";
  */
 
 /**
- * Real-distance domain of the altitude scale (km). Fixed constants, never fitted to the data.
- * min = Earth's radius (a miss distance at or below it is "at the surface"; it cannot be a genuine
- * miss); max = 1e8 km, beyond NeoWs's ~0.5 AU close-approach reporting range.
+ * Real-distance domain of the visualization (km), derived from the population so that no real
+ * record is ever clipped:
+ *   minKm = Earth's radius (6,371 km): a miss distance at or below it is "at the surface".
+ *   maxKm = the larger of 1e8 km and the next 10-million-km boundary above 1.05 x the farthest
+ *           real miss distance. Every real asteroid therefore rests strictly inside the sky.
  */
-export const ALTITUDE_DOMAIN_KM = { min: 6371, max: 1e8 } as const;
-const LOG_MIN = Math.log10(ALTITUDE_DOMAIN_KM.min);
-const LOG_MAX = Math.log10(ALTITUDE_DOMAIN_KM.max);
+export const DISTANCE_MIN_KM = 6371;
+export const DEFAULT_MAX_KM = 1e8;
+export const MOON_DISTANCE_KM = 384_400;
+
+export interface DistanceDomain {
+  minKm: number;
+  maxKm: number;
+}
+
+export function distanceDomain(records: readonly WorldRecord[]): DistanceDomain {
+  const farthest = records.reduce((m, r) => Math.max(m, r.encounter.miss_distance_km), 0);
+  const padded = Math.ceil((farthest * 1.05) / 1e7) * 1e7;
+  return { minKm: DISTANCE_MIN_KM, maxKm: Math.max(DEFAULT_MAX_KM, padded) };
+}
+
+export const DEFAULT_DOMAIN: DistanceDomain = { minKm: DISTANCE_MIN_KM, maxKm: DEFAULT_MAX_KM };
 
 /** Earth crest height as a fraction of viewport height: it sinks as the user rises toward space. */
 export const EARTH_CREST_FRACTION = { start: 0.3, end: 0.17 } as const;
@@ -77,20 +92,38 @@ export function surfaceY(layout: SkyLayout, x: number): number {
 }
 
 /**
- * Real miss distance -> altitude fraction in [0, 1] on a logarithmic scale.
- * Strictly increasing inside ALTITUDE_DOMAIN_KM; distances outside the domain are clamped to its
- * ends (the only case where two different distances share an altitude).
+ * Real distance -> fraction in [0, 1] on a logarithmic scale over the domain. Uses the exact
+ * value (never rounded). Strictly increasing inside the domain; only distances at or below Earth's
+ * radius share the bottom (they cannot be genuine misses), and no real record exceeds maxKm.
  */
-export function altitudeFraction(missDistanceKm: number): number {
-  if (!Number.isFinite(missDistanceKm) || missDistanceKm <= 0) {
-    throw new RangeError(`miss distance must be a positive finite number, got ${missDistanceKm}`);
-  }
-  return clamp01((Math.log10(missDistanceKm) - LOG_MIN) / (LOG_MAX - LOG_MIN));
+export function altitudeFraction(km: number, domain: DistanceDomain = DEFAULT_DOMAIN): number {
+  if (!Number.isFinite(km) || km <= 0) throw new RangeError(`distance must be a positive finite number, got ${km}`);
+  return clamp01(Math.log(km / domain.minKm) / Math.log(domain.maxKm / domain.minKm));
 }
 
 /** Altitude above the Earth surface (px) for a real distance. */
-export function altitudePx(layout: SkyLayout, missDistanceKm: number): number {
-  return MIN_ALTITUDE_PX + altitudeFraction(missDistanceKm) * (layout.altitudeRangePx - MIN_ALTITUDE_PX);
+export function altitudePx(layout: SkyLayout, km: number, domain: DistanceDomain = DEFAULT_DOMAIN): number {
+  return MIN_ALTITUDE_PX + altitudeFraction(km, domain) * (layout.altitudeRangePx - MIN_ALTITUDE_PX);
+}
+
+/**
+ * Exploration progress -> REVEALED DISTANCE (km): the inverse of the altitude mapping, so the
+ * revealed frontier always sits at altitude MIN + progress x range. Progress 0 reveals nothing
+ * (0 km); progress 1 reveals the whole domain. Deterministic, monotonic, finite, bounded.
+ */
+export function revealedDistanceKm(progress: number, domain: DistanceDomain): number {
+  const p = clamp01(progress);
+  return p === 0 ? 0 : domain.minKm * (domain.maxKm / domain.minKm) ** p;
+}
+
+/** The exploration progress at which a real distance is first revealed. */
+export function progressForDistance(km: number, domain: DistanceDomain): number {
+  return altitudeFraction(km, domain);
+}
+
+/** An asteroid is eligible to be shown once the revealed distance reaches its EXACT miss distance. */
+export function isRevealed(missDistanceKm: number, revealedKm: number): boolean {
+  return missDistanceKm <= revealedKm;
 }
 
 /**
@@ -108,16 +141,29 @@ export interface RestPosition {
   altitude: number;
 }
 
-export function restPosition(layout: SkyLayout, record: WorldRecord): RestPosition {
+export function restPosition(layout: SkyLayout, record: WorldRecord, domain: DistanceDomain = DEFAULT_DOMAIN): RestPosition {
   const x = layout.cx + skyHorizontal(record.illustrative_direction) * (layout.width / 2) * HORIZONTAL_SPAN;
-  const altitude = altitudePx(layout, record.encounter.miss_distance_km);
+  const altitude = altitudePx(layout, record.encounter.miss_distance_km, domain);
   return { x, y: surfaceY(layout, x) + altitude, altitude };
 }
 
-/** Real reference distances drawn as faint altitude arcs (labelled in the UI). */
-export const REFERENCE_DISTANCES_KM: readonly { km: number; label: string }[] = [
-  { km: 384_400, label: "Moon distance · 384,400 km" },
-  { km: 1e6, label: "1 million km" },
-  { km: 1e7, label: "10 million km" },
-  { km: 1e8, label: "100 million km" },
-];
+/** Horizontal position of the Moon landmark (fraction of width). Decorative: NOT a direction model. */
+export const MOON_X_FRACTION = 0.86;
+
+/**
+ * Distance-scale ticks: every 1,000,000 km up to `uptoKm` (the revealed frontier), within the
+ * domain. Presentation only: asteroid positions always use exact miss distances.
+ */
+export const SCALE_STEP_KM = 1_000_000;
+export function scaleTicks(uptoKm: number, domain: DistanceDomain): number[] {
+  const out: number[] = [];
+  const last = Math.min(uptoKm, domain.maxKm);
+  for (let km = SCALE_STEP_KM; km <= last; km += SCALE_STEP_KM) out.push(km);
+  return out;
+}
+
+/** Revealed-distance indicator text value: floored to whole millions (to 10,000 km below 1M). */
+export function frontierLabelKm(revealedKm: number): number {
+  if (revealedKm >= SCALE_STEP_KM) return Math.floor(revealedKm / SCALE_STEP_KM) * SCALE_STEP_KM;
+  return Math.floor(revealedKm / 10_000) * 10_000;
+}

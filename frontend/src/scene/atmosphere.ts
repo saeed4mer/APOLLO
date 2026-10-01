@@ -43,11 +43,11 @@ export function skyColors(progress: number): { zenith: string; horizon: string }
 
 /** Decorative stars fade in as the sky darkens. */
 export const starOpacity = (p: number): number => smoothstep(0.4, 0.9, p);
-/** Real reference-distance arcs (Moon, 1M, 10M, 100M km). */
-export const referenceOpacity = (p: number): number => 0.55 * smoothstep(0.3, 0.5, p);
-/** Asteroid name labels, then names plus miss distance. */
-export const labelOpacity = (p: number): number => smoothstep(0.55, 0.65, p);
-export const labelDetailOpacity = (p: number): number => smoothstep(0.78, 0.86, p);
+/** The 1M-km distance ruler fades in once the frontier passes ~1M km. */
+export const rulerOpacity = (p: number): number => 0.75 * smoothstep(0.42, 0.5, p);
+/** Asteroid name labels, then names plus miss distance (only for asteroids at rest). */
+export const labelOpacity = (p: number): number => smoothstep(0.45, 0.55, p);
+export const labelDetailOpacity = (p: number): number => smoothstep(0.62, 0.7, p);
 /** Opening title and "scroll to explore" hint. */
 export const introOpacity = (p: number): number => 1 - smoothstep(0.04, 0.14, p);
 /** Most labels shown at once (nearest first), so large populations never become a dashboard. */

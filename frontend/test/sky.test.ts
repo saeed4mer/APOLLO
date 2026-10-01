@@ -1,10 +1,9 @@
 import { validateProfileResponse } from "../src/api/validateProfile";
 import type { WorldRecord } from "../src/models/world";
-import { labelOpacity, referenceOpacity, SKY_STOPS, skyColors, starOpacity } from "../src/scene/atmosphere";
+import { labelOpacity, rulerOpacity, SKY_STOPS, skyColors, starOpacity } from "../src/scene/atmosphere";
 import { ExplorationController, MAX_WHEEL_DELTA, PROGRESS_PER_100PX } from "../src/scene/exploration";
-import { FALL_MS, MAX_STAGGER_WINDOW_MS, REVEAL_END, REVEAL_START, RevealTracker, revealOrder, revealThresholds } from "../src/scene/reveal";
 import {
-  altitudeFraction, altitudePx, ALTITUDE_DOMAIN_KM, computeLayout, MIN_ALTITUDE_PX, restPosition, skyHorizontal, surfaceY,
+  altitudeFraction, altitudePx, computeLayout, DEFAULT_DOMAIN, MIN_ALTITUDE_PX, restPosition, skyHorizontal, surfaceY,
 } from "../src/scene/skyLayout";
 import { buildCallouts } from "../src/ui/callouts";
 import { labelBox, overlaps } from "../src/ui/LabelLayer";
@@ -49,15 +48,15 @@ describe("distance ordering is preserved in the sky (non-negotiable)", () => {
     }
   });
 
-  it("log scale on fixed constants: domain ends map to 0 and 1, values outside clamp", () => {
-    expect(altitudeFraction(ALTITUDE_DOMAIN_KM.min)).toBe(0);
-    expect(altitudeFraction(ALTITUDE_DOMAIN_KM.max)).toBe(1);
+  it("log scale over the distance domain: domain ends map to 0 and 1, values outside clamp", () => {
+    expect(altitudeFraction(DEFAULT_DOMAIN.minKm)).toBe(0);
+    expect(altitudeFraction(DEFAULT_DOMAIN.maxKm)).toBe(1);
     expect(altitudeFraction(1)).toBe(0);
     expect(altitudeFraction(1e12)).toBe(1);
     expect(() => altitudeFraction(0)).toThrow(RangeError);
     expect(() => altitudeFraction(NaN)).toThrow(RangeError);
     const layout = computeLayout(1000, 800, 0);
-    expect(altitudePx(layout, ALTITUDE_DOMAIN_KM.min)).toBe(MIN_ALTITUDE_PX);
+    expect(altitudePx(layout, DEFAULT_DOMAIN.minKm)).toBe(MIN_ALTITUDE_PX);
   });
 
   it("positions do not depend on the rest of the population (adding asteroids moves nobody)", () => {
@@ -131,7 +130,7 @@ describe("exploration progress", () => {
     expect(x.step(16)).toBe(false);
   });
 
-  it("ignores NaN/Infinity and tracks the deepest progress reached", () => {
+  it("ignores NaN/Infinity and follows the target both ways", () => {
     const x = new ExplorationController();
     for (const bad of [NaN, Infinity, -Infinity]) {
       x.applyWheel(bad);
@@ -144,67 +143,6 @@ describe("exploration progress", () => {
     x.setTarget(0.2);
     while (x.step(16));
     expect(x.currentProgress).toBe(0.2);
-    expect(x.deepestProgress).toBe(0.7);
-  });
-});
-
-describe("progressive reveal and the HIDDEN -> FALLING -> SETTLED lifecycle", () => {
-  it("reveals farthest first (ties by neows_id), deterministically", () => {
-    const order = revealOrder(records());
-    const byId = new Map(records().map((r) => [r.neows_id, r.encounter.miss_distance_km]));
-    for (let i = 1; i < order.length; i++) expect(byId.get(order[i]!)!).toBeLessThanOrEqual(byId.get(order[i - 1]!)!);
-    expect(revealOrder([...records()].reverse())).toEqual(order);
-  });
-
-  it("thresholds span [REVEAL_START, REVEAL_END]; only a few distant hints are visible at load", () => {
-    const thresholds = [...revealThresholds(records()).values()];
-    expect(Math.min(...thresholds)).toBe(REVEAL_START);
-    expect(Math.max(...thresholds)).toBe(REVEAL_END);
-    const atLoad = thresholds.filter((t) => t <= 0).length;
-    expect(atLoad).toBeGreaterThan(0);
-    expect(atLoad).toBeLessThan(records().length / 4);
-  });
-
-  it("falls, settles, and never restarts when scrolling back or when records are re-supplied", () => {
-    const tracker = new RevealTracker();
-    tracker.setRecords(records());
-    const first = revealOrder(records())[0]!;
-    expect(tracker.phase(first, 0)).toBe("HIDDEN");
-    tracker.update(0, 1000);
-    expect(tracker.phase(first, 1000)).toBe("FALLING");
-    expect(tracker.phase(first, 1000 + FALL_MS)).toBe("SETTLED");
-    tracker.update(0, 5000); // same progress again (e.g. scroll back): nothing restarts
-    tracker.setRecords(records()); // retry / refresh of the same population
-    expect(tracker.phase(first, 1000 + FALL_MS)).toBe("SETTLED");
-    expect(tracker.anyFalling(1e6)).toBe(false);
-  });
-
-  it("everything is revealed by REVEAL_END, nothing by an earlier progress beyond its threshold", () => {
-    const tracker = new RevealTracker();
-    tracker.setRecords(records());
-    tracker.update(0.3, 0);
-    for (const [id, t] of revealThresholds(records())) {
-      expect(tracker.phase(id, 1e9) === "HIDDEN").toBe(t > 0.3);
-    }
-    tracker.update(REVEAL_END, 0);
-    for (const r of records()) expect(tracker.phase(r.neows_id, 1e9)).toBe("SETTLED");
-  });
-
-  it("a large simultaneous reveal lands within a bounded window (no minutes-long falling)", () => {
-    const base = records()[0]!;
-    const many = Array.from({ length: 1000 }, (_, i) => withDistance(base, String(1_000_000 + i), 1e4 + i));
-    const tracker = new RevealTracker();
-    tracker.setRecords(many);
-    tracker.update(1, 0);
-    expect(tracker.anyFalling(MAX_STAGGER_WINDOW_MS + FALL_MS + 1)).toBe(false);
-  });
-
-  it("settleNow shows a deep-linked asteroid in place without affecting revealed ones", () => {
-    const tracker = new RevealTracker();
-    tracker.setRecords(records());
-    const last = revealOrder(records()).at(-1)!;
-    tracker.settleNow(last, 500);
-    expect(tracker.phase(last, 500)).toBe("SETTLED");
   });
 });
 
@@ -238,7 +176,7 @@ describe("sky -> space transition is continuous", () => {
     }
     expect(starOpacity(0)).toBe(0);
     expect(starOpacity(1)).toBe(1);
-    expect(referenceOpacity(0)).toBe(0);
+    expect(rulerOpacity(0)).toBe(0);
     expect(labelOpacity(0.3)).toBe(0);
     expect(skyColors(NaN)).toEqual(skyColors(0));
   });

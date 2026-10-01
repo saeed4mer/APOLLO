@@ -65,7 +65,9 @@ describe("world", () => {
     t.button("About this view").click();
     const about = t.text(".about-panel");
     expect(about).toContain("illustrative visualization, not a physics simulation");
-    expect(about).toContain("real NeoWs miss distance");
+    expect(about).toContain("exact NeoWs miss distance (closest first)");
+    expect(about).toContain("Earth-Moon distance (384,400 km)");
+    expect(about).toContain("not an impact prediction");
     expect(about).toContain("sha256-uniform-sphere-v1");
     expect(about).toContain("35 NeoWs object(s) shown");
     expect(about).toContain("visual metaphor");
