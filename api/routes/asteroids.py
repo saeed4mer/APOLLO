@@ -40,6 +40,9 @@ from dashboard_data import DashboardDataProvider
 
 router = APIRouter(tags=["Asteroids"])
 
+# Single source of truth for NeoWs path IDs: positive integers, no leading zeros.
+NeowsIdPath = Annotated[str, Path(pattern=r"^[1-9]\d*$", description="NeoWs positive numeric identifier")]
+
 
 @router.get(
     "/asteroids",
@@ -54,6 +57,33 @@ def get_asteroids(
 ) -> WatchlistResponse:
     """Return threat watchlist close-approach encounter records."""
     return get_watchlist(provider, params)
+
+
+# Must be registered before /asteroids/{neows_id}: Starlette matches routes in
+# order, so the ID route would otherwise capture "world" and reject it with 422.
+@router.get(
+    "/asteroids/world",
+    status_code=status.HTTP_501_NOT_IMPLEMENTED,
+    responses={501: {"model": ErrorResponse, "description": "World snapshot contract not yet implemented."}},
+    summary="Batch world snapshot (not yet implemented)",
+    description="Reserved for the set-based world snapshot contract (Phase 1 Step 4).",
+)
+def get_asteroids_world(
+    provider: DashboardDataProvider = Depends(get_provider),
+) -> JSONResponse:
+    """Reserve the world route; returns an explicit 501 until Step 4 lands."""
+    error_payload = ErrorResponse(
+        meta=MetaEnvelope(
+            api_version="1.0.0",
+            execution_mode=provider.get_execution_mode(),
+            timestamp=datetime.now(timezone.utc).isoformat(),
+        ),
+        error=ErrorDetail(
+            code="NOT_IMPLEMENTED",
+            message="The world snapshot endpoint is not yet implemented.",
+        ),
+    )
+    return JSONResponse(status_code=status.HTTP_501_NOT_IMPLEMENTED, content=error_payload.model_dump())
 
 
 @router.get(
@@ -74,7 +104,7 @@ def get_asteroids(
     description="Returns primary close-approach encounter telemetry and entity resolution state for a given NeoWs identifier.",
 )
 def get_asteroid(
-    neows_id: Annotated[str, Path(pattern=r"^\d+$", description="NeoWs numeric identifier")],
+    neows_id: NeowsIdPath,
     provider: DashboardDataProvider = Depends(get_provider),
 ) -> AsteroidDetailResponse | JSONResponse:
     """Return primary encounter dossier and resolution state for a specific NeoWs identifier."""
@@ -113,7 +143,7 @@ def get_asteroid(
     description="Returns JPL Small-Body Database physical parameters, orbital elements, and quality tier for a NeoWs identifier.",
 )
 def get_asteroid_sbdb_route(
-    neows_id: Annotated[str, Path(pattern=r"^\d+$", description="NeoWs numeric identifier")],
+    neows_id: NeowsIdPath,
     provider: DashboardDataProvider = Depends(get_provider),
 ) -> SbdbResponse | JSONResponse:
     """Return SBDB physical and orbital characterization for a specific NeoWs identifier."""
@@ -152,7 +182,7 @@ def get_asteroid_sbdb_route(
     description="Returns NASA/JPL Sentry Mode S impact risk monitoring profile, technical risk scales, and reverse-cardinality ambiguity protection for a NeoWs identifier.",
 )
 def get_asteroid_sentry_route(
-    neows_id: Annotated[str, Path(pattern=r"^\d+$", description="NeoWs numeric identifier")],
+    neows_id: NeowsIdPath,
     provider: DashboardDataProvider = Depends(get_provider),
 ) -> SentryResponse | JSONResponse:
     """Return Sentry impact risk monitoring profile for a specific NeoWs identifier."""
@@ -191,7 +221,7 @@ def get_asteroid_sentry_route(
     description="Returns chronological Sentry catalog snapshots and non-causal metric change tracking for a NeoWs identifier.",
 )
 def get_asteroid_history_route(
-    neows_id: Annotated[str, Path(pattern=r"^[1-9]\d*$", description="NeoWs positive numeric identifier")],
+    neows_id: NeowsIdPath,
     provider: DashboardDataProvider = Depends(get_provider),
 ) -> SentryHistoryResponse | JSONResponse:
     """Return Sentry historical risk trajectory for a specific NeoWs identifier."""
@@ -230,7 +260,7 @@ def get_asteroid_history_route(
     description="Returns crosswalk mappings across NeoWs, JPL SBDB, and JPL Sentry for a resolved entity.",
 )
 def get_asteroid_crosswalk_route(
-    neows_id: Annotated[str, Path(pattern=r"^[1-9]\d*$", description="NeoWs positive numeric identifier")],
+    neows_id: NeowsIdPath,
     provider: DashboardDataProvider = Depends(get_provider),
 ) -> CrosswalkResponse | JSONResponse:
     """Return multi-source identifier crosswalk for a specific NeoWs identifier."""

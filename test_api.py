@@ -2723,3 +2723,42 @@ def test_crosswalk_envelope_isolation_across_all_endpoints(mock_client: TestClie
     assert "is_sentry_ambiguous" not in res_cw
     assert "warning" not in res_cw
     assert "notes" not in res_cw
+
+
+# ============================================================================
+# PHASE 1 STEP 2 — ROUTE PATTERNS & /asteroids/world ROUTE ORDERING
+# ============================================================================
+
+_NEOWS_ID_ROUTES = ["/asteroids/{}", "/asteroids/{}/sbdb", "/asteroids/{}/sentry",
+                    "/asteroids/{}/history", "/asteroids/{}/crosswalk"]
+
+
+@pytest.mark.parametrize("route", _NEOWS_ID_ROUTES)
+@pytest.mark.parametrize("bad_id", ["0", "007", "abc", "-1", "1.5"])
+def test_neows_id_routes_share_positive_integer_pattern(mock_client: TestClient, route: str, bad_id: str):
+    """Every NeoWs ID route rejects zero, leading zeros, and non-integers identically."""
+    resp = mock_client.get(route.format(bad_id))
+    assert resp.status_code == 422
+
+
+@pytest.mark.parametrize("route", _NEOWS_ID_ROUTES)
+def test_neows_id_routes_accept_positive_integer(mock_client: TestClient, route: str):
+    """A well-formed but unknown positive ID passes validation and reaches the handler (404)."""
+    resp = mock_client.get(route.format("99999999"))
+    assert resp.status_code == 404
+    assert resp.json()["error"]["code"] == "TARGET_NOT_FOUND"
+
+
+def test_world_route_not_captured_by_neows_id_route(mock_client: TestClient):
+    """Regression: /asteroids/world must hit the world route, not 422 from /asteroids/{neows_id}."""
+    resp = mock_client.get("/asteroids/world")
+    assert resp.status_code != 422
+    assert resp.status_code == 501
+    validated = ErrorResponse.model_validate(resp.json())
+    assert validated.error.code == "NOT_IMPLEMENTED"
+
+
+def test_world_route_registered_before_neows_id_route():
+    """Starlette matches in registration order; the static world path must come first."""
+    paths = [getattr(r, "path", None) for r in create_app().routes]
+    assert paths.index("/asteroids/world") < paths.index("/asteroids/{neows_id}")
