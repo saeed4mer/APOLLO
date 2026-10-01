@@ -1222,3 +1222,51 @@ def test_sbdb_batch_summary_write_failure_halts_pipeline(tmp_path, caplog):
         # Must log ERROR, not WARNING
         assert any("Failed to write SBDB authoritative batch summary" in record.message and record.levelname == "ERROR"
                    for record in caplog.records)
+
+
+# ---------------------------------------------------------------------------
+# Phase 1 Step 3b — NEO/PHA flag tri-state survives ingestion
+# ---------------------------------------------------------------------------
+_MISSING = object()
+
+
+def _object_payload_with_flags(neo, pha):
+    obj = {k: v for k, v in SAMPLE_SBDB_2025_HX_PAYLOAD["object"].items() if k not in ("neo", "pha")}
+    if neo is not _MISSING:
+        obj["neo"] = neo
+    if pha is not _MISSING:
+        obj["pha"] = pha
+    return {**SAMPLE_SBDB_2025_HX_PAYLOAD, "object": obj}
+
+
+@pytest.mark.parametrize(
+    "raw,expected",
+    [(True, True), (False, False), (None, None), (_MISSING, None), ("false", None)],
+    ids=["explicit_true", "explicit_false", "json_null", "key_missing", "non_boolean"],
+)
+def test_extract_sbdb_object_preserves_flag_tri_state(raw, expected):
+    """Explicit booleans pass through; missing/null/non-boolean flags are unknown (None), never False."""
+    record = nasa_sbdb.extract_sbdb_object(
+        payload=_object_payload_with_flags(raw, raw),
+        snapshot_key="2026-09-26",
+        run_id="r1",
+        snapshot_time="2026-09-26T00:00:00Z",
+    )
+    assert record["is_neo"] is expected
+    assert record["is_pha"] is expected
+
+
+def test_sbdb_object_flag_tri_state_survives_parquet_round_trip(tmp_path):
+    """True, False and None are all written and read back distinctly through the real schema/writer."""
+    from pipeline_utils import write_parquet
+
+    records = [
+        nasa_sbdb.extract_sbdb_object(_object_payload_with_flags(raw, raw), "2026-09-26", f"r{i}", "t")
+        for i, raw in enumerate([True, False, _MISSING])
+    ]
+    out = tmp_path / "fact_sbdb_object_snapshot.parquet"
+    write_parquet(records, nasa_sbdb.SBDB_OBJECT_SCHEMA, str(out))
+
+    table = pq.read_table(out)
+    assert table.column("is_neo").to_pylist() == [True, False, None]
+    assert table.column("is_pha").to_pylist() == [True, False, None]

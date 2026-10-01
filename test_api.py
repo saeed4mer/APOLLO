@@ -2762,3 +2762,234 @@ def test_world_route_registered_before_neows_id_route():
     """Starlette matches in registration order; the static world path must come first."""
     paths = [getattr(r, "path", None) for r in create_app().routes]
     assert paths.index("/asteroids/world") < paths.index("/asteroids/{neows_id}")
+
+
+# ============================================================================
+# PHASE 1 STEP 3 — SBDB ORBIT SERVING: SOURCE FIELDS, COHERENT SNAPSHOT, TRI-STATE
+# ============================================================================
+
+_TW54_SPKID = "50548689"
+_TW54_SBDB_URL = "/asteroids/3548666/sbdb"
+
+# Served field -> SBDB element_name, per the actual fact_sbdb_orbit_element schema.
+_SBDB_ELEMENT_FIELDS = {
+    "eccentricity": "e",
+    "semi_major_axis_au": "a",
+    "perihelion_distance_au": "q",
+    "aphelion_distance_au": "ad",
+    "inclination_deg": "i",
+    "ascending_node_longitude_deg": "om",
+    "argument_of_perihelion_deg": "w",
+    "mean_anomaly_deg": "ma",
+    "mean_motion_deg_per_day": "n",
+    "orbital_period_days": "per",
+    "time_of_perihelion_jd_tdb": "tp",
+}
+
+_REAL_LAKEHOUSE = Path(__file__).resolve().parent
+
+
+def _fixture_element(spkid: str, name: str) -> float:
+    return next(
+        r["element_value"] for r in _FIXTURE_SBDB_ELEM
+        if r["spkid"] == spkid and r["element_name"] == name
+    )
+
+
+def _sbdb_snapshot_rows(snapshot_key: str, run_id: str, snapshot_time: str, scale: float,
+                        element_names: list[str] | None = None,
+                        is_neo: bool | None = True, is_pha: bool | None = False,
+                        include_physical: bool = True) -> dict[str, list[dict]]:
+    """Clone the 2010 TW54 fixture rows into a new snapshot with scaled, distinguishable values."""
+    stamp = {"snapshot_key": snapshot_key, "run_id": run_id, "snapshot_time": snapshot_time}
+    obj = [{**r, **stamp, "is_neo": is_neo, "is_pha": is_pha}
+           for r in _FIXTURE_SBDB_OBJ if r["spkid"] == _TW54_SPKID]
+    orb = [{**r, **stamp, "epoch_jd": r["epoch_jd"] + scale}
+           for r in _FIXTURE_SBDB_ORB if r["spkid"] == _TW54_SPKID]
+    elem = [{**r, **stamp, "epoch_jd": r["epoch_jd"] + scale, "element_value": r["element_value"] * scale}
+            for r in _FIXTURE_SBDB_ELEM
+            if r["spkid"] == _TW54_SPKID and (element_names is None or r["element_name"] in element_names)]
+    phys = [{**r, **stamp, "param_value_numeric": r["param_value_numeric"] * scale}
+            for r in _FIXTURE_SBDB_PHYS if r["spkid"] == _TW54_SPKID] if include_physical else []
+    return {"obj": obj, "orb": orb, "elem": elem, "phys": phys}
+
+
+def _write_sbdb_tables(lakehouse: Path, *snapshots: dict[str, list[dict]]) -> None:
+    """Overwrite the four SBDB tables with the base fixtures plus extra snapshots."""
+    tables = {
+        "obj": ("fact_sbdb_object_snapshot.parquet", _FIXTURE_SBDB_OBJ, SBDB_OBJECT_SCHEMA),
+        "orb": ("fact_sbdb_orbit.parquet", _FIXTURE_SBDB_ORB, SBDB_ORBIT_SCHEMA),
+        "elem": ("fact_sbdb_orbit_element.parquet", _FIXTURE_SBDB_ELEM, SBDB_ORBIT_ELEMENT_SCHEMA),
+        "phys": ("fact_sbdb_physical_parameter.parquet", _FIXTURE_SBDB_PHYS, SBDB_PHYS_PAR_SCHEMA),
+    }
+    for key, (filename, base_rows, schema) in tables.items():
+        rows = list(base_rows) + [r for snap in snapshots for r in snap[key]]
+        pq.write_table(pa.Table.from_pylist(rows, schema=schema), lakehouse / filename)
+
+
+def _client_for(lakehouse: Path) -> TestClient:
+    return TestClient(create_app(provider=DashboardDataProvider(base_dir=lakehouse, execution_mode="LOCAL")))
+
+
+@pytest.mark.parametrize("field,element_name", sorted(_SBDB_ELEMENT_FIELDS.items()))
+def test_sbdb_serves_every_source_orbital_element(mock_client: TestClient, field: str, element_name: str):
+    """Each served orbital field is the exact SBDB element value for the selected snapshot."""
+    data = mock_client.get(_TW54_SBDB_URL).json()["data"]
+    assert data[field] == pytest.approx(_fixture_element(_TW54_SPKID, element_name), rel=1e-12)
+
+
+def test_sbdb_serves_epoch_equinox_and_snapshot_provenance(mock_client: TestClient):
+    data = mock_client.get(_TW54_SBDB_URL).json()["data"]
+    assert data["epoch_jd"] == 2461200.5
+    assert data["equinox"] == "J2000"
+    assert data["snapshot_key"] == "2026-09-26"
+    assert data["run_id"] == "26b0c1ef0bba"
+    assert data["snapshot_time"] == "2026-09-26T20:27:39.451638+00:00"
+
+
+def test_sbdb_orbital_period_comes_from_source_per(mock_client: TestClient):
+    """orbital_period_days is SBDB 'per'; the legacy year field is only its unit conversion, not a**1.5."""
+    data = mock_client.get(_TW54_SBDB_URL).json()["data"]
+    per_days = _fixture_element(_TW54_SPKID, "per")
+    assert data["orbital_period_days"] == per_days
+    assert data["orbital_period_yr"] == pytest.approx(per_days / 365.25, rel=1e-12)
+    a_au = _fixture_element(_TW54_SPKID, "a")
+    assert data["orbital_period_yr"] != pytest.approx(a_au ** 1.5, rel=1e-9)
+
+
+def test_sbdb_orbital_period_yr_is_null_without_source_period(mock_lakehouse: Path):
+    """No source 'per' -> no derived year value (no fallback to Kepler's a**1.5)."""
+    newer = _sbdb_snapshot_rows("2026-09-30", "run_noper", "2026-09-30T00:00:00+00:00", 1.0,
+                                element_names=["a", "e", "q", "i"])
+    _write_sbdb_tables(mock_lakehouse, newer)
+    data = _client_for(mock_lakehouse).get(_TW54_SBDB_URL).json()["data"]
+    assert data["semi_major_axis_au"] is not None
+    assert data["orbital_period_days"] is None
+    assert data["orbital_period_yr"] is None
+
+
+def test_sbdb_orbital_period_yr_marked_deprecated_in_openapi(mock_client: TestClient):
+    props = mock_client.get("/openapi.json").json()["components"]["schemas"]["SbdbProfile"]["properties"]
+    assert props["orbital_period_yr"].get("deprecated") is True
+    assert "deprecated" not in props["orbital_period_days"]
+
+
+def test_sbdb_profile_uses_single_latest_snapshot(mock_lakehouse: Path):
+    """With older and newer snapshots present, every field comes from the newest one only."""
+    older = _sbdb_snapshot_rows("2026-09-01", "run_older", "2026-09-01T00:00:00+00:00", 0.5)
+    newer = _sbdb_snapshot_rows("2026-09-30", "run_newer", "2026-09-30T00:00:00+00:00", 2.0)
+    _write_sbdb_tables(mock_lakehouse, older, newer)
+
+    data = _client_for(mock_lakehouse).get(_TW54_SBDB_URL).json()["data"]
+    assert data["snapshot_key"] == "2026-09-30"
+    assert data["run_id"] == "run_newer"
+    for field, element_name in _SBDB_ELEMENT_FIELDS.items():
+        assert data[field] == pytest.approx(_fixture_element(_TW54_SPKID, element_name) * 2.0, rel=1e-12), field
+    assert data["epoch_jd"] == 2461200.5 + 2.0
+    assert data["absolute_magnitude"] == pytest.approx(27.6 * 2.0)
+
+
+def test_sbdb_profile_does_not_backfill_from_older_snapshot(mock_lakehouse: Path):
+    """A newer snapshot missing some elements/physical params yields nulls, never older-snapshot values.
+
+    Under the previous MAX()-across-snapshots logic, the missing fields silently
+    came from the older snapshot, producing a profile no single SBDB response ever contained.
+    """
+    newer = _sbdb_snapshot_rows("2026-09-30", "run_partial", "2026-09-30T00:00:00+00:00", 2.0,
+                                element_names=["a", "e"], include_physical=False)
+    _write_sbdb_tables(mock_lakehouse, newer)
+
+    data = _client_for(mock_lakehouse).get(_TW54_SBDB_URL).json()["data"]
+    assert data["run_id"] == "run_partial"
+    assert data["semi_major_axis_au"] == pytest.approx(_fixture_element(_TW54_SPKID, "a") * 2.0)
+    assert data["eccentricity"] == pytest.approx(_fixture_element(_TW54_SPKID, "e") * 2.0)
+    for field in ("inclination_deg", "ascending_node_longitude_deg", "argument_of_perihelion_deg",
+                  "mean_anomaly_deg", "orbital_period_days", "aphelion_distance_au"):
+        assert data[field] is None, field
+    assert data["absolute_magnitude"] is None
+
+
+def test_sbdb_profile_same_day_runs_select_latest_snapshot_time(mock_lakehouse: Path):
+    """Two runs on the same snapshot_key: the later snapshot_time wins, regardless of run_id order."""
+    early = _sbdb_snapshot_rows("2026-09-30", "run_b_early", "2026-09-30T01:00:00+00:00", 3.0)
+    late = _sbdb_snapshot_rows("2026-09-30", "run_a_late", "2026-09-30T02:00:00+00:00", 4.0)
+    _write_sbdb_tables(mock_lakehouse, early, late)
+
+    data = _client_for(mock_lakehouse).get(_TW54_SBDB_URL).json()["data"]
+    assert data["run_id"] == "run_a_late"
+    assert data["mean_anomaly_deg"] == pytest.approx(_fixture_element(_TW54_SPKID, "ma") * 4.0)
+
+
+@pytest.mark.parametrize("source_value", [True, False, None])
+def test_sbdb_neo_pha_flags_preserve_tri_state(mock_lakehouse: Path, source_value: bool | None):
+    """Explicit True/False pass through; unknown (null in source) is served as null, never false."""
+    newer = _sbdb_snapshot_rows("2026-09-30", "run_flags", "2026-09-30T00:00:00+00:00", 1.0,
+                                is_neo=source_value, is_pha=source_value)
+    _write_sbdb_tables(mock_lakehouse, newer)
+
+    data = _client_for(mock_lakehouse).get(_TW54_SBDB_URL).json()["data"]
+    assert data["is_neo"] is source_value
+    assert data["is_pha"] is source_value
+
+
+def test_sbdb_flags_null_when_object_row_missing_for_snapshot(mock_lakehouse: Path):
+    """Orbit present but no object row in the selected snapshot: flags are unknown (null), not false."""
+    newer = _sbdb_snapshot_rows("2026-09-30", "run_no_obj", "2026-09-30T00:00:00+00:00", 1.0)
+    newer["obj"] = []
+    _write_sbdb_tables(mock_lakehouse, newer)
+
+    data = _client_for(mock_lakehouse).get(_TW54_SBDB_URL).json()["data"]
+    assert data["run_id"] == "run_no_obj"
+    assert data["is_neo"] is None
+    assert data["is_pha"] is None
+    assert data["semi_major_axis_au"] is not None
+
+
+@pytest.mark.skipif(
+    not (_REAL_LAKEHOUSE / "fact_sbdb_orbit_element.parquet").exists(),
+    reason="Local Parquet lakehouse not present (gitignored; absent in CI).",
+)
+def test_sbdb_real_local_lakehouse_serves_source_orbit():
+    """Against the actual local Parquet data: served elements equal the stored SBDB rows."""
+    import duckdb
+
+    data = _client_for(_REAL_LAKEHOUSE).get("/asteroids/3427460/sbdb").json()["data"]
+    assert data is not None and data["spkid"] == "50427483"
+    elem_path = str(_REAL_LAKEHOUSE / "fact_sbdb_orbit_element.parquet").replace("\\", "/")
+    rows = dict(duckdb.connect().execute(
+        f"SELECT element_name, element_value FROM '{elem_path}' WHERE spkid = ? AND run_id = ?",
+        ["50427483", data["run_id"]],
+    ).fetchall())
+    for field, element_name in _SBDB_ELEMENT_FIELDS.items():
+        assert data[field] == rows[element_name], field
+    assert data["equinox"] == "J2000"
+
+
+_MISSING_FLAG = object()
+
+
+@pytest.mark.parametrize(
+    "raw,expected",
+    [(True, True), (False, False), (_MISSING_FLAG, None)],
+    ids=["explicit_true", "explicit_false", "missing"],
+)
+def test_sbdb_flag_tri_state_survives_ingestion_to_api(mock_lakehouse: Path, raw, expected):
+    """End to end: SBDB payload -> nasa_sbdb extraction -> Parquet -> provider -> API keeps all three states."""
+    import nasa_sbdb
+
+    payload_obj = {
+        "spkid": _TW54_SPKID, "des": "2010 TW54", "fullname": "(2010 TW54)", "kind": "au",
+        "orbit_id": "14", "orbit_class": {"code": "APO", "name": "Apollo"},
+    }
+    if raw is not _MISSING_FLAG:
+        payload_obj["neo"] = raw
+        payload_obj["pha"] = raw
+    snap = ("2026-09-30", "run_ingested", "2026-09-30T00:00:00+00:00")
+    newer = _sbdb_snapshot_rows(*snap, 1.0)
+    newer["obj"] = [nasa_sbdb.extract_sbdb_object({"object": payload_obj}, *snap)]
+    _write_sbdb_tables(mock_lakehouse, newer)
+
+    data = _client_for(mock_lakehouse).get(_TW54_SBDB_URL).json()["data"]
+    assert data["run_id"] == "run_ingested"
+    assert data["is_neo"] is expected
+    assert data["is_pha"] is expected

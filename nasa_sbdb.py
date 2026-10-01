@@ -218,6 +218,11 @@ def save_sbdb_summary(summary_data, filename="sbdb_batch_summary.json"):
 # ---------------------------------------------------------------------------
 # Data Extraction & Normalization
 # ---------------------------------------------------------------------------
+def _source_flag(value):
+    """Preserve SBDB flag tri-state: JSON true/false as published; missing/non-boolean -> None (unknown)."""
+    return value if isinstance(value, bool) else None
+
+
 def extract_sbdb_object(payload, snapshot_key, run_id, snapshot_time):
     """Extract object-level metadata into Table 1 format.
 
@@ -274,8 +279,8 @@ def extract_sbdb_object(payload, snapshot_key, run_id, snapshot_time):
         "fullname": fullname,
         "shortname": shortname_clean,
         "object_kind": str(obj.get("kind", "")).strip() or "unknown",
-        "is_neo": bool(obj.get("neo", False)),
-        "is_pha": bool(obj.get("pha", False)),
+        "is_neo": _source_flag(obj.get("neo")),
+        "is_pha": _source_flag(obj.get("pha")),
         "orbit_class_code": str(orbit_class_code).strip(),
         "orbit_class_name": str(orbit_class_name).strip(),
         "orbit_id": str(orbit_id).strip(),

@@ -28,6 +28,13 @@ UUID5_PATTERN = re.compile(
 )
 
 
+def _nullable_bool(value: Any) -> bool | None:
+    """Preserve source tri-state: True/False as published, None when unknown."""
+    if value is None or pd.isna(value):
+        return None
+    return bool(value)
+
+
 class LocalDuckDBDataProvider:
     """Local offline provider querying Lakehouse Parquet files via DuckDB."""
 
@@ -432,7 +439,40 @@ class LocalDuckDBDataProvider:
 
         spkid = spkid_rows[0][0]
 
-        # Step 2: Query latest object snapshot
+        # Step 2: Select ONE coherent SBDB snapshot for this SPK-ID.
+        # Ingestion writes object/orbit/element/physical rows for a target in a
+        # single run under one (snapshot_key, run_id), so that pair identifies a
+        # coherent snapshot. Every table below is pinned to it; nothing falls
+        # back to an older snapshot, so absent fields stay None rather than mixing.
+        anchor_sources = [
+            str(f).replace("\\", "/")
+            for f in (self._sbdb_object_file, self._sbdb_orbit_file)
+            if f.exists()
+        ]
+        if not anchor_sources:
+            conn.close()
+            return None
+        anchor_union = " UNION ALL ".join(
+            f"SELECT snapshot_key, snapshot_time, run_id FROM '{path}' WHERE spkid = ?"
+            for path in anchor_sources
+        )
+        anchor_rows = conn.execute(
+            f"""
+            SELECT snapshot_key, run_id, snapshot_time
+            FROM ({anchor_union})
+            ORDER BY snapshot_key DESC, snapshot_time DESC, run_id DESC
+            LIMIT 1
+            """,
+            [spkid] * len(anchor_sources),
+        ).fetchall()
+        if not anchor_rows:
+            conn.close()
+            return None
+        snapshot_key, run_id, snapshot_time = anchor_rows[0]
+        snapshot_params = [spkid, snapshot_key, run_id]
+        snapshot_filter = "spkid = ? AND snapshot_key = ? AND run_id = ?"
+
+        # Step 3: Object metadata from the selected snapshot
         obj_data: dict[str, Any] = {}
         if self._sbdb_object_file.exists():
             obj_path = str(self._sbdb_object_file).replace("\\", "/")
@@ -442,16 +482,15 @@ class LocalDuckDBDataProvider:
                     spkid, designation, fullname, shortname, object_kind,
                     is_neo, is_pha, orbit_class_code, orbit_class_name, orbit_id
                 FROM '{obj_path}'
-                WHERE spkid = ?
-                ORDER BY snapshot_key DESC, snapshot_time DESC, run_id DESC
+                WHERE {snapshot_filter}
                 LIMIT 1
                 """,
-                [spkid],
+                snapshot_params,
             ).df()
             if not obj_df.empty:
                 obj_data = obj_df.iloc[0].to_dict()
 
-        # Step 3: Query latest orbit solution
+        # Step 4: Orbit solution from the selected snapshot
         orb_data: dict[str, Any] = {}
         if self._sbdb_orbit_file.exists():
             orb_path = str(self._sbdb_orbit_file).replace("\\", "/")
@@ -462,46 +501,68 @@ class LocalDuckDBDataProvider:
                     producer, first_obs, last_obs, data_arc_days, n_obs_used,
                     condition_code, rms, earth_moid_au, jupiter_moid_au, t_jup
                 FROM '{orb_path}'
-                WHERE spkid = ?
-                ORDER BY snapshot_key DESC, snapshot_time DESC, run_id DESC, orbit_id DESC
+                WHERE {snapshot_filter}
+                ORDER BY orbit_id DESC
                 LIMIT 1
                 """,
-                [spkid],
+                snapshot_params,
             ).df()
             if not orb_df.empty:
                 orb_data = orb_df.iloc[0].to_dict()
 
-        # Step 4: Query Keplerian orbital elements
-        elem_data: dict[str, Any] = {
-            "eccentricity": None,
-            "semi_major_axis_au": None,
-            "perihelion_distance_au": None,
-            "inclination_deg": None,
+        # Step 5: Osculating orbital elements from the selected snapshot (and the
+        # selected orbit solution, when known). Pivot is safe: one row per element.
+        # Units as published by SBDB: a/q/ad au; e unitless; i/om/w/ma deg;
+        # n deg/d; per d; tp Julian Date (TDB).
+        element_columns = {
+            "eccentricity": "e",
+            "semi_major_axis_au": "a",
+            "perihelion_distance_au": "q",
+            "aphelion_distance_au": "ad",
+            "inclination_deg": "i",
+            "ascending_node_longitude_deg": "om",
+            "argument_of_perihelion_deg": "w",
+            "mean_anomaly_deg": "ma",
+            "mean_motion_deg_per_day": "n",
+            "orbital_period_days": "per",
+            "time_of_perihelion_jd_tdb": "tp",
         }
+        elem_data: dict[str, Any] = {col: None for col in element_columns}
+        elem_equinox = None
         if self._sbdb_elements_file.exists():
             elem_path = str(self._sbdb_elements_file).replace("\\", "/")
+            elem_filter = snapshot_filter
+            elem_params = list(snapshot_params)
+            if orb_data.get("orbit_id") is not None:
+                elem_filter += " AND orbit_id = ?"
+                elem_params.append(orb_data["orbit_id"])
+            pivot_sql = ",\n                    ".join(
+                f"MAX(CASE WHEN element_name = '{name}' THEN element_value END) AS {col}"
+                for col, name in element_columns.items()
+            )
             elem_df = conn.execute(
                 f"""
                 SELECT
-                    MAX(CASE WHEN element_name = 'e' THEN element_value END) AS eccentricity,
-                    MAX(CASE WHEN element_name = 'a' THEN element_value END) AS semi_major_axis_au,
-                    MAX(CASE WHEN element_name = 'q' THEN element_value END) AS perihelion_distance_au,
-                    MAX(CASE WHEN element_name = 'i' THEN element_value END) AS inclination_deg
+                    {pivot_sql},
+                    MAX(equinox) AS equinox
                 FROM '{elem_path}'
-                WHERE spkid = ?
+                WHERE {elem_filter}
                 """,
-                [spkid],
+                elem_params,
             ).df()
             if not elem_df.empty:
                 for col in elem_data:
                     val = elem_df.iloc[0][col]
                     elem_data[col] = float(val) if pd.notna(val) else None
+                eq_val = elem_df.iloc[0]["equinox"]
+                elem_equinox = eq_val if pd.notna(eq_val) else None
 
-        # Calculate orbital period in years (Kepler's Third Law: T = a^1.5)
-        a_au = elem_data.get("semi_major_axis_au")
-        orbital_period_yr = float(a_au**1.5) if a_au is not None and a_au > 0 else None
+        # DEPRECATED compatibility field: a unit conversion of the SBDB source
+        # period (days -> Julian years), not a source value and not a^1.5.
+        period_days = elem_data["orbital_period_days"]
+        orbital_period_yr = period_days / 365.25 if period_days is not None else None
 
-        # Step 5: Query physical parameters
+        # Step 6: Physical parameters from the selected snapshot
         phys_data: dict[str, Any] = {
             "estimated_diameter_km": None,
             "absolute_magnitude": None,
@@ -518,16 +579,16 @@ class LocalDuckDBDataProvider:
                     MAX(CASE WHEN param_name = 'albedo' THEN param_value_numeric END) AS albedo,
                     MAX(CASE WHEN param_name = 'rot_per' THEN param_value_numeric END) AS rotational_period_hr
                 FROM '{phys_path}'
-                WHERE spkid = ?
+                WHERE {snapshot_filter}
                 """,
-                [spkid],
+                snapshot_params,
             ).df()
             if not phys_df.empty:
                 for col in phys_data:
                     val = phys_df.iloc[0][col]
                     phys_data[col] = float(val) if pd.notna(val) else None
 
-        # Step 6: Evaluate Astrometric Data Quality Tier
+        # Step 7: Evaluate Astrometric Data Quality Tier
         arc_days = orb_data.get("data_arc_days")
         n_obs = orb_data.get("n_obs_used")
         cond_code = orb_data.get("condition_code")
@@ -555,12 +616,16 @@ class LocalDuckDBDataProvider:
             "fullname": obj_data.get("fullname"),
             "shortname": obj_data.get("shortname"),
             "object_kind": obj_data.get("object_kind"),
-            "is_neo": bool(obj_data.get("is_neo", False)),
-            "is_pha": bool(obj_data.get("is_pha", False)),
+            "is_neo": _nullable_bool(obj_data.get("is_neo")),
+            "is_pha": _nullable_bool(obj_data.get("is_pha")),
             "orbit_class_code": obj_data.get("orbit_class_code"),
             "orbit_class_name": obj_data.get("orbit_class_name"),
+            "snapshot_key": snapshot_key,
+            "run_id": run_id,
+            "snapshot_time": snapshot_time,
             "orbit_id": orb_data.get("orbit_id") or obj_data.get("orbit_id"),
             "epoch_jd": orb_data.get("epoch_jd"),
+            "equinox": orb_data.get("equinox") or elem_equinox,
             "soln_date": orb_data.get("soln_date"),
             "orbit_source": orb_data.get("orbit_source"),
             "producer": orb_data.get("producer"),
@@ -573,10 +638,7 @@ class LocalDuckDBDataProvider:
             "earth_moid_au": orb_data.get("earth_moid_au"),
             "jupiter_moid_au": orb_data.get("jupiter_moid_au"),
             "t_jup": orb_data.get("t_jup"),
-            "eccentricity": elem_data["eccentricity"],
-            "semi_major_axis_au": elem_data["semi_major_axis_au"],
-            "perihelion_distance_au": elem_data["perihelion_distance_au"],
-            "inclination_deg": elem_data["inclination_deg"],
+            **elem_data,
             "orbital_period_yr": orbital_period_yr,
             "estimated_diameter_km": phys_data["estimated_diameter_km"],
             "absolute_magnitude": phys_data["absolute_magnitude"],
