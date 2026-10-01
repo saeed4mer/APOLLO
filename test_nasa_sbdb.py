@@ -8,6 +8,7 @@ physical-parameter EAV modeling, duplicate safeguard, and S3 partitioning.
 from datetime import date
 import json
 import logging
+from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 from botocore.exceptions import BotoCoreError, ClientError
@@ -17,6 +18,36 @@ import pytest
 import requests
 
 import nasa_sbdb
+
+REPO_DIR = Path(__file__).resolve().parent
+
+
+@pytest.fixture(autouse=True)
+def _isolate_cwd(tmp_path, monkeypatch):
+    """Run every test from a temp dir.
+
+    main() writes cwd-relative default outputs (sbdb_batch_summary.json, raw
+    JSON, Parquet); without this, tests overwrite real repo-root files.
+    """
+    monkeypatch.chdir(tmp_path)
+
+
+def test_main_default_summary_path_does_not_touch_repo_root(tmp_path):
+    repo_summary = REPO_DIR / "sbdb_batch_summary.json"
+    before = repo_summary.read_bytes() if repo_summary.exists() else None
+
+    with patch("nasa_sbdb.fetch_sbdb_data", side_effect=requests.exceptions.HTTPError("404")), \
+         patch("nasa_sbdb.save_raw_json"), \
+         patch("nasa_sbdb.write_parquet"), \
+         patch("nasa_sbdb.upload_raw_to_s3"), \
+         patch("nasa_sbdb.upload_processed_to_s3"), \
+         patch("time.sleep"):
+        assert nasa_sbdb.main(targets="T1") == 1
+
+    assert (tmp_path / "sbdb_batch_summary.json").exists()
+    after = repo_summary.read_bytes() if repo_summary.exists() else None
+    assert after == before
+
 
 # ---------------------------------------------------------------------------
 # Test Fixtures & Payloads

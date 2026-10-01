@@ -16,6 +16,34 @@ from botocore.exceptions import ClientError
 
 import database
 import nasa_asteroids
+
+REPO_DIR = os.path.dirname(os.path.abspath(__file__))
+
+
+@pytest.fixture(autouse=True)
+def _isolate_cwd(tmp_path, monkeypatch):
+    """Run every test from a temp dir.
+
+    main() writes cwd-relative default outputs (neows_summary.json, raw JSON,
+    CSV, Parquet, SQLite); without this, tests overwrite real repo-root files.
+    """
+    monkeypatch.chdir(tmp_path)
+
+
+def test_main_default_summary_path_does_not_touch_repo_root(tmp_path, monkeypatch):
+    repo_summary = os.path.join(REPO_DIR, "neows_summary.json")
+    before = open(repo_summary, "rb").read() if os.path.exists(repo_summary) else None
+
+    monkeypatch.setattr(nasa_asteroids, "API_KEY", "TEST_KEY")
+    with patch("nasa_asteroids.fetch_data", return_value={"near_earth_objects": {}}), \
+         patch("nasa_asteroids.save_raw_json"):
+        assert nasa_asteroids.main() == 1
+
+    assert (tmp_path / "neows_summary.json").exists()
+    after = open(repo_summary, "rb").read() if os.path.exists(repo_summary) else None
+    assert after == before
+
+
 def test_extract_asteroids():
     fake_data = {
         "near_earth_objects": {
