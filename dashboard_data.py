@@ -53,6 +53,14 @@ _SENTRY_COLUMNS = {
     "sentry_id": "VARCHAR", "snapshot_key": "VARCHAR", "snapshot_time": "VARCHAR", "run_id": "VARCHAR",
     **_SENTRY_ASSESSMENT_COLUMNS,
 }
+# Optional NeoWs columns added to nasa_asteroids.ASTEROID_SCHEMA in Step 7. Datasets
+# written earlier lack them; they are then served as NULL and reported as missing.
+NEOWS_OPTIONAL_COLUMNS = {
+    "close_approach_datetime": "VARCHAR", "close_approach_epoch_ms": "BIGINT",
+    "relative_velocity_km_s": "DOUBLE", "absolute_magnitude_h": "DOUBLE",
+    "estimated_diameter_min_km": "DOUBLE", "estimated_diameter_max_km": "DOUBLE",
+    "is_sentry_object": "BOOLEAN",
+}
 _BRIDGE_COLUMNS = {
     "asteroid_key": "VARCHAR", "source_system": "VARCHAR", "identifier_name": "VARCHAR",
     "identifier_value": "VARCHAR", "is_primary_pivot": "BOOLEAN",
@@ -380,16 +388,23 @@ class LocalDuckDBDataProvider:
         availability comes from crosswalk membership, never from the NeoWs PHA flag.
         """
         if not self._asteroids_file.exists():
-            return {"records": pd.DataFrame(), "neows_run_id": None}
+            return {"records": pd.DataFrame(), "neows_run_id": None, "neows_missing_columns": []}
 
         ast = _parquet_relation(self._asteroids_file, {})
         bridge = _parquet_relation(self._bridge_file, _BRIDGE_COLUMNS)
         sentry = _parquet_relation(self._sentry_risk_file, _SENTRY_COLUMNS)
+        neows_schema = pq.read_schema(self._asteroids_file)
+        neows_missing = [col for col in NEOWS_OPTIONAL_COLUMNS if col not in neows_schema.names]
+        neows_optional_sql = ", ".join(
+            f"CAST(NULL AS {sql_type}) AS {col}" if col in neows_missing else col
+            for col, sql_type in NEOWS_OPTIONAL_COLUMNS.items()
+        )
 
         query = f"""
         WITH neows AS (
             SELECT
                 id AS neows_id, name, closest_approach_date, miss_distance_km, hazardous,
+                {neows_optional_sql},
                 ROW_NUMBER() OVER (
                     PARTITION BY id
                     ORDER BY miss_distance_km ASC, closest_approach_date ASC
@@ -400,6 +415,7 @@ class LocalDuckDBDataProvider:
         resolved AS (
             SELECT
                 n.neows_id, n.name, n.closest_approach_date, n.miss_distance_km, n.hazardous,
+                {", ".join(f"n.{col}" for col in NEOWS_OPTIONAL_COLUMNS)},
                 res.match_state, res.asteroid_key, res.match_rule, res.resolved_at
             FROM neows n
             JOIN ({self._neows_resolution_sql("SELECT neows_id FROM neows WHERE rn = 1")}) res
@@ -441,6 +457,7 @@ class LocalDuckDBDataProvider:
         )
         SELECT
             r.neows_id, r.name, r.closest_approach_date, r.miss_distance_km, r.hazardous,
+            {", ".join(f"r.{col}" for col in NEOWS_OPTIONAL_COLUMNS)},
             r.match_state, r.asteroid_key, r.match_rule, r.resolved_at,
             sp.spkid AS sbdb_spkid,
             ss.snapshot_key AS sbdb_snapshot_key,
@@ -472,11 +489,12 @@ class LocalDuckDBDataProvider:
 
         # NeoWs dataset provenance: save_to_parquet stamps run_id into file metadata
         # when available; older files carry none, which is reported as None.
-        neows_meta = pq.read_schema(self._asteroids_file).metadata or {}
+        neows_meta = neows_schema.metadata or {}
         neows_run_id = neows_meta.get(b"run_id")
         return {
             "records": df,
             "neows_run_id": neows_run_id.decode("utf-8") if neows_run_id else None,
+            "neows_missing_columns": neows_missing,
         }
 
     def get_resolution_state(self, neows_id: str | None) -> dict[str, Any]:

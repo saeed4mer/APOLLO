@@ -12,7 +12,14 @@ CREATE EXTERNAL TABLE IF NOT EXISTS nasa_asteroids.asteroids (
     name STRING,
     closest_approach_date STRING,
     miss_distance_km DOUBLE,
-    hazardous BOOLEAN
+    hazardous BOOLEAN,
+    close_approach_datetime STRING,
+    close_approach_epoch_ms BIGINT,
+    relative_velocity_km_s DOUBLE,
+    absolute_magnitude_h DOUBLE,
+    estimated_diameter_min_km DOUBLE,
+    estimated_diameter_max_km DOUBLE,
+    is_sentry_object BOOLEAN
 )
 PARTITIONED BY (
     year STRING,

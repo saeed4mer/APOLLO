@@ -3657,7 +3657,7 @@ def test_profile_encounter_is_neows_closest_approach(mock_lakehouse: Path):
     assert enc["selection_rule"] == "CLOSEST_OBSERVED_APPROACH"
     assert (enc["closest_approach_date"], enc["miss_distance_km"]) == ("2026-09-27", 1234.5)
     assert enc["is_potentially_hazardous"] is True
-    assert enc["availability"]["status"] == "available"
+    assert "is_potentially_hazardous" not in enc["availability"]["unavailable"]
     _assert_profile_matches_existing_endpoints(client, _FIXTURE_ASTEROIDS[0]["id"])
 
 
@@ -3690,8 +3690,7 @@ def test_profile_unknown_flags_are_null_not_false(mock_lakehouse: Path):
     _write_sbdb_tables(mock_lakehouse, newer)
     prof = _profile(_client_for(mock_lakehouse), _TW54_NEOWS)
     assert prof["encounter"]["is_potentially_hazardous"] is None
-    assert prof["encounter"]["availability"] == {
-        "status": "unavailable", "unavailable": {"is_potentially_hazardous": "not_in_source"}}
+    assert prof["encounter"]["availability"]["unavailable"]["is_potentially_hazardous"] == "not_in_source"
     assert prof["orbit"]["is_neo"] is None and prof["orbit"]["is_pha"] is None
     assert prof["orbit"]["availability"]["unavailable"] == {"is_neo": "not_in_source", "is_pha": "not_in_source"}
 
@@ -4098,3 +4097,192 @@ def test_sentry_assessment_real_local_lakehouse():
         _assert_assessment_equals_record(prof["sentry"]["assessment"], rows[0])
         assert prov["snapshot_time"] == rows[0]["snapshot_time"]
         _assert_sentry_matches_legacy_endpoint(client, neows_id)
+
+
+# ============================================================================
+# PHASE 1 STEP 7 — NORMALIZED NEOWS FIELDS IN WORLD AND PROFILE
+# ============================================================================
+
+from nasa_asteroids import ASTEROID_SCHEMA as _NEOWS_SCHEMA
+
+# NeoWs values chosen to differ from SBDB/Sentry so source separation is observable.
+_NEOWS_ENRICHED = {
+    _TW54_NEOWS: {"close_approach_datetime": "2026-09-30T05:42", "close_approach_epoch_ms": 1790746920000,
+                  "relative_velocity_km_s": 4.5115736676, "absolute_magnitude_h": 27.4,
+                  "estimated_diameter_min_km": 0.0080270317, "estimated_diameter_max_km": 0.0179489885,
+                  "is_sentry_object": True},
+    _ST_NEOWS: {"close_approach_datetime": "2026-09-26T11:03", "close_approach_epoch_ms": 1790420580000,
+                "relative_velocity_km_s": 3.0, "absolute_magnitude_h": 27.1,
+                "estimated_diameter_min_km": 0.0101054342, "estimated_diameter_max_km": 0.0225964377,
+                "is_sentry_object": True},
+}
+_NEOWS_NEW_FIELDS = tuple(next(iter(_NEOWS_ENRICHED.values())))
+_WORLD_NEOWS_FIELDS = ("close_approach_datetime", "relative_velocity_km_s",
+                       "estimated_diameter_min_km", "estimated_diameter_max_km")
+
+
+def _write_neows(lakehouse: Path, enriched: dict[str, dict] | None = None) -> list[dict]:
+    rows = [{**a, **(enriched or _NEOWS_ENRICHED).get(a["id"], {})} for a in _FIXTURE_ASTEROIDS]
+    _write_table(lakehouse, "asteroids.parquet", rows, _NEOWS_SCHEMA)
+    return rows
+
+
+def test_world_serves_renderer_neows_fields(mock_lakehouse: Path):
+    _write_neows(mock_lakehouse)
+    body = _world(_client_for(mock_lakehouse))
+    assert body["world"]["neows_fields_not_in_dataset"] == []
+    recs = _by_id(body)
+    for neows_id, values in _NEOWS_ENRICHED.items():
+        enc = recs[neows_id]["encounter"]
+        for field in _WORLD_NEOWS_FIELDS:
+            assert enc[field] == values[field], field
+    plain = recs["2138971"]["encounter"]  # not enriched in the fixture: null, never defaulted
+    assert all(plain[field] is None for field in _WORLD_NEOWS_FIELDS)
+
+
+def test_world_encounter_contract_is_minimal(mock_client: TestClient):
+    """The world gains only renderer-relevant fields; H and is_sentry_object stay profile-only."""
+    for rec in _world(mock_client)["data"]:
+        assert set(rec["encounter"]) == {
+            "source", "closest_approach_date", "miss_distance_km", "is_potentially_hazardous",
+            "close_approach_datetime", "relative_velocity_km_s", "estimated_diameter_min_km", "estimated_diameter_max_km"}
+        assert set(rec) == {"neows_id", "name", "asteroid_key", "encounter", "resolution", "sbdb", "sentry",
+                            "illustrative_direction"}
+
+
+def test_profile_serves_neows_encounter_and_physical(mock_lakehouse: Path):
+    _write_neows(mock_lakehouse)
+    prof = _profile(_client_for(mock_lakehouse), _TW54_NEOWS)
+    values = _NEOWS_ENRICHED[_TW54_NEOWS]
+    enc = prof["encounter"]
+    for field in ("close_approach_datetime", "close_approach_epoch_ms", "relative_velocity_km_s", "is_sentry_object"):
+        assert enc[field] == values[field], field
+    assert enc["availability"] == {"status": "available", "unavailable": {}}
+    neows_physical = prof["neows_physical"]
+    assert neows_physical["source"] == "nasa_neows"
+    for field in ("absolute_magnitude_h", "estimated_diameter_min_km", "estimated_diameter_max_km"):
+        assert neows_physical[field] == values[field], field
+    assert neows_physical["availability"] == {"status": "available", "unavailable": {}}
+
+
+def test_profile_keeps_neows_sbdb_and_sentry_values_separate(mock_lakehouse: Path):
+    """H, diameter and velocity from three sources stay in three labelled places, never merged."""
+    _write_neows(mock_lakehouse)
+    prof = _profile(_client_for(mock_lakehouse), _TW54_NEOWS)
+    assert prof["neows_physical"]["absolute_magnitude_h"] == 27.4       # NeoWs
+    assert prof["physical"]["absolute_magnitude"] == 27.6               # JPL SBDB
+    assert prof["sentry"]["assessment"]["absolute_magnitude"] == 27.55  # JPL Sentry
+    assert (prof["neows_physical"]["estimated_diameter_min_km"], prof["neows_physical"]["estimated_diameter_max_km"]) == (
+        0.0080270317, 0.0179489885)
+    assert prof["physical"]["estimated_diameter_km"] is None            # SBDB has none for this object
+    assert prof["sentry"]["assessment"]["estimated_diameter_km"] == 0.01
+    assert prof["encounter"]["relative_velocity_km_s"] == 4.5115736676
+    assert prof["sentry"]["assessment"]["v_infinity_km_s"] == pytest.approx(7.76209523793638)
+    assert (prof["physical"]["source"], prof["neows_physical"]["source"], prof["encounter"]["source"],
+            prof["sentry"]["source"]) == ("jpl_sbdb", "nasa_neows", "nasa_neows", "jpl_sentry")
+
+
+def test_neows_is_sentry_object_does_not_drive_sentry_linkage(mock_lakehouse: Path):
+    """Both disagreements are preserved: the NeoWs flag is reported, linkage alone decides sentry.status."""
+    enriched = {**_NEOWS_ENRICHED,
+                _TW54_NEOWS: {**_NEOWS_ENRICHED[_TW54_NEOWS], "is_sentry_object": False},
+                "2138971": {"is_sentry_object": True}}
+    _write_neows(mock_lakehouse, enriched)
+    client = _client_for(mock_lakehouse)
+
+    linked_but_flag_false = _profile(client, _TW54_NEOWS)
+    assert linked_but_flag_false["encounter"]["is_sentry_object"] is False
+    assert linked_but_flag_false["sentry"]["status"] == "available"
+    assert linked_but_flag_false["sentry"]["assessment"]["impact_probability"] == pytest.approx(6.594578e-05)
+
+    flag_true_but_unlinked = _profile(client, "2138971")
+    assert flag_true_but_unlinked["encounter"]["is_sentry_object"] is True
+    assert flag_true_but_unlinked["sentry"]["status"] == "not_resolved"
+    assert flag_true_but_unlinked["sentry"]["assessment"]["availability"]["status"] == "unavailable"
+
+    world = _by_id(_world(client))
+    assert world[_TW54_NEOWS]["sentry"]["status"] == "available"
+    assert world["2138971"]["sentry"]["status"] == "not_resolved"
+
+
+def test_profile_null_neows_fields_report_not_in_source(mock_lakehouse: Path):
+    _write_neows(mock_lakehouse, {_TW54_NEOWS: {"relative_velocity_km_s": 4.5, "is_sentry_object": None}})
+    prof = _profile(_client_for(mock_lakehouse), _TW54_NEOWS)
+    assert prof["encounter"]["relative_velocity_km_s"] == 4.5
+    assert prof["encounter"]["is_sentry_object"] is None
+    assert prof["encounter"]["availability"]["unavailable"] == {
+        "close_approach_datetime": "not_in_source", "close_approach_epoch_ms": "not_in_source",
+        "is_sentry_object": "not_in_source"}
+    assert prof["neows_physical"]["availability"]["status"] == "unavailable"
+    assert set(prof["neows_physical"]["availability"]["unavailable"].values()) == {"not_in_source"}
+
+
+def test_dataset_predating_normalization_reports_not_in_current_contract(mock_lakehouse: Path):
+    """A 5-column NeoWs Parquet (pre-Step 7) still serves; the new fields are null for a declared reason."""
+    legacy_schema = pa.schema([_NEOWS_SCHEMA.field(n) for n in
+                               ("id", "name", "closest_approach_date", "miss_distance_km", "hazardous")])
+    _write_table(mock_lakehouse, "asteroids.parquet", _FIXTURE_ASTEROIDS, legacy_schema)
+    client = _client_for(mock_lakehouse)
+
+    body = _world(client)
+    assert body["world"]["neows_fields_not_in_dataset"] == list(_NEOWS_NEW_FIELDS)
+    assert all(rec["encounter"][f] is None for rec in body["data"] for f in _WORLD_NEOWS_FIELDS)
+
+    prof = _profile(client, _TW54_NEOWS)
+    assert prof["encounter"]["availability"]["unavailable"] == {
+        f: "not_in_current_contract"
+        for f in ("close_approach_datetime", "close_approach_epoch_ms", "relative_velocity_km_s", "is_sentry_object")}
+    assert set(prof["neows_physical"]["availability"]["unavailable"].values()) == {"not_in_current_contract"}
+    assert prof["identity"]["match_state"] == "RESOLVED" and prof["sentry"]["status"] == "available"
+
+    executed, opened, served = _instrumented_world_call(mock_lakehouse)
+    assert (opened, len(executed), served) == (1, 1, 35)
+
+
+def test_world_still_one_connection_one_query_with_normalized_fields(mock_lakehouse: Path):
+    _write_neows(mock_lakehouse)
+    executed, opened, served = _instrumented_world_call(mock_lakehouse)
+    assert (opened, len(executed), served) == (1, 1, 35)
+
+
+@pytest.mark.skipif(
+    not (_REAL_LAKEHOUSE / "asteroids.parquet").exists(),
+    reason="Local Parquet lakehouse not present (gitignored; absent in CI).",
+)
+def test_real_lakehouse_serves_normalized_neows_fields():
+    """The real processed dataset (re-derived from asteroids_raw.json) serves every normalized field."""
+    import duckdb
+
+    ast_path = str(_REAL_LAKEHOUSE / "asteroids.parquet").replace("\\", "/")
+    con = duckdb.connect()
+    columns = [r[0] for r in con.execute(f"DESCRIBE SELECT * FROM '{ast_path}'").fetchall()]
+    if "relative_velocity_km_s" not in columns:
+        pytest.skip("Local asteroids.parquet predates Step 7; run: python nasa_asteroids.py --from-raw asteroids_raw.json")
+    cur = con.execute(f"SELECT * FROM '{ast_path}'")
+    names = [d[0] for d in cur.description]
+    stored = {row[0]: dict(zip(names, row)) for row in cur.fetchall()}
+
+    client = _client_for(_REAL_LAKEHOUSE)
+    body = _world(client)
+    assert body["world"]["neows_fields_not_in_dataset"] == []
+    for rec in body["data"]:
+        src = stored[rec["neows_id"]]
+        for field in _WORLD_NEOWS_FIELDS:
+            assert rec["encounter"][field] == src[field], (rec["neows_id"], field)
+            assert rec["encounter"][field] is not None
+    for neows_id in (_TW54_NEOWS, _ST_NEOWS, "2138971"):
+        prof = _profile(client, neows_id)
+        assert prof["encounter"]["is_sentry_object"] is stored[neows_id]["is_sentry_object"]
+        assert prof["encounter"]["close_approach_epoch_ms"] == stored[neows_id]["close_approach_epoch_ms"]
+        assert prof["neows_physical"]["absolute_magnitude_h"] == stored[neows_id]["absolute_magnitude_h"]
+        assert prof["neows_physical"]["availability"]["status"] == "available"
+
+
+def test_serving_optional_neows_columns_match_ingestion_schema():
+    """dashboard_data.NEOWS_OPTIONAL_COLUMNS must mirror the optional fields of nasa_asteroids.ASTEROID_SCHEMA."""
+    from dashboard_data import NEOWS_OPTIONAL_COLUMNS
+
+    arrow_to_sql = {pa.string(): "VARCHAR", pa.int64(): "BIGINT", pa.float64(): "DOUBLE", pa.bool_(): "BOOLEAN"}
+    legacy = ("id", "name", "closest_approach_date", "miss_distance_km", "hazardous")
+    ingestion = {f.name: arrow_to_sql[f.type] for f in _NEOWS_SCHEMA if f.name not in legacy}
+    assert NEOWS_OPTIONAL_COLUMNS == ingestion

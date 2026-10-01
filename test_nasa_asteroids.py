@@ -1651,3 +1651,221 @@ def test_neows_summary_write_failure_halts_pipeline(tmp_path, monkeypatch, caplo
         # Must log ERROR, not WARNING
         assert any("Failed to write NeoWs authoritative summary" in record.message and record.levelname == "ERROR"
                    for record in caplog.records)
+
+
+# ---------------------------------------------------------------------------
+# Phase 1 Step 7 — optional NeoWs fields: extraction, nulls, storage, offline reprocess
+# ---------------------------------------------------------------------------
+_REAL_RAW = os.path.join(REPO_DIR, "asteroids_raw.json")
+_OPTIONAL_FIELDS = (
+    "close_approach_datetime", "close_approach_epoch_ms", "relative_velocity_km_s", "absolute_magnitude_h",
+    "estimated_diameter_min_km", "estimated_diameter_max_km", "is_sentry_object",
+)
+
+
+def _neows_object(**overrides):
+    """A NeoWs feed object shaped like asteroids_raw.json (values from the real 2001 CB21 record)."""
+    obj = {
+        "id": "2138971",
+        "name": "138971 (2001 CB21)",
+        "absolute_magnitude_h": 18.54,
+        "estimated_diameter": {"kilometers": {"estimated_diameter_min": 0.5206609142,
+                                               "estimated_diameter_max": 1.1642331974}},
+        "is_potentially_hazardous_asteroid": True,
+        "is_sentry_object": False,
+        "close_approach_data": [{
+            "close_approach_date": "2026-09-29",
+            "close_approach_date_full": "2026-Sep-29 07:18",
+            "epoch_date_close_approach": 1790666280000,
+            "relative_velocity": {"kilometers_per_second": "10.2283269894"},
+            "miss_distance": {"kilometers": "8096701.943856126"},
+            "orbiting_body": "Earth",
+        }],
+    }
+    for key, value in overrides.items():
+        if key.startswith("approach__"):
+            field = key.split("__", 1)[1]
+            if value is _ABSENT:
+                obj["close_approach_data"][0].pop(field, None)
+            else:
+                obj["close_approach_data"][0][field] = value
+        elif value is _ABSENT:
+            obj.pop(key, None)
+        else:
+            obj[key] = value
+    return obj
+
+
+_ABSENT = object()
+
+
+def _extract_one(obj):
+    records, skipped, received = nasa_asteroids.extract_asteroids({"near_earth_objects": {"2026-09-29": [obj]}})
+    assert (skipped, received) == (0, 1), "optional-field problems must never reject the record"
+    return records[0]
+
+
+def test_extract_optional_neows_fields_from_source_paths():
+    rec = _extract_one(_neows_object())
+    assert rec["close_approach_datetime"] == "2026-09-29T07:18"
+    assert rec["close_approach_epoch_ms"] == 1790666280000
+    assert rec["relative_velocity_km_s"] == 10.2283269894
+    assert rec["absolute_magnitude_h"] == 18.54
+    assert rec["estimated_diameter_min_km"] == 0.5206609142
+    assert rec["estimated_diameter_max_km"] == 1.1642331974
+    assert rec["is_sentry_object"] is False
+    # Existing fields unchanged.
+    assert (rec["id"], rec["closest_approach_date"], rec["miss_distance_km"], rec["hazardous"]) == (
+        "2138971", "2026-09-29", 8096701.943856126, True)
+
+
+def test_extract_is_sentry_object_true_preserved():
+    assert _extract_one(_neows_object(is_sentry_object=True))["is_sentry_object"] is True
+
+
+@pytest.mark.parametrize("overrides,nulled", [
+    ({"approach__relative_velocity": _ABSENT}, ["relative_velocity_km_s"]),
+    ({"approach__relative_velocity": {"kilometers_per_second": "fast"}}, ["relative_velocity_km_s"]),
+    ({"approach__relative_velocity": {"kilometers_per_second": "-3.0"}}, ["relative_velocity_km_s"]),
+    ({"approach__relative_velocity": {"kilometers_per_second": "nan"}}, ["relative_velocity_km_s"]),
+    ({"estimated_diameter": _ABSENT}, ["estimated_diameter_min_km", "estimated_diameter_max_km"]),
+    ({"estimated_diameter": {"kilometers": {"estimated_diameter_max": 1.1642331974}}}, ["estimated_diameter_min_km"]),
+    ({"estimated_diameter": {"kilometers": {"estimated_diameter_min": -0.1, "estimated_diameter_max": 1.1642331974}}},
+     ["estimated_diameter_min_km"]),
+    ({"estimated_diameter": {"kilometers": {"estimated_diameter_min": 2.0, "estimated_diameter_max": 1.0}}},
+     ["estimated_diameter_min_km", "estimated_diameter_max_km"]),
+    ({"absolute_magnitude_h": _ABSENT}, ["absolute_magnitude_h"]),
+    ({"absolute_magnitude_h": True}, ["absolute_magnitude_h"]),
+    ({"approach__close_approach_date_full": _ABSENT}, ["close_approach_datetime"]),
+    ({"approach__close_approach_date_full": "2026-09-29 07:18"}, ["close_approach_datetime"]),
+    ({"approach__close_approach_date_full": "2026-Foo-29 07:18"}, ["close_approach_datetime"]),
+    ({"approach__epoch_date_close_approach": _ABSENT}, ["close_approach_epoch_ms"]),
+    ({"approach__epoch_date_close_approach": "1790666280000"}, ["close_approach_epoch_ms"]),
+    ({"is_sentry_object": _ABSENT}, ["is_sentry_object"]),
+    ({"is_sentry_object": None}, ["is_sentry_object"]),
+    ({"is_sentry_object": "false"}, ["is_sentry_object"]),
+], ids=[
+    "velocity_missing", "velocity_malformed", "velocity_negative", "velocity_nan",
+    "diameter_missing", "diameter_min_missing", "diameter_negative", "diameter_inverted",
+    "h_missing", "h_boolean", "timestamp_missing", "timestamp_numeric_month", "timestamp_bad_month",
+    "epoch_missing", "epoch_string", "sentry_flag_missing", "sentry_flag_null", "sentry_flag_string",
+])
+def test_extract_missing_or_invalid_optional_fields_become_null(overrides, nulled):
+    """Absent/invalid optional values are null (never 0/False/defaults) and only the affected fields change."""
+    rec = _extract_one(_neows_object(**overrides))
+    baseline = _extract_one(_neows_object())
+    for field in _OPTIONAL_FIELDS:
+        if field in nulled:
+            assert rec[field] is None, field
+        else:
+            assert rec[field] == baseline[field], field
+
+
+def test_close_approach_datetime_is_minute_precision_without_offset():
+    """NeoWs gives no zone; no offset or seconds are invented, and the date part matches the date field."""
+    rec = _extract_one(_neows_object(approach__close_approach_date_full="2026-Dec-01 23:05"))
+    assert rec["close_approach_datetime"] == "2026-12-01T23:05"
+    assert not rec["close_approach_datetime"].endswith("Z") and "+" not in rec["close_approach_datetime"]
+
+
+def test_optional_fields_survive_parquet_with_nulls(tmp_path):
+    recs = [_extract_one(_neows_object()), _extract_one(_neows_object(
+        id="3000001", is_sentry_object=_ABSENT, absolute_magnitude_h=_ABSENT, approach__relative_velocity=_ABSENT))]
+    out = tmp_path / "asteroids.parquet"
+    nasa_asteroids.save_to_parquet(recs, filename=str(out))
+    table = pq.read_table(out)
+    assert table.column("is_sentry_object").to_pylist() == [False, None]
+    assert table.column("absolute_magnitude_h").to_pylist() == [18.54, None]
+    assert table.column("relative_velocity_km_s").to_pylist() == [10.2283269894, None]
+    assert table.column("close_approach_epoch_ms").to_pylist() == [1790666280000, 1790666280000]
+
+
+def test_csv_keeps_legacy_five_column_shape(tmp_path):
+    """The optional fields live in Parquet only; the CSV (an Athena table) keeps its exact header."""
+    out = tmp_path / "asteroids.csv"
+    nasa_asteroids.save_to_csv([_extract_one(_neows_object())], filename=str(out))
+    header = out.read_text(encoding="utf-8").splitlines()[0]
+    assert header == "id,name,closest_approach_date,miss_distance_km,hazardous"
+
+
+def test_reprocess_raw_snapshot_offline_and_raw_untouched(tmp_path, monkeypatch):
+    """Offline re-derivation: no sockets, raw bytes unchanged, lineage recorded, no invented run_id."""
+    import hashlib
+    import socket
+
+    raw = tmp_path / "asteroids_raw.json"
+    raw.write_text(json.dumps({"element_count": 2, "near_earth_objects": {"2026-09-29": [
+        _neows_object(), _neows_object(id="3000001", is_sentry_object=True)]}}), encoding="utf-8")
+    raw_bytes = raw.read_bytes()
+
+    def no_network(*_args, **_kwargs):
+        raise AssertionError("reprocess_raw_snapshot attempted network access")
+
+    monkeypatch.setattr(socket.socket, "connect", no_network)
+    monkeypatch.setattr(socket, "create_connection", no_network)
+    with patch("nasa_asteroids.fetch_data", side_effect=no_network), \
+         patch("nasa_asteroids.upload_raw_to_s3", side_effect=no_network), \
+         patch("nasa_asteroids.upload_processed_to_s3", side_effect=no_network), \
+         patch("nasa_asteroids.load_data", side_effect=no_network):
+        out = tmp_path / "asteroids.parquet"
+        assert nasa_asteroids.reprocess_raw_snapshot(str(raw), str(out)) == 0
+
+    assert raw.read_bytes() == raw_bytes
+    table = pq.read_table(out)
+    assert table.num_rows == 2
+    assert table.column("is_sentry_object").to_pylist() == [False, True]
+    meta = table.schema.metadata
+    assert meta[b"source_raw_sha256"].decode() == hashlib.sha256(raw_bytes).hexdigest()
+    assert meta[b"source_raw_file"] == b"asteroids_raw.json"
+    assert b"run_id" not in meta
+
+
+def test_reprocess_raw_snapshot_gate_failure_writes_nothing(tmp_path):
+    raw = tmp_path / "asteroids_raw.json"
+    raw.write_text(json.dumps({"near_earth_objects": {"2026-09-29": [
+        _neows_object(is_potentially_hazardous_asteroid="yes")]}}), encoding="utf-8")
+    out = tmp_path / "asteroids.parquet"
+    assert nasa_asteroids.reprocess_raw_snapshot(str(raw), str(out)) == 1
+    assert not out.exists()
+    assert nasa_asteroids.reprocess_raw_snapshot(str(tmp_path / "missing.json"), str(out)) == 1
+
+
+def test_cli_from_raw_runs_without_api_key(tmp_path):
+    raw = tmp_path / "asteroids_raw.json"
+    raw.write_text(json.dumps({"near_earth_objects": {"2026-09-29": [_neows_object()]}}), encoding="utf-8")
+    env = {k: v for k, v in os.environ.items() if k != "NASA_API_KEY"}
+    env["PYTHONPATH"] = REPO_DIR
+    result = subprocess.run(
+        [sys.executable, os.path.join(REPO_DIR, "nasa_asteroids.py"), "--from-raw", str(raw)],
+        cwd=str(tmp_path), env=env, capture_output=True, text=True,
+    )
+    assert result.returncode == 0, result.stderr
+    assert pq.read_table(tmp_path / "asteroids.parquet").num_rows == 1
+
+
+@pytest.mark.skipif(not os.path.exists(_REAL_RAW), reason="Local raw NeoWs snapshot not present (gitignored).")
+def test_real_raw_snapshot_normalizes_every_record_from_source_paths():
+    """Against the real snapshot: every record's normalized fields equal its raw JSON values, read-only."""
+    import hashlib
+
+    with open(_REAL_RAW, "rb") as file:
+        raw_bytes = file.read()
+    data = json.loads(raw_bytes)
+    records, skipped, received = nasa_asteroids.extract_asteroids(data)
+    assert (len(records), skipped, received) == (35, 0, 35)
+    by_id = {r["id"]: r for r in records}
+    for obj in (o for objs in data["near_earth_objects"].values() for o in objs):
+        rec, approach = by_id[obj["id"]], obj["close_approach_data"][0]
+        km = obj["estimated_diameter"]["kilometers"]
+        assert rec["relative_velocity_km_s"] == float(approach["relative_velocity"]["kilometers_per_second"])
+        assert (rec["estimated_diameter_min_km"], rec["estimated_diameter_max_km"]) == (
+            km["estimated_diameter_min"], km["estimated_diameter_max"])
+        assert rec["absolute_magnitude_h"] == obj["absolute_magnitude_h"]
+        assert rec["is_sentry_object"] is obj["is_sentry_object"]
+        assert rec["close_approach_epoch_ms"] == approach["epoch_date_close_approach"]
+        assert rec["close_approach_datetime"][:10] == approach["close_approach_date"]
+        # NeoWs's own epoch equals the published calendar time read as UTC.
+        as_utc = datetime.datetime.fromisoformat(rec["close_approach_datetime"]).replace(tzinfo=datetime.timezone.utc)
+        assert int(as_utc.timestamp() * 1000) == rec["close_approach_epoch_ms"]
+    with open(_REAL_RAW, "rb") as file:
+        assert hashlib.sha256(file.read()).digest() == hashlib.sha256(raw_bytes).digest()

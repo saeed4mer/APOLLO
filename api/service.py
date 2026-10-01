@@ -11,7 +11,7 @@ import hashlib
 import logging
 import math
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterable
 
 import duckdb
 from fastapi import Request
@@ -43,6 +43,7 @@ from api.schemas import (
     NeowsProvenance,
     ProfileEncounter,
     ProfileIdentity,
+    ProfileNeowsPhysical,
     ProfileOrbit,
     ProfilePhysical,
     ProfileProvenance,
@@ -674,6 +675,10 @@ def _world_record(row: dict[str, Any], latest_catalog_key: str | None) -> WorldA
             closest_approach_date=row["closest_approach_date"],
             miss_distance_km=row["miss_distance_km"],
             is_potentially_hazardous=_nullable_bool(row["hazardous"]),
+            close_approach_datetime=row["close_approach_datetime"],
+            relative_velocity_km_s=row["relative_velocity_km_s"],
+            estimated_diameter_min_km=row["estimated_diameter_min_km"],
+            estimated_diameter_max_km=row["estimated_diameter_max_km"],
         ),
         resolution=WorldResolution(
             match_state=row["match_state"],
@@ -704,6 +709,7 @@ def get_world(provider: DashboardDataProvider) -> WorldResponse:
         object_count=len(records),
         neows_run_id=snapshot["neows_run_id"],
         sentry_latest_catalog_snapshot_key=latest_catalog_key,
+        neows_fields_not_in_dataset=snapshot["neows_missing_columns"],
         spatial_model=WorldSpatialModel(
             direction_algorithm=ILLUSTRATIVE_DIRECTION_ALGORITHM,
             note=(
@@ -725,10 +731,19 @@ _PROFILE_ORBIT_FIELDS = (
 _PROFILE_PHYSICAL_FIELDS = ("absolute_magnitude", "estimated_diameter_km", "albedo", "rotational_period_hr")
 
 
-def _section_availability(values: dict[str, Any], missing_reason: str | None) -> SectionAvailability:
-    """Report null fields and why: `missing_reason` if the whole source is unlinked, else not_in_source."""
+def _section_availability(
+    values: dict[str, Any],
+    missing_reason: str | None,
+    not_in_contract: Iterable[str] = (),
+) -> SectionAvailability:
+    """Report null fields and why: `missing_reason` if the whole source is unlinked, else not_in_source.
+
+    Fields in `not_in_contract` are null because the stored dataset predates them.
+    """
+    not_in_contract = set(not_in_contract)
     unavailable = {
-        field: (missing_reason or "not_in_source") for field, value in values.items() if value is None
+        field: ("not_in_current_contract" if field in not_in_contract else (missing_reason or "not_in_source"))
+        for field, value in values.items() if value is None
     }
     if not unavailable:
         status = "available"
@@ -822,7 +837,18 @@ def get_asteroid_profile(
 
     orbit_values = {field: sbdb.get(field) for field in _PROFILE_ORBIT_FIELDS}
     physical_values = {field: sbdb.get(field) for field in _PROFILE_PHYSICAL_FIELDS}
-    encounter_values = {"is_potentially_hazardous": world.encounter.is_potentially_hazardous}
+    row = rows[0]
+    neows_missing = snapshot["neows_missing_columns"]
+    encounter_values = {
+        "is_potentially_hazardous": world.encounter.is_potentially_hazardous,
+        "close_approach_datetime": row["close_approach_datetime"],
+        "close_approach_epoch_ms": None if row["close_approach_epoch_ms"] is None else int(row["close_approach_epoch_ms"]),
+        "relative_velocity_km_s": row["relative_velocity_km_s"],
+        "is_sentry_object": _nullable_bool(row["is_sentry_object"]),
+    }
+    neows_physical_values = {
+        field: row[field] for field in ("absolute_magnitude_h", "estimated_diameter_min_km", "estimated_diameter_max_km")
+    }
 
     linked = world.sentry.status in ("available", "linked_no_record")
     profile = AsteroidProfile(
@@ -837,10 +863,14 @@ def get_asteroid_profile(
         ),
         orbit=ProfileOrbit(**orbit_values, availability=_section_availability(orbit_values, sbdb_reason)),
         physical=ProfilePhysical(**physical_values, availability=_section_availability(physical_values, sbdb_reason)),
+        neows_physical=ProfileNeowsPhysical(
+            **neows_physical_values,
+            availability=_section_availability(neows_physical_values, None, neows_missing),
+        ),
         encounter=ProfileEncounter(
             closest_approach_date=world.encounter.closest_approach_date,
             miss_distance_km=world.encounter.miss_distance_km,
-            availability=_section_availability(encounter_values, None),
+            availability=_section_availability(encounter_values, None, neows_missing),
             **encounter_values,
         ),
         sentry=ProfileSentryLinkage(

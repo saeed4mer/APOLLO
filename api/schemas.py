@@ -432,6 +432,18 @@ class WorldEncounter(BaseModel):
     is_potentially_hazardous: bool | None = Field(
         ..., description="NeoWs potentially-hazardous flag; null if not reported. Independent of Sentry availability."
     )
+    close_approach_datetime: str | None = Field(
+        default=None,
+        description=(
+            "NeoWs 'close_approach_date_full' normalized to ISO 8601 (YYYY-MM-DDTHH:MM), minute precision. "
+            "NeoWs states no time zone or time scale, so no offset is attached; see close_approach_epoch_ms"
+        ),
+    )
+    relative_velocity_km_s: float | None = Field(
+        default=None, description="NeoWs relative velocity at close approach, km/s (not Sentry v_inf)"
+    )
+    estimated_diameter_min_km: float | None = Field(default=None, description="NeoWs estimated diameter, lower bound, km")
+    estimated_diameter_max_km: float | None = Field(default=None, description="NeoWs estimated diameter, upper bound, km")
 
 
 class WorldResolution(BaseModel):
@@ -542,6 +554,10 @@ class WorldSnapshotInfo(BaseModel):
     sentry_latest_catalog_snapshot_key: str | None = Field(
         default=None, description="Latest stored Sentry catalog snapshot key; null if no Sentry data is stored"
     )
+    neows_fields_not_in_dataset: list[str] = Field(
+        default_factory=list,
+        description="Optional NeoWs fields the stored dataset predates; they are null for every record for that reason",
+    )
     spatial_model: WorldSpatialModel
 
 
@@ -647,6 +663,20 @@ class ProfilePhysical(BaseModel):
     availability: SectionAvailability
 
 
+class ProfileNeowsPhysical(BaseModel):
+    """Physical estimates published by NeoWs. Distinct from `physical` (JPL SBDB) and from Sentry's values."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    source: Literal["nasa_neows"] = "nasa_neows"
+    absolute_magnitude_h: float | None = Field(default=None, description="NeoWs 'absolute_magnitude_h'")
+    estimated_diameter_min_km: float | None = Field(
+        default=None, description="NeoWs estimated diameter lower bound, km. NeoWs publishes a range, not one value"
+    )
+    estimated_diameter_max_km: float | None = Field(default=None, description="NeoWs estimated diameter upper bound, km")
+    availability: SectionAvailability
+
+
 class ProfileEncounter(BaseModel):
     """Close-approach facts for the selected encounter. Source: NASA NeoWs only."""
 
@@ -658,6 +688,30 @@ class ProfileEncounter(BaseModel):
     miss_distance_km: float = Field(..., description="Miss distance, km (source value)")
     is_potentially_hazardous: bool | None = Field(
         default=None, description="NeoWs PHA flag; null when not reported. Independent of Sentry linkage"
+    )
+    close_approach_datetime: str | None = Field(
+        default=None,
+        description=(
+            "NeoWs 'close_approach_date_full' normalized to ISO 8601 (YYYY-MM-DDTHH:MM), minute precision. "
+            "NeoWs states no time zone or time scale, so no offset is attached; see close_approach_epoch_ms"
+        ),
+    )
+    close_approach_epoch_ms: int | None = Field(
+        default=None,
+        description=(
+            "NeoWs 'epoch_date_close_approach' as published: milliseconds since the Unix epoch. "
+            "NeoWs derives it by reading close_approach_datetime as UTC"
+        ),
+    )
+    relative_velocity_km_s: float | None = Field(
+        default=None, description="NeoWs relative velocity at close approach, km/s. Not Sentry's v_infinity_km_s"
+    )
+    is_sentry_object: bool | None = Field(
+        default=None,
+        description=(
+            "NeoWs 'is_sentry_object' as published. Informational only: Sentry linkage and the published "
+            "assessment come from the crosswalk (see sentry.status), and the two may disagree"
+        ),
     )
     availability: SectionAvailability
 
@@ -778,6 +832,7 @@ class AsteroidProfile(BaseModel):
     identity: ProfileIdentity
     orbit: ProfileOrbit
     physical: ProfilePhysical
+    neows_physical: ProfileNeowsPhysical
     encounter: ProfileEncounter
     sentry: ProfileSentryLinkage
     provenance: ProfileProvenance
