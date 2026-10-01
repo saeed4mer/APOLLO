@@ -50,6 +50,7 @@ from api.schemas import (
     ResolutionProvenance,
     SbdbProvenance,
     SectionAvailability,
+    SentryAssessment,
     SentryProvenance,
     IllustrativeDirection,
     WorldAsteroid,
@@ -61,7 +62,7 @@ from api.schemas import (
     WorldSnapshotInfo,
     WorldSpatialModel,
 )
-from dashboard_data import DashboardDataProvider, _nullable_bool
+from dashboard_data import _SENTRY_ASSESSMENT_COLUMNS, DashboardDataProvider, _nullable_bool
 
 logger = logging.getLogger(__name__)
 
@@ -738,6 +739,36 @@ def _section_availability(values: dict[str, Any], missing_reason: str | None) ->
     return SectionAvailability(status=status, unavailable=unavailable)
 
 
+# Single definition lives with the query that selects them (dashboard_data._SENTRY_ASSESSMENT_COLUMNS).
+_SENTRY_ASSESSMENT_FIELDS = tuple(_SENTRY_ASSESSMENT_COLUMNS)
+_SENTRY_INT_FIELDS = tuple(col for col, sql_type in _SENTRY_ASSESSMENT_COLUMNS.items() if sql_type == "BIGINT")
+# Why the assessment is empty, by linkage status. Membership comes only from the crosswalk.
+_SENTRY_UNAVAILABLE_REASON = {
+    "not_resolved": "not_resolved",
+    "not_present": "not_in_source",
+    "ambiguous": "ambiguous_linkage",
+    "linked_no_record": "not_in_source",
+}
+
+
+def _sentry_assessment(row: dict[str, Any], status: str) -> SentryAssessment:
+    """Published Mode S values from the single latest record already selected by the world query.
+
+    Values are copied, never computed. Ingestion stores a missing 'range' as "", served here as null.
+    """
+    values: dict[str, Any] = dict.fromkeys(_SENTRY_ASSESSMENT_FIELDS)
+    if status == "available":
+        for field in _SENTRY_ASSESSMENT_FIELDS:
+            value = row[f"sentry_{field}"]
+            if value == "":
+                value = None
+            if value is not None and field in _SENTRY_INT_FIELDS:
+                value = int(value)
+            values[field] = value
+    availability = _section_availability(values, _SENTRY_UNAVAILABLE_REASON.get(status))
+    return SentryAssessment(**values, availability=availability)
+
+
 def get_asteroid_profile(
     provider: DashboardDataProvider,
     neows_id: str,
@@ -747,6 +778,8 @@ def get_asteroid_profile(
     Reuses, rather than re-implements: the world query (filtered to this ID) for
     identity, encounter, canonical resolution and SBDB/Sentry availability; the
     Step 3 coherent-snapshot SBDB profile for orbit + physical; and the crosswalk.
+    The Sentry assessment is the Mode S record that same query selected, so its
+    values and provenance come from one row with no extra retrieval.
     At most three provider retrievals, regardless of how many sources are linked.
     Returns None if neows_id is absent from NeoWs (404).
     """
@@ -784,6 +817,8 @@ def get_asteroid_profile(
     if world.sbdb.spkid is not None and not sbdb:
         for field in ("sbdb_designation", "sbdb_fullname"):
             identity_availability.unavailable[field] = "not_in_source"
+    if world.sentry.status == "ambiguous":
+        identity_availability.unavailable["sentry_id"] = "ambiguous_linkage"
 
     orbit_values = {field: sbdb.get(field) for field in _PROFILE_ORBIT_FIELDS}
     physical_values = {field: sbdb.get(field) for field in _PROFILE_PHYSICAL_FIELDS}
@@ -812,6 +847,7 @@ def get_asteroid_profile(
             status=world.sentry.status,
             sentry_id=world.sentry.sentry_id,
             in_latest_catalog=world.sentry.in_latest_catalog,
+            assessment=_sentry_assessment(rows[0], world.sentry.status),
             assessment_endpoint=f"/asteroids/{world.neows_id}/sentry" if linked else None,
         ),
         provenance=ProfileProvenance(
@@ -830,6 +866,8 @@ def get_asteroid_profile(
                 sentry_id=world.sentry.sentry_id,
                 latest_snapshot_key=world.sentry.latest_snapshot_key,
                 run_id=world.sentry.run_id,
+                snapshot_time=rows[0]["sentry_snapshot_time"] if world.sentry.status == "available" else None,
+                latest_catalog_snapshot_key=latest_catalog_key,
             ),
         ),
     )

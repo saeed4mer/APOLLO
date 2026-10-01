@@ -41,6 +41,18 @@ def _parquet_relation(path: Path, columns: dict[str, str]) -> str:
 
 
 _SNAPSHOT_COLUMNS = {"spkid": "VARCHAR", "snapshot_key": "VARCHAR", "snapshot_time": "VARCHAR", "run_id": "VARCHAR"}
+# Mode S summary fields persisted by nasa_sentry.SENTRY_RISK_SNAPSHOT_SCHEMA.
+_SENTRY_ASSESSMENT_COLUMNS = {
+    "designation": "VARCHAR", "fullname": "VARCHAR", "absolute_magnitude": "DOUBLE",
+    "estimated_diameter_km": "DOUBLE", "impact_probability": "DOUBLE", "potential_impacts_count": "BIGINT",
+    "palermo_scale_cum": "DOUBLE", "palermo_scale_max": "DOUBLE", "torino_scale_max": "BIGINT",
+    "v_infinity_km_s": "DOUBLE", "impact_year_range": "VARCHAR", "last_obs_date": "VARCHAR",
+    "last_obs_jd": "DOUBLE",
+}
+_SENTRY_COLUMNS = {
+    "sentry_id": "VARCHAR", "snapshot_key": "VARCHAR", "snapshot_time": "VARCHAR", "run_id": "VARCHAR",
+    **_SENTRY_ASSESSMENT_COLUMNS,
+}
 _BRIDGE_COLUMNS = {
     "asteroid_key": "VARCHAR", "source_system": "VARCHAR", "identifier_name": "VARCHAR",
     "identifier_value": "VARCHAR", "is_primary_pivot": "BOOLEAN",
@@ -372,9 +384,7 @@ class LocalDuckDBDataProvider:
 
         ast = _parquet_relation(self._asteroids_file, {})
         bridge = _parquet_relation(self._bridge_file, _BRIDGE_COLUMNS)
-        sentry = _parquet_relation(self._sentry_risk_file, {
-            "sentry_id": "VARCHAR", "snapshot_key": "VARCHAR", "snapshot_time": "VARCHAR", "run_id": "VARCHAR",
-        })
+        sentry = _parquet_relation(self._sentry_risk_file, _SENTRY_COLUMNS)
 
         query = f"""
         WITH neows AS (
@@ -417,8 +427,10 @@ class LocalDuckDBDataProvider:
             GROUP BY asteroid_key
         ),
         sentry_latest AS (
+            -- One whole Mode S row per sentry_id: assessment values and their
+            -- snapshot/run provenance always come from the same record.
             SELECT
-                sentry_id, snapshot_key, run_id,
+                {", ".join(_SENTRY_COLUMNS)},
                 ROW_NUMBER() OVER (
                     PARTITION BY sentry_id ORDER BY snapshot_key DESC, snapshot_time DESC, run_id DESC
                 ) AS rn
@@ -437,6 +449,8 @@ class LocalDuckDBDataProvider:
             CASE WHEN sl.sentry_link_count = 1 THEN sl.sentry_id END AS sentry_id,
             sx.snapshot_key AS sentry_snapshot_key,
             sx.run_id AS sentry_run_id,
+            sx.snapshot_time AS sentry_snapshot_time,
+            {", ".join(f"sx.{col} AS sentry_{col}" for col in _SENTRY_ASSESSMENT_COLUMNS)},
             sc.latest_catalog_snapshot_key AS sentry_latest_catalog_snapshot_key
         FROM resolved r
         LEFT JOIN sbdb_spkid sp

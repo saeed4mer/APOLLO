@@ -559,7 +559,7 @@ class WorldResponse(BaseModel):
 # ASTEROID PROFILE CONTRACT — GET /asteroids/{neows_id}/profile
 # ============================================================================
 
-UnavailableReason = Literal["not_resolved", "not_in_source", "not_in_current_contract"]
+UnavailableReason = Literal["not_resolved", "not_in_source", "not_in_current_contract", "ambiguous_linkage"]
 
 
 class SectionAvailability(BaseModel):
@@ -574,7 +574,8 @@ class SectionAvailability(BaseModel):
         default_factory=dict,
         description=(
             "Null fields and why: not_resolved (identity not established, so the source cannot be linked), "
-            "not_in_source (linked source has no value), not_in_current_contract (not ingested by the current pipeline)"
+            "not_in_source (linked source has no value), not_in_current_contract (not ingested by the current pipeline), "
+            "ambiguous_linkage (several source records are linked, so none is attributed)"
         ),
     )
 
@@ -661,18 +662,62 @@ class ProfileEncounter(BaseModel):
     availability: SectionAvailability
 
 
+class SentryAssessment(BaseModel):
+    """Values JPL Sentry published for this object, from ONE Mode S summary record (see provenance.sentry).
+
+    Mode S is the per-object catalog summary. It carries no individual impact solutions,
+    impact dates or impact energies (those are Mode O, which is not ingested). Nothing here is
+    computed by this platform: there is no derived risk or danger score.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    designation: str | None = Field(default=None, description="Designation as published by Sentry ('des')")
+    fullname: str | None = Field(default=None, description="Full name as published by Sentry ('fullname')")
+    impact_probability: float | None = Field(
+        default=None, description="Cumulative impact probability over all listed potential impacts ('ip')"
+    )
+    potential_impacts_count: int | None = Field(default=None, description="Number of potential impacts listed ('n_imp')")
+    impact_year_range: str | None = Field(default=None, description="Year range of the listed potential impacts ('range')")
+    palermo_scale_cum: float | None = Field(default=None, description="Cumulative Palermo Technical Scale ('ps_cum')")
+    palermo_scale_max: float | None = Field(default=None, description="Maximum Palermo Technical Scale ('ps_max')")
+    torino_scale_max: int | None = Field(default=None, description="Maximum Torino Scale ('ts_max')")
+    v_infinity_km_s: float | None = Field(default=None, description="Velocity relative to Earth at infinity, km/s ('v_inf')")
+    absolute_magnitude: float | None = Field(
+        default=None, description="H used by Sentry ('h'); Sentry's value, distinct from physical.absolute_magnitude (SBDB)"
+    )
+    estimated_diameter_km: float | None = Field(
+        default=None, description="Diameter estimate used by Sentry, km ('diameter'); not an SBDB measurement"
+    )
+    last_obs_date: str | None = Field(default=None, description="Date of the last observation used ('last_obs')")
+    last_obs_jd: float | None = Field(default=None, description="Julian Date of the last observation used ('last_obs_jd')")
+    availability: SectionAvailability
+
+
 class ProfileSentryLinkage(BaseModel):
-    """Sentry linkage via the crosswalk only. The published assessment lives at assessment_endpoint."""
+    """Sentry linkage via the crosswalk, plus the published Mode S assessment when exactly one record is linked."""
 
     model_config = ConfigDict(extra="forbid")
 
     source: Literal["jpl_sentry"] = "jpl_sentry"
+    source_contract: Literal["sentry_mode_s_summary"] = Field(
+        default="sentry_mode_s_summary", description="Sentry API mode ingested: per-object summary only (no Mode O detail)"
+    )
     status: Literal["available", "not_resolved", "not_present", "ambiguous", "linked_no_record"] = Field(
         ..., description="Same statuses as the world snapshot's sentry block"
     )
     sentry_id: str | None = Field(default=None, description="Sentry object ID when exactly one is linked")
-    in_latest_catalog: bool | None = Field(default=None, description="Latest record is in the latest stored catalog; null when no record")
-    assessment_endpoint: str | None = Field(default=None, description="Route serving the published Sentry assessment, when linked")
+    in_latest_catalog: bool | None = Field(
+        default=None,
+        description=(
+            "True if the assessment's record is in the latest stored Sentry catalog snapshot. False means the "
+            "object is absent from that catalog and the assessment is its last stored record. Null when no record"
+        ),
+    )
+    assessment: SentryAssessment
+    assessment_endpoint: str | None = Field(
+        default=None, description="Route serving the legacy Sentry profile (incl. all-time aggregates), when linked"
+    )
 
 
 class NeowsProvenance(BaseModel):
@@ -705,8 +750,12 @@ class SentryProvenance(BaseModel):
 
     source: Literal["jpl_sentry"] = "jpl_sentry"
     sentry_id: str | None = Field(default=None, description="Linked Sentry object ID")
-    latest_snapshot_key: str | None = Field(default=None, description="Snapshot key of the latest stored Sentry record")
+    latest_snapshot_key: str | None = Field(default=None, description="Snapshot key of the record the assessment came from")
     run_id: str | None = Field(default=None, description="Ingestion run of that record")
+    snapshot_time: str | None = Field(default=None, description="UTC timestamp of that record's snapshot run")
+    latest_catalog_snapshot_key: str | None = Field(
+        default=None, description="Latest stored Sentry catalog snapshot key overall; null if no Sentry data is stored"
+    )
 
 
 class ProfileProvenance(BaseModel):

@@ -3495,8 +3495,6 @@ _PROFILE_ORBIT_FIELDS = (
     "n_obs_used", "condition_code", "rms", "earth_moid_au", "jupiter_moid_au", "t_jup",
 )
 _PROFILE_PHYSICAL_FIELDS = ("absolute_magnitude", "estimated_diameter_km", "albedo", "rotational_period_hr")
-_SENTRY_RISK_KEYS = {"impact_probability", "palermo_scale_max", "palermo_scale_cum", "torino_scale_max",
-                     "potential_impacts_count", "danger", "risk", "score"}
 
 
 def _profile(client: TestClient, neows_id: str) -> dict:
@@ -3565,7 +3563,9 @@ def test_profile_resolved_identity_and_provenance(mock_client: TestClient):
     assert prov["sbdb"] == {"source": "jpl_sbdb", "spkid": "50548689", "snapshot_key": "2026-09-26",
                             "run_id": "26b0c1ef0bba", "snapshot_time": "2026-09-26T20:27:39.451638+00:00"}
     assert prov["sentry"] == {"source": "jpl_sentry", "sentry_id": "bK10T54W",
-                              "latest_snapshot_key": "2026-09-26", "run_id": "7d446dc65b5a"}
+                              "latest_snapshot_key": "2026-09-26", "run_id": "7d446dc65b5a",
+                              "snapshot_time": "2026-09-26T20:15:16.035354+00:00",
+                              "latest_catalog_snapshot_key": "2026-09-26"}
 
 
 def test_profile_sections_declare_their_source(mock_client: TestClient):
@@ -3676,8 +3676,9 @@ def test_profile_unresolved_object_is_served_with_reasons(mock_client: TestClien
         assert set(prof[section]["availability"]["unavailable"].values()) == {"not_resolved"}
     assert prof["encounter"]["miss_distance_km"] == next(
         a["miss_distance_km"] for a in _FIXTURE_ASTEROIDS if a["id"] == unresolved_id)
-    assert prof["sentry"] == {"source": "jpl_sentry", "status": "not_resolved", "sentry_id": None,
-                              "in_latest_catalog": None, "assessment_endpoint": None}
+    assert {k: prof["sentry"][k] for k in ("status", "sentry_id", "in_latest_catalog", "assessment_endpoint")} == {
+        "status": "not_resolved", "sentry_id": None, "in_latest_catalog": None, "assessment_endpoint": None}
+    assert set(prof["sentry"]["assessment"]["availability"]["unavailable"].values()) == {"not_resolved"}
     assert prof["provenance"]["sbdb"]["run_id"] is None and prof["provenance"]["sentry"]["run_id"] is None
 
 
@@ -3697,22 +3698,24 @@ def test_profile_unknown_flags_are_null_not_false(mock_lakehouse: Path):
 
 # --- 11, 13: Sentry linkage ----------------------------------------------------
 
-def test_profile_sentry_is_linkage_only(mock_client: TestClient):
-    """The profile exposes Sentry linkage/status and points to the assessment; no risk values or scores."""
+def _all_keys(obj):
+    if isinstance(obj, dict):
+        for k, v in obj.items():
+            yield k
+            yield from _all_keys(v)
+    elif isinstance(obj, list):
+        for v in obj:
+            yield from _all_keys(v)
+
+
+def test_profile_has_no_synthetic_scores_and_sentry_values_stay_in_sentry(mock_client: TestClient):
+    """No danger/risk/threat/score field anywhere; published Sentry values appear only under sentry.assessment."""
     prof = _profile(mock_client, _TW54_NEOWS)
-    assert prof["sentry"] == {"source": "jpl_sentry", "status": "available", "sentry_id": "bK10T54W",
-                              "in_latest_catalog": True, "assessment_endpoint": f"/asteroids/{_TW54_NEOWS}/sentry"}
-
-    def keys(obj):
-        if isinstance(obj, dict):
-            for k, v in obj.items():
-                yield k
-                yield from keys(v)
-        elif isinstance(obj, list):
-            for v in obj:
-                yield from keys(v)
-
-    assert not (set(keys(prof)) & _SENTRY_RISK_KEYS)
+    keys = set(_all_keys(prof))
+    assert not {k for k in keys if any(word in k.lower() for word in ("danger", "risk", "threat", "score"))}
+    outside_sentry = set(_all_keys({k: v for k, v in prof.items() if k != "sentry"}))
+    assert not (outside_sentry & {"impact_probability", "palermo_scale_cum", "palermo_scale_max",
+                                  "torino_scale_max", "potential_impacts_count", "v_infinity_km_s"})
 
 
 def test_profile_sentry_statuses_follow_crosswalk(mock_lakehouse: Path):
@@ -3732,8 +3735,10 @@ def test_profile_sentry_statuses_follow_crosswalk(mock_lakehouse: Path):
 
     st = _profile(client, _ST_NEOWS)  # two Sentry IDs: ambiguous, nothing leaks
     assert st["sentry"]["status"] == "ambiguous" and st["sentry"]["sentry_id"] is None
-    assert st["provenance"]["sentry"] == {"source": "jpl_sentry", "sentry_id": None,
-                                          "latest_snapshot_key": None, "run_id": None}
+    assert st["provenance"]["sentry"] == {"source": "jpl_sentry", "sentry_id": None, "latest_snapshot_key": None,
+                                          "run_id": None, "snapshot_time": None,
+                                          "latest_catalog_snapshot_key": "2026-09-26"}
+    assert st["identity"]["availability"]["unavailable"] == {"sentry_id": "ambiguous_linkage"}
     for nid in (_TW54_NEOWS, _ST_NEOWS):
         _assert_profile_matches_existing_endpoints(client, nid)
 
@@ -3847,3 +3852,249 @@ def test_profile_real_local_lakehouse():
         prof = _profile(client, neows_id)
         assert prof["orbit"]["availability"]["status"] == "unavailable"
         assert prof["encounter"]["miss_distance_km"] == world[neows_id]["encounter"]["miss_distance_km"]
+
+
+# ============================================================================
+# PHASE 1 STEP 6 — SENTRY ASSESSMENT SERVING BRANCH (profile.sentry)
+# ============================================================================
+
+_TW54_SENTRY = "bK10T54W"
+_ST_SENTRY = "bK08S00T"
+_ASSESSMENT_FROM_SOURCE = {  # profile.sentry.assessment field -> fact_sentry_risk_snapshot column
+    "designation": "designation", "fullname": "fullname", "impact_probability": "impact_probability",
+    "potential_impacts_count": "potential_impacts_count", "impact_year_range": "impact_year_range",
+    "palermo_scale_cum": "palermo_scale_cum", "palermo_scale_max": "palermo_scale_max",
+    "torino_scale_max": "torino_scale_max", "v_infinity_km_s": "v_infinity_km_s",
+    "absolute_magnitude": "absolute_magnitude", "estimated_diameter_km": "estimated_diameter_km",
+    "last_obs_date": "last_obs_date", "last_obs_jd": "last_obs_jd",
+}
+_SCALED_SENTRY_FIELDS = ("impact_probability", "palermo_scale_cum", "palermo_scale_max", "v_infinity_km_s",
+                         "absolute_magnitude", "estimated_diameter_km")
+
+
+def _sentry_record(sentry_id: str, snapshot_key: str, run_id: str, snapshot_time: str,
+                   scale: float = 1.0, **overrides) -> dict:
+    """Clone a fixture Sentry row into another snapshot with distinguishable (scaled) published values."""
+    base = next(r for r in _FIXTURE_SENTRY if r["sentry_id"] == sentry_id)
+    row = {**base, "snapshot_key": snapshot_key, "run_id": run_id, "snapshot_time": snapshot_time,
+           "potential_impacts_count": base["potential_impacts_count"] + int(scale * 10),
+           "impact_year_range": f"{2000 + int(scale * 10)}-2122"}
+    for field in _SCALED_SENTRY_FIELDS:
+        row[field] = base[field] * scale
+    row.update(overrides)
+    return row
+
+
+def _write_sentry(lakehouse: Path, rows: list[dict]) -> None:
+    _write_table(lakehouse, "fact_sentry_risk_snapshot.parquet", rows, SENTRY_RISK_SNAPSHOT_SCHEMA)
+
+
+def _assert_assessment_equals_record(assessment: dict, record: dict) -> None:
+    for field, column in _ASSESSMENT_FROM_SOURCE.items():
+        assert assessment[field] == record[column], field
+
+
+def _assert_sentry_matches_legacy_endpoint(client: TestClient, neows_id: str) -> None:
+    """profile.sentry agrees with the existing GET /asteroids/{id}/sentry for every shared field."""
+    prof = _profile(client, neows_id)["sentry"]
+    legacy = client.get(f"/asteroids/{neows_id}/sentry").json()["data"]
+    if legacy is None:
+        assert prof["status"] == "not_resolved"
+        return
+    a = prof["assessment"]
+    assert prof["sentry_id"] == legacy["sentry_id"]
+    assert (a["designation"], a["fullname"]) == (legacy["designation"], legacy["fullname"])
+    assert a["impact_probability"] == legacy["latest_impact_probability"]
+    assert a["palermo_scale_cum"] == legacy["latest_palermo_scale_cum"]
+    assert a["palermo_scale_max"] == legacy["latest_palermo_scale_max"]
+    assert a["torino_scale_max"] == legacy["latest_torino_scale_max"]
+    assert a["potential_impacts_count"] == legacy["latest_potential_impacts_count"]
+    assert a["v_infinity_km_s"] == legacy["v_infinity_km_s"]
+    assert a["impact_year_range"] == (legacy["impact_year_range"] or None)
+    assert a["last_obs_date"] == legacy["last_obs_date"]
+    if prof["status"] == "available":
+        assert _profile(client, neows_id)["provenance"]["sentry"]["latest_snapshot_key"] == legacy["latest_snapshot_key"]
+        assert prof["in_latest_catalog"] == legacy["is_currently_active"]
+
+
+# --- Availability by linkage ------------------------------------------------------
+
+def test_sentry_assessment_available_for_linked_objects(mock_client: TestClient):
+    for neows_id, sentry_id in ((_TW54_NEOWS, _TW54_SENTRY), (_ST_NEOWS, _ST_SENTRY)):
+        sentry = _profile(mock_client, neows_id)["sentry"]
+        assert (sentry["status"], sentry["sentry_id"], sentry["source_contract"]) == (
+            "available", sentry_id, "sentry_mode_s_summary")
+        _assert_assessment_equals_record(sentry["assessment"], next(r for r in _FIXTURE_SENTRY if r["sentry_id"] == sentry_id))
+        assert sentry["assessment"]["availability"] == {"status": "available", "unavailable": {}}
+        _assert_sentry_matches_legacy_endpoint(mock_client, neows_id)
+
+
+def test_sentry_assessment_unavailable_reasons_by_status(mock_lakehouse: Path):
+    """not_present -> not_in_source; ambiguous -> ambiguous_linkage, with no values from either record."""
+    bridge = [r for r in _FIXTURE_BRIDGE
+              if not (r["source_system"] == "sentry" and r["asteroid_key"].startswith("ast_b8259"))]
+    st_link = next(r for r in _FIXTURE_BRIDGE if r["source_system"] == "sentry"
+                   and r["identifier_name"] == "sentry_id" and r["asteroid_key"].startswith("ast_8520"))
+    bridge.append({**st_link, "identifier_value": _TW54_SENTRY})  # 2008 ST now linked to two Sentry IDs
+    _write_table(mock_lakehouse, "bridge_asteroid_identifier.parquet", bridge, BRIDGE_ASTEROID_IDENTIFIER_SCHEMA)
+    client = _client_for(mock_lakehouse)
+
+    not_present = _profile(client, _TW54_NEOWS)["sentry"]
+    assert not_present["status"] == "not_present"
+    assert all(not_present["assessment"][f] is None for f in _ASSESSMENT_FROM_SOURCE)
+    assert set(not_present["assessment"]["availability"]["unavailable"].values()) == {"not_in_source"}
+
+    ambiguous = _profile(client, _ST_NEOWS)
+    assessment = ambiguous["sentry"]["assessment"]
+    assert ambiguous["sentry"]["status"] == "ambiguous"
+    assert all(assessment[f] is None for f in _ASSESSMENT_FROM_SOURCE)
+    assert set(assessment["availability"]["unavailable"].values()) == {"ambiguous_linkage"}
+    assert ambiguous["identity"]["availability"]["unavailable"]["sentry_id"] == "ambiguous_linkage"
+    for neows_id in (_TW54_NEOWS, _ST_NEOWS):
+        _assert_sentry_matches_legacy_endpoint(client, neows_id)
+
+
+def test_sentry_assessment_linked_without_record(mock_lakehouse: Path):
+    _write_sentry(mock_lakehouse, [r for r in _FIXTURE_SENTRY if r["sentry_id"] != _TW54_SENTRY])
+    prof = _profile(_client_for(mock_lakehouse), _TW54_NEOWS)
+    assert (prof["sentry"]["status"], prof["sentry"]["sentry_id"]) == ("linked_no_record", _TW54_SENTRY)
+    assert set(prof["sentry"]["assessment"]["availability"]["unavailable"].values()) == {"not_in_source"}
+    assert prof["provenance"]["sentry"]["snapshot_time"] is None
+    assert prof["provenance"]["sentry"]["latest_catalog_snapshot_key"] == "2026-09-26"
+
+
+def test_sentry_assessment_requires_linkage_not_pha(mock_lakehouse: Path):
+    """A PHA without Sentry linkage gets no assessment; a non-PHA with linkage gets the published one."""
+    bridge = [r for r in _FIXTURE_BRIDGE
+              if not (r["source_system"] == "sentry" and r["asteroid_key"].startswith("ast_b8259"))]
+    _write_table(mock_lakehouse, "bridge_asteroid_identifier.parquet", bridge, BRIDGE_ASTEROID_IDENTIFIER_SCHEMA)
+    rows = [{**a, "hazardous": True} if a["id"] == _TW54_NEOWS else a for a in _FIXTURE_ASTEROIDS]
+    _write_table(mock_lakehouse, "asteroids.parquet", rows, ASTEROID_SCHEMA)
+    client = _client_for(mock_lakehouse)
+
+    pha_resolved_unlinked = _profile(client, _TW54_NEOWS)
+    assert pha_resolved_unlinked["encounter"]["is_potentially_hazardous"] is True
+    assert pha_resolved_unlinked["sentry"]["status"] == "not_present"
+    assert pha_resolved_unlinked["sentry"]["assessment"]["impact_probability"] is None
+
+    pha_unresolved = _profile(client, "2138971")
+    assert pha_unresolved["encounter"]["is_potentially_hazardous"] is True
+    assert pha_unresolved["sentry"]["status"] == "not_resolved"
+    assert pha_unresolved["sentry"]["assessment"]["availability"]["status"] == "unavailable"
+
+    non_pha_linked = _profile(client, _ST_NEOWS)
+    assert non_pha_linked["encounter"]["is_potentially_hazardous"] is False
+    assert non_pha_linked["sentry"]["status"] == "available"
+    assert non_pha_linked["sentry"]["assessment"]["impact_probability"] == pytest.approx(0.00013679128)
+
+
+# --- Snapshot coherence / provenance --------------------------------------------------
+
+def test_sentry_assessment_uses_latest_record_only(mock_lakehouse: Path):
+    older = _sentry_record(_TW54_SENTRY, "2026-09-01", "run_older", "2026-09-01T00:00:00+00:00", 0.5)
+    newer = _sentry_record(_TW54_SENTRY, "2026-09-30", "run_newer", "2026-09-30T00:00:00+00:00", 2.0)
+    _write_sentry(mock_lakehouse, _FIXTURE_SENTRY + [older, newer])
+    client = _client_for(mock_lakehouse)
+    prof = _profile(client, _TW54_NEOWS)
+    _assert_assessment_equals_record(prof["sentry"]["assessment"], newer)
+    assert prof["provenance"]["sentry"] == {
+        "source": "jpl_sentry", "sentry_id": _TW54_SENTRY, "latest_snapshot_key": "2026-09-30",
+        "run_id": "run_newer", "snapshot_time": "2026-09-30T00:00:00+00:00", "latest_catalog_snapshot_key": "2026-09-30"}
+    assert prof["sentry"]["in_latest_catalog"] is True
+    _assert_sentry_matches_legacy_endpoint(client, _TW54_NEOWS)
+
+
+def test_sentry_same_day_runs_select_one_coherent_record(mock_lakehouse: Path):
+    """Two runs on one snapshot_key: values, run_id and snapshot_time all come from the later run."""
+    early = _sentry_record(_TW54_SENTRY, "2026-09-30", "run_b_early", "2026-09-30T01:00:00+00:00", 3.0)
+    late = _sentry_record(_TW54_SENTRY, "2026-09-30", "run_a_late", "2026-09-30T02:00:00+00:00", 4.0)
+    _write_sentry(mock_lakehouse, _FIXTURE_SENTRY + [early, late])
+    prof = _profile(_client_for(mock_lakehouse), _TW54_NEOWS)
+    _assert_assessment_equals_record(prof["sentry"]["assessment"], late)
+    assert (prof["provenance"]["sentry"]["run_id"], prof["provenance"]["sentry"]["snapshot_time"]) == (
+        "run_a_late", "2026-09-30T02:00:00+00:00")
+
+
+def test_sentry_object_absent_from_latest_catalog(mock_lakehouse: Path):
+    """A newer catalog without the object: last stored assessment is served, flagged in_latest_catalog=false."""
+    newer_st = _sentry_record(_ST_SENTRY, "2026-09-30", "run_catalog2", "2026-09-30T00:00:00+00:00", 2.0)
+    _write_sentry(mock_lakehouse, _FIXTURE_SENTRY + [newer_st])
+    client = _client_for(mock_lakehouse)
+
+    tw54 = _profile(client, _TW54_NEOWS)
+    assert tw54["sentry"]["status"] == "available" and tw54["sentry"]["in_latest_catalog"] is False
+    _assert_assessment_equals_record(tw54["sentry"]["assessment"],
+                                     next(r for r in _FIXTURE_SENTRY if r["sentry_id"] == _TW54_SENTRY))
+    assert tw54["provenance"]["sentry"]["latest_snapshot_key"] == "2026-09-26"
+    assert tw54["provenance"]["sentry"]["latest_catalog_snapshot_key"] == "2026-09-30"
+
+    st = _profile(client, _ST_NEOWS)
+    assert st["sentry"]["in_latest_catalog"] is True
+    _assert_assessment_equals_record(st["sentry"]["assessment"], newer_st)
+    for neows_id in (_TW54_NEOWS, _ST_NEOWS):
+        _assert_sentry_matches_legacy_endpoint(client, neows_id)
+
+
+# --- Missing published values ---------------------------------------------------------
+
+def test_sentry_missing_published_values_are_null_with_reason(mock_lakehouse: Path):
+    """Null H/diameter stay null; an empty stored 'range' ("" from ingestion) is served as null, not ""."""
+    row = {**next(r for r in _FIXTURE_SENTRY if r["sentry_id"] == _TW54_SENTRY),
+           "absolute_magnitude": None, "estimated_diameter_km": None, "impact_year_range": "", "last_obs_jd": None}
+    _write_sentry(mock_lakehouse, [row] + [r for r in _FIXTURE_SENTRY if r["sentry_id"] != _TW54_SENTRY])
+    assessment = _profile(_client_for(mock_lakehouse), _TW54_NEOWS)["sentry"]["assessment"]
+    for field in ("absolute_magnitude", "estimated_diameter_km", "impact_year_range", "last_obs_jd"):
+        assert assessment[field] is None, field
+    assert assessment["availability"] == {"status": "partial", "unavailable": {
+        "impact_year_range": "not_in_source", "absolute_magnitude": "not_in_source",
+        "estimated_diameter_km": "not_in_source", "last_obs_jd": "not_in_source"}}
+    assert assessment["impact_probability"] == pytest.approx(6.594578e-05)
+
+
+def test_sentry_contract_declares_mode_s_and_excludes_mode_o_fields(mock_client: TestClient):
+    """Only Mode S summary fields are served; no solution-level, impact-date or impact-energy fields exist."""
+    sentry = _profile(mock_client, _TW54_NEOWS)["sentry"]
+    assert sentry["source_contract"] == "sentry_mode_s_summary"
+    assert set(sentry["assessment"]) == set(_ASSESSMENT_FROM_SOURCE) | {"availability"}
+    assert not {k for k in _all_keys(sentry) if any(w in k for w in ("energy", "solution", "impact_date"))}
+
+
+def test_sentry_values_stay_source_separated(mock_client: TestClient):
+    """Sentry's H/diameter live only in sentry.assessment; SBDB physical keeps SBDB's own values."""
+    prof = _profile(mock_client, _TW54_NEOWS)
+    assert prof["sentry"]["assessment"]["absolute_magnitude"] == 27.55
+    assert prof["sentry"]["assessment"]["estimated_diameter_km"] == 0.01
+    assert prof["physical"]["absolute_magnitude"] == 27.6
+    assert prof["physical"]["estimated_diameter_km"] is None
+
+
+def test_world_contract_unchanged_by_sentry_branch(mock_client: TestClient):
+    """The assessment is profile-only: world records keep their compact sentry linkage block."""
+    for rec in _world(mock_client)["data"]:
+        assert set(rec["sentry"]) == {"status", "sentry_id", "latest_snapshot_key", "run_id", "in_latest_catalog"}
+
+
+# --- Real local data -------------------------------------------------------------------
+
+@pytest.mark.skipif(
+    not (_REAL_LAKEHOUSE / "fact_sentry_risk_snapshot.parquet").exists(),
+    reason="Local Parquet lakehouse not present (gitignored; absent in CI).",
+)
+def test_sentry_assessment_real_local_lakehouse():
+    import duckdb
+
+    client = _client_for(_REAL_LAKEHOUSE)
+    sentry_path = str(_REAL_LAKEHOUSE / "fact_sentry_risk_snapshot.parquet").replace("\\", "/")
+    con = duckdb.connect()
+    for neows_id in (_TW54_NEOWS, _ST_NEOWS):
+        prof = _profile(client, neows_id)
+        prov = prof["provenance"]["sentry"]
+        cur = con.execute(
+            f"SELECT * FROM '{sentry_path}' WHERE sentry_id = ? AND snapshot_key = ? AND run_id = ?",
+            [prof["sentry"]["sentry_id"], prov["latest_snapshot_key"], prov["run_id"]])
+        cols = [d[0] for d in cur.description]
+        rows = [dict(zip(cols, r)) for r in cur.fetchall()]
+        assert len(rows) == 1
+        _assert_assessment_equals_record(prof["sentry"]["assessment"], rows[0])
+        assert prov["snapshot_time"] == rows[0]["snapshot_time"]
+        _assert_sentry_matches_legacy_endpoint(client, neows_id)
