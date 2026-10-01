@@ -3,8 +3,8 @@ import type { WorldRecord } from "../src/models/world";
 import { fieldOpacity, labelOpacity, SKY_STOPS, skyColors, starOpacity } from "../src/scene/atmosphere";
 import { ExplorationController, MAX_WHEEL_DELTA, PROGRESS_PER_100PX } from "../src/scene/exploration";
 import {
-  altitudePx, computeLayout, DEFAULT_DOMAIN, distanceFraction, FRONTIER_FRACTION, MIN_ALTITUDE_PX, restPosition,
-  skyHorizontal, surfaceY, type DistanceView,
+  altitudePx, computeLayout, distanceAtAltitude, FRONTIER_SCREEN_FRACTION, MIN_MILLION_PX, MOON_DISTANCE_KM, restPosition,
+  skyHorizontal, surfaceY, travelPx,
 } from "../src/scene/skyLayout";
 import { buildCallouts } from "../src/ui/callouts";
 import { labelBox, overlaps } from "../src/ui/LabelLayer";
@@ -14,90 +14,122 @@ const records = (): WorldRecord[] => fixture("world.json").data;
 const withDistance = (base: WorldRecord, id: string, km: number): WorldRecord => ({
   ...structuredClone(base), neows_id: id, encounter: { ...base.encounter, miss_distance_km: km },
 });
-const VIEWPORTS: [number, number][] = [[1280, 720], [1920, 1080], [2560, 1440], [3840, 2160], [900, 1200]];
-/** Frontiers spanning the whole journey: before the Moon, the Moon, the early field, deep space. */
-const FRONTIERS = [0, 5e4, 384_400, 1e6, 5e6, 23_417_892, 5e7, 1e8];
-const view = (frontierKm: number): DistanceView => ({ domain: DEFAULT_DOMAIN, frontierKm });
+const VIEWPORTS: [number, number][] = [[1280, 720], [1920, 1080], [2560, 1440], [3840, 2160], [900, 1200], [700, 500]];
 
-describe("distance ordering is preserved in the sky (non-negotiable)", () => {
-  it("controlled example: 5M < 15M < 50M km rest lower-to-higher above the arc, for every frontier", () => {
+describe("the distance world: ordering and spacing (non-negotiable)", () => {
+  it("controlled example: 5M < 15M < 50M km rest lower-to-higher above the arc on every viewport", () => {
     const base = records()[0]!;
     const [a, b, c] = [5e6, 15e6, 50e6].map((km, i) => withDistance(base, `1${i}`, km));
     for (const [w, h] of VIEWPORTS) {
-      for (const p of [0, 0.5, 1]) {
-        for (const f of FRONTIERS) {
-          const layout = computeLayout(w, h, p);
-          const [ra, rb, rc] = [a, b, c].map((r) => restPosition(layout, r!, view(f)));
-          expect(ra!.altitude).toBeLessThan(rb!.altitude);
-          expect(rb!.altitude).toBeLessThan(rc!.altitude);
-        }
-      }
+      const layout = computeLayout(w, h);
+      const [ra, rb, rc] = [a, b, c].map((r) => restPosition(layout, r!));
+      expect(ra!.altitude).toBeLessThan(rb!.altitude);
+      expect(rb!.altitude).toBeLessThan(rc!.altitude);
     }
   });
 
-  it("every real asteroid: altitude is strictly ordered by real miss distance, at every frontier, progress and aspect", () => {
+  it("every real asteroid: world height is strictly ordered by real miss distance on every viewport", () => {
     const sorted = [...records()].sort((x, y) => x.encounter.miss_distance_km - y.encounter.miss_distance_km);
     for (const [w, h] of VIEWPORTS) {
-      for (const p of [0, 0.25, 0.75, 1]) {
-        for (const f of FRONTIERS) {
-          const layout = computeLayout(w, h, p);
-          const alts = sorted.map((r) => restPosition(layout, r, view(f)).altitude);
-          for (let i = 1; i < alts.length; i++) expect(alts[i]!).toBeGreaterThan(alts[i - 1]!);
-        }
-      }
+      const layout = computeLayout(w, h);
+      const alts = sorted.map((r) => restPosition(layout, r).altitude);
+      for (let i = 1; i < alts.length; i++) expect(alts[i]!).toBeGreaterThan(alts[i - 1]!);
     }
   });
 
-  it("the mapping is strictly monotonic across the frontier and bounded in [0, 1)", () => {
-    for (const f of FRONTIERS) {
+  it("the mapping is strictly monotonic from the surface to beyond 100M km, and invertible", () => {
+    for (const [w, h] of VIEWPORTS) {
+      const layout = computeLayout(w, h);
       let last = -Infinity;
-      for (let km = 1000; km < 3e8; km *= 1.07) {
-        const frac = distanceFraction(km, view(f));
-        expect(frac).toBeGreaterThan(last);
-        expect(frac).toBeGreaterThanOrEqual(0);
-        expect(frac).toBeLessThan(1);
-        last = frac;
+      for (let km = 100; km < 3e8; km *= 1.05) {
+        const alt = altitudePx(layout, km);
+        expect(alt).toBeGreaterThan(last);
+        expect(distanceAtAltitude(layout, alt) / km).toBeCloseTo(1, 9);
+        last = alt;
       }
     }
-    expect(distanceFraction(23_417_892, view(23_417_892))).toBeCloseTo(FRONTIER_FRACTION, 12); // frontier height is fixed
-    expect(() => distanceFraction(0, view(1e6))).toThrow(RangeError);
-    expect(() => distanceFraction(NaN, view(1e6))).toThrow(RangeError);
-    expect(altitudePx(computeLayout(1000, 800, 0), 1, view(1e6))).toBeCloseTo(MIN_ALTITUDE_PX, 3);
+    expect(() => altitudePx(computeLayout(1000, 800), 0)).toThrow(RangeError);
+    expect(() => altitudePx(computeLayout(1000, 800), NaN)).toThrow(RangeError);
+  });
+
+  it("every million km has the same, real spacing in the field; 47,382,615 km sits 38.2615% of the way from 47M to 48M", () => {
+    for (const [w, h] of VIEWPORTS) {
+      const layout = computeLayout(w, h);
+      expect(layout.millionPx).toBeGreaterThanOrEqual(MIN_MILLION_PX);
+      for (let m = 1; m < 100; m++) expect(altitudePx(layout, (m + 1) * 1e6) - altitudePx(layout, m * 1e6)).toBeCloseTo(layout.millionPx, 6);
+      const [a47, a48, x] = [47e6, 48e6, 47_382_615].map((km) => altitudePx(layout, km));
+      expect((x! - a47!) / (a48! - a47!)).toBeCloseTo(0.382615, 9);
+      // The field is far taller than a screen: about seven million-km levels per viewport.
+      expect(h / layout.millionPx).toBeLessThan(11);
+      expect(altitudePx(layout, 1e8) / h).toBeGreaterThan(9);
+    }
   });
 
   it("altitude is measured from the surface directly below, with the same range at every x", () => {
-    const layout = computeLayout(1600, 900, 0.3);
+    const layout = computeLayout(1600, 900);
     for (const record of records()) {
-      const rest = restPosition(layout, record, view(5e7));
-      expect(rest.y - surfaceY(layout, rest.x)).toBeCloseTo(altitudePx(layout, record.encounter.miss_distance_km, view(5e7)), 9);
+      const rest = restPosition(layout, record);
+      expect(rest.y - surfaceY(layout, rest.x)).toBeCloseTo(altitudePx(layout, record.encounter.miss_distance_km), 9);
     }
   });
 
   it("positions do not depend on the rest of the population (adding asteroids moves nobody)", () => {
-    const layout = computeLayout(1400, 860, 0.4);
+    const layout = computeLayout(1400, 860);
     const one = records()[3]!;
-    const alone = restPosition(layout, one, view(3e7));
+    const alone = restPosition(layout, one);
     const extra = [...records(), withDistance(one, "999999999", 1e4)];
-    expect(restPosition(layout, extra[3]!, view(3e7))).toEqual(alone);
+    expect(restPosition(layout, extra[3]!)).toEqual(alone);
+  });
+});
+
+describe("camera travel through the distance world", () => {
+  it("no travel at the top or in the sky; then the frontier is held at a fixed screen height", () => {
+    for (const [w, h] of VIEWPORTS) {
+      const layout = computeLayout(w, h);
+      expect(travelPx(layout, 0)).toBe(0);
+      expect(travelPx(layout, 50_000)).toBe(0); // still in the first sky: the Earth does not move
+      for (const km of [2e6, 23_417_892, 5e7, 1e8]) {
+        const screenY = layout.earthTopY + altitudePx(layout, km) - travelPx(layout, km);
+        expect(screenY).toBeCloseTo(FRONTIER_SCREEN_FRACTION * h, 6);
+      }
+    }
+  });
+
+  it("travel is monotonic in the revealed distance (so scrolling back brings everything back)", () => {
+    const layout = computeLayout(1400, 860);
+    let last = -1;
+    for (let km = 1000; km < 1.2e8; km *= 1.03) {
+      const t = travelPx(layout, km);
+      expect(t).toBeGreaterThanOrEqual(last);
+      last = t;
+    }
+  });
+
+  it("the Earth is in view up to the Moon, and has left the viewport by 3M km", () => {
+    for (const [w, h] of VIEWPORTS) {
+      const layout = computeLayout(w, h);
+      expect(layout.earthTopY - travelPx(layout, MOON_DISTANCE_KM)).toBeGreaterThan(0.2 * h); // crest still well on screen
+      expect(layout.earthTopY - travelPx(layout, 3e6)).toBeLessThan(0); // crest below the bottom edge
+    }
   });
 });
 
 describe("direction is consumed, never regenerated", () => {
   it("horizontal position is the longitude of the served vector, deterministic and asteroid_key independent", () => {
-    const layout = computeLayout(1400, 860, 0);
+    const layout = computeLayout(1400, 860);
     for (const record of records()) {
       const d = record.illustrative_direction;
       expect(skyHorizontal(d)).toBe(Math.atan2(d.y, d.x) / Math.PI);
-      expect(restPosition(layout, { ...record, asteroid_key: "ast_changed" }, view(1e8))).toEqual(restPosition(layout, record, view(1e8)));
-      expect(restPosition(layout, structuredClone(record), view(1e8))).toEqual(restPosition(layout, record, view(1e8)));
+      expect(restPosition(layout, { ...record, asteroid_key: "ast_changed" })).toEqual(restPosition(layout, record));
+      expect(restPosition(layout, structuredClone(record))).toEqual(restPosition(layout, record));
     }
   });
 
   it("asteroids stay inside the viewport horizontally", () => {
     for (const [w, h] of VIEWPORTS) {
-      const layout = computeLayout(w, h, 0);
+      const layout = computeLayout(w, h);
       for (const record of records()) {
-        const { x } = restPosition(layout, record, view(1e8));
+        const { x } = restPosition(layout, record);
         expect(x).toBeGreaterThan(0);
         expect(x).toBeLessThan(w);
       }
@@ -105,15 +137,13 @@ describe("direction is consumed, never regenerated", () => {
   });
 });
 
-describe("Earth composition stays grounded across aspect ratios", () => {
-  it("the crest sits in the lower third and sinks as the user rises", () => {
+describe("Earth composition", () => {
+  it("the crest sits in the lower third of the first screen; the arc curves down toward the edges", () => {
     for (const [w, h] of VIEWPORTS) {
-      const start = computeLayout(w, h, 0);
-      const end = computeLayout(w, h, 1);
-      expect(start.earthTopY / h).toBeCloseTo(0.3, 6);
-      expect(end.earthTopY).toBeLessThan(start.earthTopY);
-      expect(surfaceY(start, w / 2)).toBeCloseTo(start.earthTopY, 6);
-      expect(surfaceY(start, 0)).toBeLessThan(start.earthTopY); // the arc curves down toward the edges
+      const layout = computeLayout(w, h);
+      expect(layout.earthTopY / h).toBeCloseTo(0.3, 6);
+      expect(surfaceY(layout, w / 2)).toBeCloseTo(layout.earthTopY, 6);
+      expect(surfaceY(layout, 0)).toBeLessThan(layout.earthTopY);
     }
   });
 });
@@ -191,7 +221,7 @@ describe("sky -> space transition is continuous", () => {
     expect(starOpacity(0)).toBe(0);
     expect(starOpacity(1)).toBe(1);
     expect(fieldOpacity(0)).toBe(0);
-    expect(labelOpacity(0.3)).toBe(0);
+    expect(labelOpacity(0.2)).toBe(0); // no asteroid labels before the field
     expect(skyColors(NaN)).toEqual(skyColors(0));
   });
 });

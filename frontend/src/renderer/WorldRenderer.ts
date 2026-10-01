@@ -1,13 +1,13 @@
 import * as THREE from "three";
 import { InputController } from "../interaction/InputController";
 import type { WorldRecord } from "../models/world";
-import { fieldOpacity, frontierOpacity, guideOpacity, hazeOpacity, moonOpacity, skyColors, starOpacity } from "../scene/atmosphere";
+import { fieldOpacity, frontierOpacity, guideOpacity, hazeOpacity, moonOpacity, skyColors, smoothstep, starOpacity } from "../scene/atmosphere";
 import { ExplorationController } from "../scene/exploration";
 import { fallEase, RevealAnimator, type AsteroidPhase } from "../scene/reveal";
 import {
-  altitudePx, computeLayout, DEFAULT_DOMAIN, distanceDomain, guideDistances, guideTier, MOON_DISTANCE_KM, MOON_X_FRACTION,
-  restPosition, revealedDistanceKm, surfaceY, type DistanceDomain, type DistanceView, type GuideTier, type RestPosition,
-  type SkyLayout,
+  altitudePx, computeLayout, DEFAULT_DOMAIN, distanceAtAltitude, distanceDomain, guidesInWindow, guideTier, MIN_MILLION_PX,
+  MOON_DISTANCE_KM, MOON_X_FRACTION, restPosition, revealedDistanceKm, surfaceY, travelPx, type DistanceDomain, type GuideTier,
+  type RestPosition, type SkyLayout,
 } from "../scene/skyLayout";
 import { buildEarth, type EarthArt } from "./earthArt";
 
@@ -23,6 +23,8 @@ export interface GLRendererLike {
 
 export interface ViewSnapshot {
   progress: number;
+  /** World px the camera has travelled up from the starting composition. */
+  travel: number;
   /** Real distance (km) revealed by the current exploration progress. */
   revealedKm: number;
   /** 0 = world view, 1 = fully focused on an asteroid. */
@@ -118,7 +120,7 @@ function starPositions(width: number, height: number): Float32Array {
   const next = (): number => ((seed = (seed * 1664525 + 1013904223) >>> 0) / 4294967296);
   for (let i = 0; i < count; i++) {
     out[i * 3] = next() * width;
-    out[i * 3 + 1] = height * (0.22 + 0.78 * next());
+    out[i * 3 + 1] = height * next(); // the whole screen: in deep space there is no ground below
     out[i * 3 + 2] = -5;
   }
   return out;
@@ -158,11 +160,16 @@ export class WorldRenderer {
   private readonly moonMaterials: THREE.MeshBasicMaterial[] = [];
   private readonly guides: THREE.LineSegments<THREE.BufferGeometry, THREE.LineBasicMaterial>;
   private guideStates: GuideState[] = [];
+  /** Guides evaluated in the last view update (culling diagnostic: only the local window is processed). */
+  guidesProcessed = 0;
   private moonAlpha = 0;
 
   private width = 1;
   private height = 1;
-  private layout: SkyLayout = computeLayout(1, 1, 0);
+  private layout: SkyLayout = computeLayout(1, 1);
+  /** Camera travel (world px), derived only from the revealed distance. */
+  private travel = 0;
+  private restDirty = true;
   private domain: DistanceDomain = DEFAULT_DOMAIN;
   private revealed = 0;
   private records: WorldRecord[] = [];
@@ -181,8 +188,9 @@ export class WorldRenderer {
   private focusedId: string | null = null;
   private anchorId: string | null = null;
   private focusT = 0;
-  private camX = 0;
-  private camY = 0;
+  /** Focus glide: camera offset from the travelling base centre (0 in the world view). */
+  private offX = 0;
+  private offY = 0;
   private cameraMoving = false;
   private hoveredId: string | null = null;
   private highlightedId: string | null = null;
@@ -301,6 +309,7 @@ export class WorldRenderer {
     });
     this.current = this.records.map(() => null);
     this.hitRadius = this.records.map(() => 0);
+    this.restDirty = true;
     this.hoveredId = null;
     const n = this.records.length;
     if (n > 0) {
@@ -354,9 +363,22 @@ export class WorldRenderer {
     return this.index.has(neowsId) ? this.animator.phase(neowsId) : null;
   }
 
-  /** The mapping currently used for every distance (asteroids, Moon, guides, frontier). */
-  get distanceView(): DistanceView {
-    return { domain: this.domain, frontierKm: this.revealed };
+  /** World px the camera has travelled up from the starting composition (0 = Earth view). */
+  get travelPx(): number {
+    return this.travel;
+  }
+
+  /** Real distances (km) at the bottom and top of the viewport, measured at the Earth's crest line. */
+  get viewWindowKm(): { lowKm: number; highKm: number } {
+    return {
+      lowKm: distanceAtAltitude(this.layout, this.travel - this.layout.earthTopY),
+      highKm: distanceAtAltitude(this.layout, this.travel + this.height - this.layout.earthTopY),
+    };
+  }
+
+  /** Client y of the Earth's crest (below the viewport bottom once the Earth has been left behind). */
+  earthCrestScreenY(): number {
+    return this.toScreen(this.layout.cx, this.layout.earthTopY).y;
   }
 
   /** Distance guides currently drawn (alpha > 0), nearest to the frontier first. */
@@ -438,8 +460,7 @@ export class WorldRenderer {
   /** Client-pixel point of each distance on its guide, near the right edge (where guide labels sit). */
   distanceScreenPositions(kms: readonly number[]): { km: number; x: number; y: number }[] {
     const x = this.layout.width - LABEL_X_INSET_PX;
-    const view = this.distanceView;
-    return kms.map((km) => ({ km, ...this.toScreen(x, surfaceY(this.layout, x) + altitudePx(this.layout, km, view)) }));
+    return kms.map((km) => ({ km, ...this.toScreen(x, surfaceY(this.layout, x) + altitudePx(this.layout, km)) }));
   }
 
   get inputListenerCount(): number {
@@ -475,6 +496,7 @@ export class WorldRenderer {
 
     let changed = this.exploration.step(dt);
     this.revealed = revealedDistanceKm(this.exploration.currentProgress, this.domain);
+    this.travel = travelPx(this.layout, this.revealed);
     if (this.animator.update(this.records, this.revealed, dt, this.focusedId)) changed = true;
     if (this.stepFocus(dt)) changed = true;
     const t0 = performance.now();
@@ -496,34 +518,44 @@ export class WorldRenderer {
       if (this.focusT === 0) this.anchorId = null;
       moved = true;
     }
-    // Camera centre eases toward its goal, so switching focus A -> B glides instead of jumping.
+    // The focus offset (from the travelling base centre) eases toward its goal, so switching focus
+    // A -> B glides instead of jumping. In the world view the offset is 0: the camera is exactly the
+    // travel position, with no lag behind scrolling.
     const eased = easeInOut(this.focusT);
     const anchor = this.anchorId === null ? undefined : this.current[this.index.get(this.anchorId) ?? -1];
-    const goalX = this.width / 2 + ((anchor?.x ?? this.width / 2) - this.width / 2) * eased;
-    const goalY = this.height / 2 + ((anchor?.y ?? this.height / 2) - this.height / 2) * eased;
-    this.cameraMoving = Math.abs(goalX - this.camX) > 0.05 || Math.abs(goalY - this.camY) > 0.05;
+    const base = this.baseCenter();
+    const goalX = anchor ? (anchor.x - base.x) * eased : 0;
+    const goalY = anchor ? (anchor.y - base.y) * eased : 0;
+    this.cameraMoving = Math.abs(goalX - this.offX) > 0.05 || Math.abs(goalY - this.offY) > 0.05;
     if (this.cameraMoving) {
       const blend = 1 - Math.exp(-Math.max(0, dt) / CAMERA_TAU_MS);
-      this.camX += (goalX - this.camX) * blend;
-      this.camY += (goalY - this.camY) * blend;
+      this.offX += (goalX - this.offX) * blend;
+      this.offY += (goalY - this.offY) * blend;
       moved = true;
-    } else if (this.camX !== goalX || this.camY !== goalY) {
-      this.camX = goalX;
-      this.camY = goalY;
+    } else if (this.offX !== goalX || this.offY !== goalY) {
+      this.offX = goalX;
+      this.offY = goalY;
       moved = true;
     }
     return moved;
   }
 
+  /** Camera centre of the world view: the starting composition raised by the travel. */
+  private baseCenter(): { x: number; y: number } {
+    return { x: this.width / 2, y: this.height / 2 + this.travel };
+  }
+
   private updateView(): void {
     this.viewDirty = false;
     const progress = this.exploration.currentProgress;
-    this.layout = computeLayout(this.width, this.height, progress);
-    const view = this.distanceView;
-    this.rest = this.records.map((r) => restPosition(this.layout, r, view));
+    if (this.restDirty) {
+      this.rest = this.records.map((r) => restPosition(this.layout, r)); // static world positions
+      this.restDirty = false;
+    }
 
     const focus = easeInOut(this.focusT);
-    this.camera.position.set(this.camX, this.camY, 10);
+    const base = this.baseCenter();
+    this.camera.position.set(base.x + this.offX, base.y + this.offY, 10);
     this.camera.zoom = 1 + (FOCUS_ZOOM - 1) * focus;
     this.camera.updateProjectionMatrix();
     this.camera.updateMatrixWorld();
@@ -534,16 +566,19 @@ export class WorldRenderer {
       this.earth.haze.material.opacity = hazeOpacity(progress);
       this.earth.haze.material.color.set(skyColors(progress).horizon);
     }
-    if (this.stars) this.stars.material.opacity = starOpacity(progress) * (1 - 0.5 * focus);
+    if (this.stars) {
+      this.stars.material.opacity = starOpacity(progress) * (1 - 0.5 * focus);
+      this.stars.position.y = this.travel; // the star field is infinitely far: it travels with the camera
+    }
     this.updateScale(progress, focus);
     this.updateInstances(focus);
     this.pointerDirty = this.pointer !== null; // things may have moved under a stationary pointer
-    this.options.onViewChange?.({ progress, revealedKm: this.revealed, focus, layout: this.layout });
+    this.options.onViewChange?.({ progress, travel: this.travel, revealedKm: this.revealed, focus, layout: this.layout });
   }
 
   private updateBackground(progress: number): void {
     const { zenith, horizon } = skyColors(progress);
-    const crest = (100 * this.layout.earthTopY) / this.height;
+    const crest = Math.max(0, Math.min(100, (100 * (this.layout.earthTopY - this.travel)) / this.height)); // horizon band leaves with the Earth
     const css = `linear-gradient(to top, ${horizon} 0%, ${horizon} ${crest.toFixed(2)}%, ${zenith} 100%)`;
     if (css !== this.background) {
       this.background = css;
@@ -553,7 +588,7 @@ export class WorldRenderer {
 
   private placeArc(line: THREE.Line<THREE.BufferGeometry, THREE.LineDashedMaterial>, km: number): void {
     const position = line.geometry.attributes.position as THREE.BufferAttribute;
-    const alt = altitudePx(this.layout, km, this.distanceView);
+    const alt = altitudePx(this.layout, km);
     for (let k = 0; k < position.count; k++) {
       const x = -20 + ((this.width + 40) * k) / (position.count - 1);
       position.setXYZ(k, x, surfaceY(this.layout, x) + alt, 0);
@@ -566,13 +601,12 @@ export class WorldRenderer {
   /** Moon landmark + arc, revealed-distance frontier arc, and the million-km distance guides. */
   private updateScale(progress: number, focus: number): void {
     const fade = 1 - focus;
-    const view = this.distanceView;
     const moonX = this.layout.width * MOON_X_FRACTION;
     this.moonAlpha = moonOpacity(progress);
     this.moon.visible = this.moonAlpha > 0.001;
     this.moonArc.visible = this.moon.visible && fade > 0.001;
     if (this.moon.visible) {
-      this.moon.position.set(moonX, surfaceY(this.layout, moonX) + altitudePx(this.layout, MOON_DISTANCE_KM, view), -2);
+      this.moon.position.set(moonX, surfaceY(this.layout, moonX) + altitudePx(this.layout, MOON_DISTANCE_KM), -2);
       this.moon.scale.setScalar(MOON_PX);
       for (const material of this.moonMaterials) material.opacity = this.moonAlpha;
       this.placeArc(this.moonArc, MOON_DISTANCE_KM);
@@ -585,14 +619,19 @@ export class WorldRenderer {
       this.placeArc(this.frontierArc, Math.max(this.revealed, this.domain.minKm));
       this.frontierArc.material.opacity = 0.5 * frontierAlpha;
     }
-    this.updateGuides(fieldOpacity(progress) * fade, view);
+    this.updateGuides(fieldOpacity(progress) * fade);
   }
 
-  /** Rebuilds the visible guide dashes in place (fixed-capacity buffer, one draw call). */
-  private updateGuides(globalAlpha: number, view: DistanceView): void {
-    const distances = guideDistances(this.domain);
+  /**
+   * Rebuilds the dashes of the guides INSIDE THE CURRENT VIEWPORT WINDOW only (the field itself is
+   * the whole domain; guides the user has travelled past, or not reached, are simply off-screen and
+   * not processed). Fixed-capacity buffer sized to one screen of guides; one draw call.
+   */
+  private updateGuides(globalAlpha: number): void {
+    const layout = this.layout;
     const dashes = Math.ceil((this.width + 40) / (GUIDE_DASH_PX + GUIDE_GAP_PX));
-    const capacity = distances.length * dashes * 2;
+    const perScreen = Math.ceil((this.height + layout.sag + 60) / Math.min(layout.millionPx, MIN_MILLION_PX)) + 3;
+    const capacity = perScreen * dashes * 2;
     let position = this.guides.geometry.getAttribute("position") as THREE.BufferAttribute | undefined;
     let color = this.guides.geometry.getAttribute("color") as THREE.BufferAttribute | undefined;
     if (!position || !color || position.count < capacity) {
@@ -608,26 +647,30 @@ export class WorldRenderer {
       this.guides.visible = false;
       return;
     }
-    const altitudes = distances.map((km) => altitudePx(this.layout, km, view));
-    // Surface height under each dash end, computed once for all guides (they run parallel to the arc).
+    // Window in world height above the surface: the crest line and the (lower) edges of the curve.
+    const low = this.travel - layout.earthTopY - 10;
+    const high = this.travel + this.height - layout.earthTopY + layout.sag + 10;
+    const distances = guidesInWindow(layout, this.domain, low, high).slice(0, perScreen);
+    this.guidesProcessed = distances.length;
     const xs: number[] = [];
     const surface: number[] = [];
     for (let k = 0; k < dashes; k++) {
       const x0 = -20 + k * (GUIDE_DASH_PX + GUIDE_GAP_PX);
       xs.push(x0, x0 + GUIDE_DASH_PX);
-      surface.push(surfaceY(this.layout, x0), surfaceY(this.layout, x0 + GUIDE_DASH_PX));
+      surface.push(surfaceY(layout, x0), surfaceY(layout, x0 + GUIDE_DASH_PX));
     }
     let v = 0;
-    for (let i = 0; i < distances.length; i++) {
-      const km = distances[i]!;
+    for (const km of distances) {
       const tier = guideTier(km);
-      const below = i > 0 ? altitudes[i]! - altitudes[i - 1]! : Infinity;
-      const above = i + 1 < distances.length ? altitudes[i + 1]! - altitudes[i]! : Infinity;
-      const alpha = guideOpacity(km, tier, this.revealed, Math.min(below, above)) * globalAlpha;
+      const altitude = altitudePx(layout, km);
+      // Depth: guides fade as they sink toward the bottom of the screen (where the user came from).
+      const screenY = layout.earthTopY + altitude - this.travel;
+      const depth = smoothstep(0, 0.2 * this.height, screenY);
+      const alpha = guideOpacity(km, tier, this.revealed, layout.millionPx) * globalAlpha * depth;
       if (alpha < 0.005) continue;
-      this.guideStates.push({ km, tier, alpha, altitude: altitudes[i]! });
+      this.guideStates.push({ km, tier, alpha, altitude });
       for (let k = 0; k < xs.length; k++) {
-        position.setXYZ(v, xs[k]!, surface[k]! + altitudes[i]!, 0);
+        position.setXYZ(v, xs[k]!, surface[k]! + altitude, 0);
         color.setXYZW(v, 1, 1, 1, alpha);
         v++;
       }
@@ -646,7 +689,7 @@ export class WorldRenderer {
     const scale = new THREE.Vector3();
     const identity = new THREE.Quaternion();
     const color = new THREE.Color();
-    const spawnY = this.height + SPAWN_MARGIN_PX;
+    const spawnY = this.travel + this.height + SPAWN_MARGIN_PX; // just above the current viewport
     const focusIndex = this.anchorId === null ? -1 : this.index.get(this.anchorId) ?? -1;
     const hidden = matrix.clone().compose(new THREE.Vector3(OFFSCREEN, OFFSCREEN, 0), identity, new THREE.Vector3(1, 1, 1));
 
@@ -739,12 +782,15 @@ export class WorldRenderer {
     // Same mapping as toScreen(), inlined so the loop allocates nothing.
     const cx = rect.left + this.width / 2;
     const cy = rect.top + this.height / 2;
+    const base = this.baseCenter();
+    const camX = base.x + this.offX;
+    const camY = base.y + this.offY;
     let best = -1;
     let bestD = Infinity;
     for (let i = 0; i < this.current.length; i++) {
       const p = this.current[i];
       if (!p) continue;
-      const d = Math.hypot(cx + (p.x - this.camX) * zoom - clientX, cy - (p.y - this.camY) * zoom - clientY);
+      const d = Math.hypot(cx + (p.x - camX) * zoom - clientX, cy - (p.y - camY) * zoom - clientY);
       if (d <= this.hitRadius[i]! * zoom && d < bestD) {
         best = i;
         bestD = d;
@@ -756,7 +802,8 @@ export class WorldRenderer {
   private toScreen(x: number, y: number): { x: number; y: number } {
     const rect = this.rect;
     const zoom = this.camera.zoom;
-    return { x: rect.left + this.width / 2 + (x - this.camX) * zoom, y: rect.top + this.height / 2 - (y - this.camY) * zoom };
+    const base = this.baseCenter();
+    return { x: rect.left + this.width / 2 + (x - base.x - this.offX) * zoom, y: rect.top + this.height / 2 - (y - base.y - this.offY) * zoom };
   }
 
   private resize(): void {
@@ -770,10 +817,12 @@ export class WorldRenderer {
     this.camera.top = this.height / 2;
     this.camera.bottom = -this.height / 2;
     if (this.focusT === 0) {
-      this.camX = this.width / 2;
-      this.camY = this.height / 2;
+      this.offX = 0;
+      this.offY = 0;
     }
-    this.layout = computeLayout(this.width, this.height, this.exploration.currentProgress);
+    this.layout = computeLayout(this.width, this.height);
+    this.travel = travelPx(this.layout, this.revealed);
+    this.restDirty = true;
 
     if (this.earth) {
       this.scene.remove(this.earth.group);

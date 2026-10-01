@@ -10,9 +10,10 @@ import { clamp01 } from "./skyLayout";
  */
 /**
  * Progress gained per 100 normalized wheel pixels: the full journey (daytime sky -> Moon -> the
- * million-km field -> deep space) is ~80 wheel notches, about 0.3-2.9 million km per notch in the field.
+ * million-km field -> deep space) is 160 wheel notches; ~125 of them cross the million-km field at
+ * constant speed (~0.8M km per notch for a 100M km domain).
  */
-export const PROGRESS_PER_100PX = 0.0125;
+export const PROGRESS_PER_100PX = 1 / 160;
 /** Largest per-event wheel delta honoured (px), so one burst cannot jump the whole journey. */
 export const MAX_WHEEL_DELTA = 240;
 export const PROGRESS_EASING_TAU_MS = 140;

@@ -243,14 +243,34 @@ async function main() {
     const target = await dbg("progressForKm", km);
     for (let i = 0; i < 400; i++) {
       const p = (await dbg("progress")).target;
-      if (Math.abs(p - target) < 0.008) break;
+      if (km <= 0 ? p === 0 : Math.abs(p - target) < 0.008) break; // "the top" means exactly 0
       await wheel(1 * Math.sign(target - p), Math.abs(p - target) > 0.05 ? 120 : 40);
       if (seen) for (const [id, ph] of Object.entries(await allPhases())) (seen[id] ??= new Set()).add(ph);
     }
   };
   const visibleGuideKms = async () => (await dbg("visibleGuides")).map((g) => g.km);
+  const earthOnScreen = async () => (await dbg("earthCrestScreenY")) < VIEW.height;
+  /** The viewport shows only the local distance window, never the whole field. */
+  const checkLocalWindow = async (label) => {
+    const { revealedKm } = await dbg("progress");
+    const w = await dbg("viewWindowKm");
+    const guides = await visibleGuideKms();
+    check(w.highKm - w.lowKm < 10e6 && w.lowKm > revealedKm - 8e6 && w.highKm < revealedKm + 4e6,
+      `${label}: viewport is a local window ${(w.lowKm / 1e6).toFixed(1)}M-${(w.highKm / 1e6).toFixed(1)}M around ${(revealedKm / 1e6).toFixed(1)}M`);
+    check(guides.length > 0 && guides.length <= 12 && guides.every((km) => km >= w.lowKm - 1e6 && km <= w.highKm + 1e6),
+      `${label}: only local guides drawn (${guides.length}: ${guides.map((k) => k / 1e6).join(",")})`);
+    const spacing = (await dbg("visibleGuides")).map((g) => g.altitude).sort((a, b) => a - b);
+    check(spacing.every((a, i) => i === 0 || a - spacing[i - 1] > 60), `${label}: each million km has real spacing (${spacing.slice(1).map((a, i) => Math.round(a - spacing[i])).join(",")} px)`);
+    return { window: [Math.round(w.lowKm / 1e5) / 10, Math.round(w.highKm / 1e5) / 10], guides: guides.length };
+  };
   const parseKm = (text) => Number(text.replace(/[^0-9]/g, ""));
   const positionsOf = async (ids) => Object.fromEntries(await Promise.all(ids.map(async (id) => [id, await dbg("screenPositionOf", id)])));
+  /** World positions (screen position + camera travel): comparable across different camera positions. */
+  const worldPositionsOf = async (ids) => {
+    const travel = await dbg("travelPx");
+    const screen = await positionsOf(ids);
+    return Object.fromEntries(ids.map((id) => [id, screen[id] && { x: +screen[id].x.toFixed(3), y: +(VIEW.height + travel - screen[id].y).toFixed(3) }]));
+  };
 
   // ── 1-3. Fresh load: Earth arc, and NO asteroid falls before the user scrolls ─────────────
   await page.goto(`${WEB}/#/`);
@@ -299,6 +319,13 @@ async function main() {
   check(await dbg("moonLabelVisible"), "Moon label shown with the Moon");
   const night = await captureState("state2-night-moon", "Night transition: Moon distance reached");
   check(luminance(night.zenith) < 45, `night sky when the Moon appears (${night.zenith})`);
+  check(await earthOnScreen(), "Earth still visible when the Moon appears");
+  const moonPos = await dbg("moonScreenPosition");
+  check(moonPos.y > 0 && moonPos.y < VIEW.height, `Moon on screen ${JSON.stringify(moonPos)}`);
+  check((await page.textContent(".moon-title")) === "MOON DISTANCE" && (await page.textContent(".moon-km")) === "384,400 km", "Moon labelled MOON DISTANCE / 384,400 km");
+  const moonLabelBox = await page.$eval(".moon-label", (n) => n.getBoundingClientRect().toJSON());
+  check(Math.abs(moonLabelBox.right - (moonPos.x - 18)) < 3 && Math.abs(moonLabelBox.top - (moonPos.y - 14)) < 3, `Moon label next to the Moon ${JSON.stringify(moonPos)}`);
+  check(!(await dbg("worldIds")).includes("moon") && (await dbg("worldIds")).length === realIds.length, "Moon is not a data record");
   step("Moon appears when the frontier reaches 384,400 km", { revealedKm: Math.round((await dbg("progress")).revealedKm), zenith: night.zenith });
 
   await scrollToKm(1.6e6);
@@ -314,10 +341,15 @@ async function main() {
   const near = await checkEligibility("~9M km");
   check(near.shown.length > 0 && near.shown.length < realIds.length / 4, `only the nearest few are shown at ${near.revealedKm.toFixed(0)} km: ${near.shown.join(",")}`);
   const early = await visibleGuideKms();
-  const everyMillion = Array.from({ length: Math.floor(near.revealedKm / 1e6) }, (_, i) => (i + 1) * 1e6);
-  check(everyMillion.every((km) => early.includes(km)), `every 1M guide up to ${near.revealedKm.toFixed(0)} km is drawn: ${early.map((k) => k / 1e6).sort((a, b) => a - b).join(",")}`);
+  const win9 = await dbg("viewWindowKm");
+  const everyMillion = [];
+  for (let km = Math.ceil(win9.lowKm / 1e6 + 1) * 1e6; km <= near.revealedKm; km += 1e6) everyMillion.push(km);
+  check(everyMillion.length >= 3 && everyMillion.every((km) => early.includes(km)), `every 1M guide in the local window is drawn: ${early.map((k) => k / 1e6).sort((a, b) => a - b).join(",")}`);
   const earlyLabels = await dbg("guideLabels");
-  check(["1M km", "2M km", "3M km", "4M km", "5M km"].every((t) => earlyLabels.includes(t)), `early field labels each million: ${JSON.stringify(earlyLabels)}`);
+  check(everyMillion.every((km) => earlyLabels.includes(`${km / 1e6}M km`)), `each local million is labelled: ${JSON.stringify(earlyLabels)}`);
+  const local9 = await checkLocalWindow("~9M km");
+  check(!(await earthOnScreen()), "Earth has been left behind by ~9M km");
+  check(!(await dbg("moonLabelVisible")), "the Moon has been passed by ~9M km");
   check(near.shown[0] === realIds.slice().sort((a, b) => missKm(a) - missKm(b))[0], "the closest asteroid appears first");
   const s1 = await captureState("state4-early-field", "Early field: 1M increments, closest asteroid");
   step("5. only distance-eligible asteroids appear; 1M increments visible", { revealedKm: Math.round(near.revealedKm), shown: near.shown.map((id) => [id, Math.round(missKm(id))]) });
@@ -326,7 +358,7 @@ async function main() {
   const frontierSeen = [];
   let lastShown = near.shown.length;
   let lastLum = luminance(s1.zenith);
-  for (const [km, name, label] of [[23.5e6, "state5-field-23M", "Field around 23M km"], [50e6, "state6-field-50M", "Deeper field (~50M km)"], [1.2e8, "state7-deep", "Deep space: every asteroid"]]) {
+  for (const [km, name, label] of [[20.3e6, "state5-field-20M", "Local field around 20M km"], [50.3e6, "state6-field-50M", "Local field around 50M km"], [1.2e8, "state7-deep-100M", "Deep space around 100M km"]]) {
     const seen = {};
     await scrollToKm(km, seen);
     for (const [id, set] of Object.entries(await watchTransition(name))) for (const ph of set) (seen[id] ??= new Set()).add(ph);
@@ -345,8 +377,10 @@ async function main() {
     const strongest = guides.reduce((m, g) => (g.alpha > m.alpha ? g : m), guides[0]);
     check(strongest && strongest.km <= e.revealedKm && e.revealedKm - strongest.km < 1.5e6,
       `${name}: the explored distance is the strongest guide (${strongest?.km / 1e6}M at frontier ${(e.revealedKm / 1e6).toFixed(2)}M)`);
-    check(guides.every((g) => g.km <= e.revealedKm + 2e6), `${name}: no unreached guides far ahead`);
-    for (let m = 10; m * 1e6 <= e.revealedKm; m += 10) check(guides.some((g) => g.km === m * 1e6), `${name}: major ${m}M guide drawn`);
+    check(guides.every((g) => g.km <= e.revealedKm + 3e6), `${name}: no unreached guides far ahead`);
+    const local = await checkLocalWindow(name);
+    frontierSeen.at(-1).push(local.window);
+    check(!(await earthOnScreen()), `${name}: no Earth/ground in deep field`);
     const s = await captureState(name, label);
     check(luminance(s.zenith) < lastLum, `${name}: sky darkens toward space (${lastLum.toFixed(1)} -> ${luminance(s.zenith).toFixed(1)})`);
     lastLum = luminance(s.zenith);
@@ -367,8 +401,8 @@ async function main() {
   step("8. distance label progression", { labels: labelSteps.map((v) => `${v / 1e6}M`) });
 
   // Asteroid labels carry the ACTUAL miss distance (never the rounded grid value).
-  await scrollToKm(1.2e8);
-  await waitStill("deep for labels");
+  await scrollToKm(20e6);
+  await waitStill("20M for labels");
   const asteroidLabels = await page.$$eval(".asteroid-label:not([hidden])", (n) => n.map((x) => [x.querySelector(".label-name")?.textContent, x.querySelector(".label-detail")?.textContent]));
   const byName = new Map(worldApi.data.map((r) => [r.name, r]));
   let labelChecks = 0;
@@ -379,21 +413,15 @@ async function main() {
     report.dataAccuracy.push({ view: "label", neows_id: r.neows_id, field: "miss_distance", api: expected, shown: detail });
     labelChecks++;
   }
-  check(labelChecks >= 10, `asteroid labels checked against the API (${labelChecks})`);
+  check(labelChecks >= 4, `asteroid labels checked against the API (${labelChecks})`);
   step("12. asteroid labels show the actual miss distance", { checked: labelChecks });
 
-  // ── 9. Moon distance reference ─────────────────────────────────────────────────────────
-  const moonPos = await dbg("moonScreenPosition");
-  check(await page.isVisible(".moon-label"), "Moon label visible");
-  check((await page.textContent(".moon-title")) === "MOON DISTANCE" && (await page.textContent(".moon-km")) === "384,400 km", "Moon labelled MOON DISTANCE / 384,400 km");
-  const moonLabelBox = await page.$eval(".moon-label", (n) => n.getBoundingClientRect().toJSON());
-  check(Math.abs(moonLabelBox.left - (moonPos.x + 16)) < 3 && Math.abs(moonLabelBox.top - (moonPos.y - 14)) < 3, `Moon label next to the Moon ${JSON.stringify(moonPos)}`);
-  check(!(await dbg("worldIds")).includes("moon") && (await dbg("worldIds")).length === realIds.length, "Moon is not a data record");
+  // ── 9. World heights of every real asteroid (distance ordering is checked below) ───────────
   const ladder = [];
   for (const id of realIds) ladder.push([missKm(id), await dbg("restAltitudeOf", id)]);
   const domain = await dbg("distanceDomain");
   const layout = await page.evaluate(() => window.__ASTEROID_DEBUG__.earthCrestY());
-  step("9. Moon distance reference", { moonScreen: moonPos, domain, earthCrest: layout });
+  step("9. world heights captured", { domain, earthCrestWorldY: layout });
 
   // ── 10. PHA hazard badge on real PHA=true objects only ───────────────────────────────────
   await scrollToKm(1.2e8);
@@ -405,7 +433,10 @@ async function main() {
     check(shown === (r.encounter.is_potentially_hazardous === true), `${r.neows_id}: hazard badge ${shown} for PHA ${r.encounter.is_potentially_hazardous}`);
   }
   const pha = worldApi.data.find((r) => r.neows_id === "2138971") ?? worldApi.data.find((r) => r.encounter.is_potentially_hazardous === true);
+  await scrollToKm(missKm(pha.neows_id) + 1.5e6); // bring its local region into view
+  await waitStill("PHA object in view");
   const phaPos = await dbg("screenPositionOf", pha.neows_id);
+  check(phaPos.y > 40 && phaPos.y < VIEW.height - 40, `PHA object on screen in its local window ${JSON.stringify(phaPos)}`);
   const badge = await page.screenshot({ clip: { x: Math.round(phaPos.x) - 4, y: Math.round(phaPos.y) - 30, width: 34, height: 34 } });
   writeFileSync(join(ARTIFACTS, "hazard-badge.png"), badge);
   const yellow = await page.evaluate(async (b64) => {
@@ -438,8 +469,10 @@ async function main() {
   step("10. PHA hazard badge", { phaTrue: hazardRows.filter((r) => r[1] === true).map((r) => r[0]), badgePixels: yellow });
 
   // ── 11-12. Scroll backward: farther asteroids retreat and disappear ───────────────────────
+  await scrollToKm(1.2e8);
+  await waitStill("deep before backward");
   const deepShown = (await checkEligibility("before backward")).shown;
-  const deepPositions = await positionsOf(realIds);
+  const deepPositions = await worldPositionsOf(realIds);
   await scrollToKm(16e6);
   const back = await watchTransition("backward to ~16M km", 50);
   await waitStill("backward");
@@ -457,9 +490,60 @@ async function main() {
   await waitStill("forward again");
   const again = await checkEligibility("forward again");
   check(JSON.stringify(again.shown.sort()) === JSON.stringify([...deepShown].sort()), "the same asteroids are shown again");
-  const againPositions = await positionsOf(realIds);
+  const againPositions = await worldPositionsOf(realIds);
   check(realIds.every((id) => JSON.stringify(againPositions[id]) === JSON.stringify(deepPositions[id])), "re-revealed asteroids rest at identical positions");
   step("13-14. forward again re-reveals deterministically");
+
+  // ── Acceptance example: a real asteroid is passed and comes back ───────────────────────────
+  {
+    const id = ST;
+    const x = missKm(id);
+    const go = async (km, label) => { // exact targets, so "the same distance" means exactly the same camera
+      await dbg("exploreTo", await dbg("progressForKm", km));
+      await waitStill(label);
+    };
+    await go(x - 1.2e6, "short of ST");
+    check((await dbg("phaseOf", id)) === "HIDDEN", `${id} absent while the revealed distance < ${x}`);
+    await go(x + 1.2e6, "at ST");
+    const atRest = await dbg("screenPositionOf", id);
+    check((await dbg("phaseOf", id)) === "SETTLED" && atRest.y > 0 && atRest.y < VIEW.height, `${id} settled in view at its distance ${JSON.stringify(atRest)}`);
+    await go(x + 20e6, "far past ST");
+    const passed = await dbg("screenPositionOf", id);
+    check((await dbg("phaseOf", id)) === "SETTLED" && passed.y > VIEW.height, `${id} left the viewport behind the traveller (y ${Math.round(passed.y)})`);
+    await go(x + 1.2e6, "back at ST");
+    const back = await dbg("screenPositionOf", id);
+    check(Math.abs(back.y - atRest.y) < 1 && Math.abs(back.x - atRest.x) < 1, `${id} returns to the same place in view (${Math.round(atRest.y)} -> ${Math.round(back.y)})`);
+    step("acceptance: a real asteroid is passed and returns", { neows_id: id, miss_distance_km: x, atRest, passedY: Math.round(passed.y) });
+  }
+
+  // ── Full reversibility: TOP -> 10M -> 30M -> 60M -> 100M -> 60M -> 30M -> 10M -> TOP, twice ──
+  const objects0 = await dbg("objectCounts");
+  const route = [];
+  for (let lap = 0; lap < 2; lap++) {
+    for (const km of [0, 10e6, 30e6, 60e6, 1.2e8, 60e6, 30e6, 10e6, 0]) {
+      await scrollToKm(km);
+      await waitStill(`lap ${lap} ${km}`);
+      await checkEligibility(`lap ${lap} at ${km / 1e6}M`);
+      const objects = await dbg("objectCounts");
+      check(JSON.stringify(objects) === JSON.stringify(objects0), `lap ${lap} ${km / 1e6}M: no duplicated/missing objects ${JSON.stringify(objects)}`);
+      const onEarth = await earthOnScreen();
+      if (km === 0) {
+        const p = await dbg("progress");
+        check(p.revealedKm === 0 && (await dbg("travelPx")) === 0, `lap ${lap}: back at the top`);
+        check(onEarth && Math.abs((await dbg("earthCrestScreenY")) - VIEW.height * 0.7) < 2, `lap ${lap}: the Earth is back in its starting place`);
+        check((await dbg("moonOpacity")) === 0 && !(await dbg("moonLabelVisible")), `lap ${lap}: no Moon at the top`);
+        check(Object.values(await allPhases()).every((ph) => ph === "HIDDEN"), `lap ${lap}: every asteroid hidden at the top`);
+      } else {
+        check(!onEarth, `lap ${lap} ${km / 1e6}M: Earth not on screen`);
+        await checkLocalWindow(`lap ${lap} ${km / 1e6}M`);
+      }
+      route.push([lap, km / 1e6, Math.round((await dbg("progress")).revealedKm / 1e5) / 10, onEarth]);
+    }
+  }
+  const top = await captureState("state8-return-to-earth", "Returned to Earth after two full journeys");
+  check(luminance(top.zenith) > 120, `bright day sky again at the top (${top.zenith})`);
+  await diagnostics("after two full journeys");
+  step("full reversibility: TOP -> 100M -> TOP twice", { route });
 
   // ── Distance ordering on the real population ─────────────────────────────────────────
   const altitudes = realIds.map((id) => [missKm(id), ladder.find(([km]) => km === missKm(id))[1], id]).sort((a, b) => a[0] - b[0]);
@@ -480,8 +564,8 @@ async function main() {
   check(threshold.at.revealedKm >= demoKm && threshold.at.phase === "SETTLED", `at threshold: ${demoId} revealed at ${threshold.at.revealedKm}`);
   report.thresholdDemo = { neows_id: demoId, miss_distance_km: demoKm, ...threshold };
   step("exact threshold on a real non-round distance", report.thresholdDemo);
-  await scrollToKm(1.2e8);
-  await waitStill("deep before focus");
+  await scrollToKm(18.5e6);
+  await waitStill("local window with ST and TW54 before focus");
 
   // ── 15-16. Select a real asteroid by clicking it; callouts match the API ─────────────────
   const preFocus = { progress: await dbg("progress"), phases: await allPhases() };
@@ -586,10 +670,8 @@ async function main() {
     await page.setViewportSize({ width: w, height: h });
     await sleep(200);
     const crestNow = await dbg("earthCrestY");
-    const pr = (await dbg("progress")).current;
-    const sm = pr * pr * (3 - 2 * pr);
-    const expected = h * (0.3 + (0.17 - 0.3) * sm);
-    check(Math.abs(crestNow - expected) < 2, `${w}x${h}: Earth stays the lower anchor (${crestNow.toFixed(1)} vs ${expected.toFixed(1)})`);
+    const expected = h * 0.3;
+    check(Math.abs(crestNow - expected) < 2, `${w}x${h}: the Earth stays the world's base (${crestNow.toFixed(1)} vs ${expected.toFixed(1)})`);
   }
   await waitStill("after resizes");
   await checkEligibility("after resizes");

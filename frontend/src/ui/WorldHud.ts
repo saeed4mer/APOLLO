@@ -76,8 +76,9 @@ export class WorldHud {
       "Scrolling travels outward from Earth: it reveals real distance, from 0 km to beyond the farthest asteroid. " +
         "An asteroid appears only once the revealed distance reaches its exact NeoWs miss distance (closest first), " +
         "and retreats again if you scroll back below it.",
-      "Height above the Earth arc follows each asteroid's exact miss distance. The mapping is focused on the distance being explored: " +
-        "the revealed frontier sits near the top, nearer distances are compressed toward Earth, and nearer objects always rest lower.",
+      "The distance field is a long virtual world: each million kilometres has the same height in it, and scrolling travels " +
+        "through it, so the screen only shows the region around the distance being explored. The Earth is left behind and returns when you scroll back.",
+      "Each asteroid's height in that world follows its exact NeoWs miss distance: nearer objects always rest lower.",
       "Dashed arcs every 1,000,000 km are visual distance guides (distance from Earth), not orbits or trajectories. " +
         "Guide labels are rounded to whole millions; asteroid positions and labels use the exact distance.",
       "The Moon marks the Earth-Moon distance (384,400 km) for scale. It appears when the journey reaches that distance and is not part of the asteroid data.",

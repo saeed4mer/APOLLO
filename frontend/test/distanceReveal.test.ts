@@ -207,11 +207,11 @@ describe("E. resting position follows the actual miss distance", () => {
     travelTo(1e8);
     const layout = renderer.viewLayout;
     for (const r of records) {
-      const rest = restPosition(layout, r, renderer.distanceView);
-      expect(renderer.restAltitudeOf(r.neows_id)).toBe(altitudePx(layout, r.encounter.miss_distance_km, renderer.distanceView));
+      const rest = restPosition(layout, r);
+      expect(renderer.restAltitudeOf(r.neows_id)).toBe(altitudePx(layout, r.encounter.miss_distance_km));
       const p = renderer.screenPositionOf(r.neows_id)!;
       expect(p.x).toBeCloseTo(rest.x, 6);
-      expect(p.y).toBeCloseTo(layout.height - rest.y, 6); // screen y grows downward
+      expect(p.y).toBeCloseTo(layout.height - (rest.y - renderer.travelPx), 6); // screen y grows downward; the camera has travelled
     }
     renderer.dispose();
   });
@@ -307,16 +307,21 @@ describe("I. Moon landmark", () => {
     expect(MOON_DISTANCE_KM).toBe(384_400);
     const records = fixtureRecords();
     const { renderer, travelTo } = newRenderer(records);
-    travelTo(5e6);
+    travelTo(6e5);
     const layout = renderer.viewLayout;
     const moon = renderer.moonScreenPosition();
     const x = moon.x;
     const surface = layout.cy + Math.sqrt(layout.radius ** 2 - Math.min(Math.abs(x - layout.cx), layout.radius) ** 2);
     expect(renderer.moonOpacity).toBe(1);
-    expect(layout.height - moon.y - surface).toBeCloseTo(altitudePx(layout, MOON_DISTANCE_KM, renderer.distanceView), 6);
+    expect(moon.y).toBeGreaterThan(0); // on screen at this stage
+    expect(moon.y).toBeLessThan(layout.height);
+    expect(layout.height - moon.y + renderer.travelPx - surface).toBeCloseTo(altitudePx(layout, MOON_DISTANCE_KM), 6);
     expect(records.some((r) => r.neows_id === "moon")).toBe(false);
     renderer.dispose();
 
+    // A real viewport size for the app's canvas host (jsdom lays nothing out).
+    const widthSpy = vi.spyOn(HTMLElement.prototype, "clientWidth", "get").mockReturnValue(1600);
+    const heightSpy = vi.spyOn(HTMLElement.prototype, "clientHeight", "get").mockReturnValue(900);
     const root = document.createElement("div");
     document.body.appendChild(root);
     const app = createApp(root, {
@@ -328,13 +333,18 @@ describe("I. Moon landmark", () => {
     frames(5);
     const label = root.querySelector<HTMLElement>(".moon-label")!;
     expect(label.hidden).toBe(true); // not at load
-    app.renderer.exploration.setTarget(progressForDistance(2e6, app.renderer.distanceDomain));
+    app.renderer.exploration.setTarget(progressForDistance(6e5, app.renderer.distanceDomain));
     frames(SETTLE);
     expect(label.hidden).toBe(false);
     expect(root.querySelector(".moon-title")?.textContent).toBe("MOON DISTANCE");
     expect(root.querySelector(".moon-km")?.textContent).toBe("384,400 km");
+    app.renderer.exploration.setTarget(progressForDistance(2e7, app.renderer.distanceDomain));
+    frames(SETTLE * 2);
+    expect(label.hidden).toBe(true); // passed: the Moon is behind the traveller
     app.dispose();
     root.remove();
+    widthSpy.mockRestore();
+    heightSpy.mockRestore();
   });
 });
 
@@ -383,7 +393,7 @@ describe("K. million-km distance guides", () => {
     for (const km of [13e6, 5e7, 1e8]) {
       travelTo(km);
       const layout = renderer.viewLayout;
-      const alt = (d: number) => altitudePx(layout, d, renderer.distanceView);
+      const alt = (d: number) => altitudePx(layout, d);
       if (renderer.phaseOf("a") === "SETTLED") {
         expect(renderer.restAltitudeOf("a")!).toBeGreaterThan(alt(12e6));
         expect(renderer.restAltitudeOf("a")!).toBeLessThan(alt(13e6));
@@ -405,7 +415,8 @@ describe("K. million-km distance guides", () => {
     expect(alpha.get(22e6)!).toBeGreaterThan(alpha.get(21e6)!);
     expect(alpha.get(20e6)!).toBeGreaterThan(alpha.get(19e6) ?? 0); // a major stays stronger than its minor neighbour
     expect(alpha.get(23e6)!).toBeGreaterThan(alpha.get(24e6) ?? 0);
-    for (const km of [26e6, 30e6, 50e6, 1e8]) expect(alpha.has(km)).toBe(false);
+    expect(alpha.get(26e6) ?? 0).toBeLessThan(0.03); // unreached: faint at most
+    for (const km of [27e6, 30e6, 50e6, 1e8, 10e6, 1e6]) expect(alpha.has(km)).toBe(false); // outside the local window
     expect(Math.max(...alpha.values())).toBeLessThanOrEqual(0.75); // never louder than the scene
     renderer.dispose();
   });
@@ -416,34 +427,37 @@ describe("K. million-km distance guides", () => {
       const alphas = kms.map((km) => guideOpacity(km, guideTier(km), f, 50));
       const strongest = kms[alphas.indexOf(Math.max(...alphas))]!;
       expect(Math.abs(strongest - f)).toBeLessThan(1e6); // the guide being explored, never a major 2M+ back
-      expect(guideOpacity(Math.ceil((f + 2e6) / 1e6) * 1e6, "major", f, 50)).toBeLessThan(0.005); // 2M+ ahead: hidden
+      expect(guideOpacity(Math.ceil((f + 2e6) / 1e6) * 1e6, "major", f, 120)).toBeLessThan(0.05); // 2M+ ahead: faint
+      expect(guideOpacity(Math.ceil((f + 4e6) / 1e6) * 1e6, "major", f, 120)).toBeLessThan(0.005); // 4M+ ahead: gone
     }
   });
 
-  it("the field grows with depth: more guides at 50M than at 10M; every major up to the frontier is drawn", () => {
+  it("the viewport shows only the local window: ~7 guides around the frontier at 10M, 20M, 50M and 100M, never 1M..100M", () => {
     const { renderer, travelTo } = newRenderer(fixtureRecords());
-    travelTo(10.5e6);
-    const at10 = renderer.visibleGuides.length;
-    travelTo(1e8);
-    const deep = renderer.visibleGuides;
-    expect(deep.length).toBeGreaterThan(at10);
-    for (let m = 10; m <= 100; m += 10) expect(deep.some((g) => g.km === m * 1e6)).toBe(true);
-    // LOD: minors fade where the field is dense, majors never do.
-    const major = deep.find((g) => g.km === 50e6)!;
+    for (const [km, low, high] of [[10.5e6, 4e6, 14e6], [20.3e6, 14e6, 24e6], [50.3e6, 44e6, 54e6], [1e8, 93e6, 1e8]] as const) {
+      travelTo(km);
+      const kms = renderer.visibleGuides.map((g) => g.km);
+      expect(kms.length).toBeGreaterThanOrEqual(4);
+      expect(kms.length).toBeLessThanOrEqual(12);
+      for (const g of kms) {
+        expect(g).toBeGreaterThanOrEqual(low);
+        expect(g).toBeLessThanOrEqual(high);
+      }
+      const w = renderer.viewWindowKm;
+      expect(w.highKm - w.lowKm).toBeLessThan(10e6);
+      expect(w.lowKm).toBeLessThan(km);
+      expect(w.highKm).toBeGreaterThan(km);
+      for (let m = 10; m <= 100; m += 10) if (m * 1e6 > w.lowKm + 2e6 && m * 1e6 <= km) expect(kms).toContain(m * 1e6); // majors in view are drawn
+    }
+    const major = renderer.visibleGuides.find((g) => g.km === 1e8)!;
     expect(major.alpha).toBeGreaterThanOrEqual(GUIDE_BASE.major * 0.99);
     renderer.dispose();
   });
 
-  it("labels are progressive: early field labels each million; later, the frontier neighbourhood plus 10M/5M markers", () => {
-    const g = (km: number, alpha = 0.2) => ({ km, tier: guideTier(km), alpha, altitude: 0 });
-    const early = guideLabelCandidates([1, 2, 3, 4, 5, 6, 7, 8, 9].map((m) => g(m * 1e6)), 8.4e6).map((x) => x.km);
-    expect(early).toEqual(expect.arrayContaining([1e6, 2e6, 3e6, 4e6, 7e6, 8e6]));
-    expect(early).not.toContain(9e6); // not yet reached
-    const later = guideLabelCandidates(Array.from({ length: 30 }, (_, i) => g((i + 1) * 1e6)), 23.4e6).map((x) => x.km);
-    expect(later.slice(0, 4)).toEqual([23e6, 22e6, 21e6, 10e6]); // nearest the frontier first, then majors
-    expect(later).toEqual(expect.arrayContaining([5e6, 15e6, 20e6]));
-    expect(later).not.toContain(13e6); // a far minor is not labelled
-    expect(later.some((km) => km > 23.4e6)).toBe(false);
+  it("every guide in the local window can carry a label, nearest the frontier first; very faint guides stay unlabelled", () => {
+    const g = (km: number, alpha: number) => ({ km, tier: guideTier(km), alpha, altitude: 0 });
+    const guides = [g(17e6, 0.1), g(18e6, 0.12), g(19e6, 0.2), g(20e6, 0.4), g(21e6, 0.12), g(22e6, 0.02)];
+    expect(guideLabelCandidates(guides, 20.3e6).map((x) => x.km)).toEqual([20e6, 21e6, 19e6, 18e6, 17e6]);
   });
 
   it("label placement never overlaps and is bounded", () => {
@@ -466,9 +480,88 @@ describe("K. million-km distance guides", () => {
     expect(guideDistances(renderer.distanceDomain).at(-1)!).toBeGreaterThan(330e6);
     travelTo(renderer.distanceDomain.maxKm);
     expect(renderer.phaseOf("far")).toBe("SETTLED");
-    const alt = (d: number) => altitudePx(renderer.viewLayout, d, renderer.distanceView);
+    const alt = (d: number) => altitudePx(renderer.viewLayout, d);
     expect(renderer.restAltitudeOf("far")!).toBeGreaterThan(alt(330e6));
     expect(renderer.restAltitudeOf("far")!).toBeLessThan(alt(331e6));
+    renderer.dispose();
+  });
+});
+
+describe("the renderer travels through the distance world", () => {
+  it("the Earth recedes and leaves the viewport, and returns exactly when scrolling back (repeatably)", () => {
+    const { renderer, travelTo } = newRenderer(fixtureRecords());
+    const h = renderer.viewLayout.height;
+    for (let lap = 0; lap < 3; lap++) {
+      travelTo(0);
+      expect(renderer.travelPx).toBe(0);
+      expect(renderer.earthCrestScreenY()).toBeCloseTo(h * 0.7, 6); // crest 30% up the first screen
+      travelTo(MOON_DISTANCE_KM * 1.2);
+      expect(renderer.earthCrestScreenY()).toBeLessThan(h); // still visible at the Moon
+      travelTo(3e6);
+      expect(renderer.earthCrestScreenY()).toBeGreaterThan(h); // left behind
+      travelTo(5e7);
+      expect(renderer.earthCrestScreenY()).toBeGreaterThan(h * 5); // several screens behind in deep space
+    }
+    travelTo(0);
+    expect(renderer.earthCrestScreenY()).toBeCloseTo(h * 0.7, 6);
+    renderer.dispose();
+  });
+
+  it("a settled asteroid is passed: it leaves the viewport as the user travels on, and returns to the same place on the way back", () => {
+    const records = [record("a", 12_400_000), record("b", 47_382_615)];
+    const { renderer, travelTo } = newRenderer(records);
+    travelTo(13e6);
+    const before = renderer.screenPositionOf("a")!;
+    expect(before.y).toBeGreaterThan(0);
+    expect(before.y).toBeLessThan(renderer.viewLayout.height);
+    travelTo(40e6);
+    expect(renderer.phaseOf("a")).toBe("SETTLED");
+    expect(renderer.screenPositionOf("a")!.y).toBeGreaterThan(renderer.viewLayout.height); // behind the traveller
+    travelTo(13e6);
+    const after = renderer.screenPositionOf("a")!;
+    expect(after.x).toBeCloseTo(before.x, 6);
+    expect(after.y).toBeCloseTo(before.y, 6);
+    renderer.dispose();
+  });
+
+  it("only the local window of guides is processed (culling), however deep the journey", () => {
+    const { renderer, travelTo } = newRenderer(fixtureRecords());
+    for (const km of [2e6, 20e6, 50e6, 1e8]) {
+      travelTo(km);
+      expect(renderer.guidesProcessed).toBeGreaterThan(0);
+      expect(renderer.guidesProcessed).toBeLessThanOrEqual(12);
+    }
+    renderer.dispose();
+  });
+
+  it("deep in the field, a newly reached asteroid still falls in from above the viewport", () => {
+    const records = [record("deep", 40_000_000)];
+    const { renderer, travelTo } = newRenderer(records);
+    travelTo(39.9e6);
+    renderer.exploration.setTarget(progressForDistance(40.1e6, renderer.distanceDomain));
+    const ys: number[] = [];
+    for (let f = 0; f < SETTLE; f++) {
+      frames(1);
+      const p = renderer.screenPositionOf("deep");
+      if (p) ys.push(p.y);
+    }
+    expect(ys.length).toBeGreaterThan(10);
+    expect(ys[0]!).toBeLessThan(0); // enters above the top edge
+    for (let i = 1; i < ys.length; i++) expect(ys[i]!).toBeGreaterThanOrEqual(ys[i - 1]! - 1e-6); // moves down onto its rest
+    expect(ys.at(-1)!).toBeGreaterThan(0);
+    expect(ys.at(-1)!).toBeLessThan(renderer.viewLayout.height);
+    renderer.dispose();
+  });
+
+  it("world positions are static: the rest altitude of an asteroid does not change as the user travels", () => {
+    const records = [record("a", 12_400_000)];
+    const { renderer, travelTo } = newRenderer(records);
+    travelTo(13e6);
+    const alt = renderer.restAltitudeOf("a");
+    for (const km of [20e6, 80e6, 13e6]) {
+      travelTo(km);
+      expect(renderer.restAltitudeOf("a")).toBe(alt);
+    }
     renderer.dispose();
   });
 });
@@ -518,23 +611,23 @@ describe("journey: daytime sky -> night + Moon -> distance field -> deep space",
   });
 
   it("M. the sky goes bright day -> twilight -> night -> deep space, monotonically darker", () => {
-    const stages = [0, 0.12, 0.21, MOON_PROGRESS, FIELD_PROGRESS, 0.5, 1].map((p) => luminance(skyColors(p).zenith));
+    const stages = [0, 0.05, 0.115, MOON_PROGRESS, 0.17, FIELD_PROGRESS, 0.32, 1].map((p) => luminance(skyColors(p).zenith));
     for (let i = 1; i < stages.length; i++) expect(stages[i]!).toBeLessThan(stages[i - 1]!);
   });
 
-  it("the journey is staged and long: Moon at 26%, 1M at 32%, then at most ~3M km per notch to the maximum", () => {
+  it("the journey is staged and long: Moon at 16%, 1M at 22%, then a constant ~0.8M km per notch to the maximum", () => {
     const domain = { minKm: DISTANCE_MIN_KM, maxKm: 1e8 };
     expect(revealedDistanceKm(MOON_PROGRESS, domain)).toBeCloseTo(MOON_DISTANCE_KM, 3);
     expect(revealedDistanceKm(FIELD_PROGRESS, domain)).toBeCloseTo(1e6, 3);
     expect(revealedDistanceKm(1, domain)).toBe(1e8);
     const notches = 1 / PROGRESS_PER_100PX;
-    expect(notches).toBeGreaterThanOrEqual(60); // full journey: >= 60 wheel notches of 100 px
+    expect(notches).toBeGreaterThanOrEqual(150); // full journey: >= 150 wheel notches of 100 px
     const fieldNotches = (1 - FIELD_PROGRESS) * notches;
-    expect(fieldNotches).toBeGreaterThanOrEqual(40);
+    expect(fieldNotches).toBeGreaterThanOrEqual(120);
     // In the field no single notch jumps more than ~3M km (2.9M at the very end), and a burst event is bounded.
     for (let p = FIELD_PROGRESS; p < 1; p += PROGRESS_PER_100PX) {
       const step = revealedDistanceKm(Math.min(1, p + PROGRESS_PER_100PX), domain) - revealedDistanceKm(p, domain);
-      expect(step).toBeLessThan(3e6);
+      expect(step).toBeLessThan(0.85e6);
     }
     expect((MAX_WHEEL_DELTA / 100) * PROGRESS_PER_100PX).toBeLessThanOrEqual(0.03);
     for (const km of [5e5, 2e6, 23_417_892, 7.4e7]) expect(revealedDistanceKm(progressForDistance(km, domain), domain)).toBeCloseTo(km, 0);
@@ -635,7 +728,7 @@ describe("picking (screen-space discs)", () => {
     expect(onClick).toHaveBeenLastCalledWith(null);
     // "far" is hidden (beyond the frontier): its would-be rest position is not clickable.
     const layout = renderer.viewLayout;
-    const farRest = restPosition(layout, records[1]!, renderer.distanceView);
+    const farRest = restPosition(layout, records[1]!);
     click(farRest.x, layout.height - farRest.y);
     expect(onClick).toHaveBeenLastCalledWith(null);
     renderer.dispose();

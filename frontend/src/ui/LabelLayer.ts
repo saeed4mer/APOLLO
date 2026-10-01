@@ -9,10 +9,8 @@ import { formatKmCompact } from "./format";
 /** Most distance-guide labels shown at once, and the minimum vertical gap between them (px). */
 export const MAX_GUIDE_LABELS = 16;
 const GUIDE_LABEL_GAP_PX = 15;
-/** Distance guides within this range behind the frontier are labelled (the part being explored). */
-export const GUIDE_LABEL_WINDOW_KM = 3 * SCALE_STEP_KM;
-/** Below this frontier every revealed million gets a label (the early field: 1M, 2M, 3M ...). */
-export const EARLY_FIELD_KM = 10 * SCALE_STEP_KM;
+/** A guide needs at least this opacity to carry a label (very faint look-ahead guides stay unlabelled). */
+export const GUIDE_LABEL_MIN_ALPHA = 0.04;
 /** Space reserved left of the guide labels' column, and for the frontier label (px). */
 const SCALE_COLUMN_PX = 64;
 const FRONTIER_LABEL_PX = 230;
@@ -20,19 +18,15 @@ const FRONTIER_LABEL_PX = 230;
 const FRONTIER_LIFT_PX = 12;
 
 /**
- * Progressive distance-guide labels. Candidates are REVEALED guides that are either near the
- * frontier (within GUIDE_LABEL_WINDOW_KM), major (every 10M), mid (every 5M), or part of the early
- * field (frontier below 10M). Priority: nearest the frontier, then majors, then mids, then the rest.
- * Greedy placement keeps GUIDE_LABEL_GAP_PX between labels and away from the frontier label.
+ * Distance-guide labels. Only guides inside the viewport window are drawn, and in the distance
+ * world they are ~120 px apart, so every drawn guide can carry its own label ("17M km", "18M km",
+ * ...). Candidates are ordered nearest the frontier first; greedy placement keeps
+ * GUIDE_LABEL_GAP_PX between labels and away from the frontier label.
  */
 export function guideLabelCandidates(guides: readonly GuideState[], frontierKm: number): GuideState[] {
-  const rank = (g: GuideState): number => {
-    if (frontierKm - g.km <= GUIDE_LABEL_WINDOW_KM) return 0;
-    return g.tier === "major" ? 1 : g.tier === "mid" ? 2 : 3;
-  };
   return guides
-    .filter((g) => g.km <= frontierKm && (frontierKm - g.km <= GUIDE_LABEL_WINDOW_KM || g.tier !== "minor" || frontierKm < EARLY_FIELD_KM))
-    .sort((a, b) => rank(a) - rank(b) || (rank(a) === 0 ? b.km - a.km : a.km - b.km));
+    .filter((g) => g.alpha >= GUIDE_LABEL_MIN_ALPHA)
+    .sort((a, b) => Math.abs(a.km - frontierKm) - Math.abs(b.km - frontierKm) || a.km - b.km);
 }
 
 export function chooseGuideLabels<T extends { km: number; y: number }>(ordered: readonly T[], frontierY: number | null): T[] {
@@ -144,10 +138,12 @@ export class LabelLayer {
 
     // Moon landmark label: shown with the Moon (revealed when the frontier reaches 384,400 km).
     const moonAlpha = renderer.moonOpacity * fade;
-    this.moonLabel.hidden = moonAlpha < 0.01;
+    const moon = renderer.moonScreenPosition();
+    // Hidden before the Moon is reached, and again once the journey has passed it (off-screen).
+    this.moonLabel.hidden = moonAlpha < 0.01 || moon.y > view.layout.height + 30 || moon.y < -30;
     if (!this.moonLabel.hidden) {
-      const moon = renderer.moonScreenPosition();
-      this.moonLabel.style.transform = `translate(${Math.round(moon.x + 16)}px, ${Math.round(moon.y - 14)}px)`;
+      // Left of the Moon: the right-hand column belongs to the frontier and guide labels.
+      this.moonLabel.style.transform = `translate(calc(${Math.round(moon.x - 18)}px - 100%), ${Math.round(moon.y - 14)}px)`;
       this.moonLabel.style.opacity = String(0.9 * moonAlpha);
     }
 

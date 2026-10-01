@@ -52,7 +52,7 @@ html, body, #app { margin: 0; height: 100%; background: #5aa2e6; color: var(--te
 .label-name { color: #ffffff; }
 .label-detail { color: var(--accent); font-family: ui-monospace, Consolas, monospace; font-size: 10px; }
 .moon-label, .frontier-label, .guide-label { position: absolute; left: 0; top: 0; white-space: nowrap; will-change: transform; text-shadow: 0 1px 4px rgba(0, 0, 0, 0.45); }
-.moon-label { display: flex; flex-direction: column; font-size: 10px; letter-spacing: 0.08em; color: #ffffff; }
+.moon-label { display: flex; flex-direction: column; align-items: flex-end; font-size: 10px; letter-spacing: 0.08em; color: #ffffff; }
 .moon-title { font-weight: 600; }
 .moon-km { font-family: ui-monospace, Consolas, monospace; opacity: 0.85; }
 .frontier-label { font-family: ui-monospace, Consolas, monospace; font-size: 11px; color: #ffe6a8; font-weight: 600; }

@@ -5,7 +5,7 @@ import { FIELD_PROGRESS, MOON_PROGRESS, SCALE_STEP_KM, type GuideTier } from "./
  * switches): colour stops are interpolated per channel, and every opacity uses smoothstep.
  * The stops are timed to the journey stages in skyLayout (the Moon is reached at MOON_PROGRESS):
  *
- *   0.00 bright day sky · 0.12 deeper blue · 0.21 twilight · 0.28 night (Moon) · 0.50 space · 1.00 deep space
+ *   0.00 bright day sky · 0.05 deeper blue · 0.115 twilight · 0.17 night (Moon at 0.16) · 0.32 space · 1.00 deep space
  */
 interface Stop {
   at: number;
@@ -15,10 +15,10 @@ interface Stop {
 
 export const SKY_STOPS: readonly Stop[] = [
   { at: 0.0, zenith: "#5aa2e6", horizon: "#cfe9ff" },
-  { at: 0.12, zenith: "#2f6db8", horizon: "#9cc7ef" },
-  { at: 0.21, zenith: "#1a3a78", horizon: "#e2a272" },
-  { at: 0.28, zenith: "#0e1d45", horizon: "#6a5a7a" },
-  { at: 0.5, zenith: "#0a1530", horizon: "#1b2c55" },
+  { at: 0.05, zenith: "#2f6db8", horizon: "#9cc7ef" },
+  { at: 0.115, zenith: "#1a3a78", horizon: "#e2a272" },
+  { at: 0.17, zenith: "#0e1d45", horizon: "#8a6a80" },
+  { at: 0.32, zenith: "#0a1530", horizon: "#1b2c55" },
   { at: 1.0, zenith: "#02040a", horizon: "#0b1428" },
 ];
 
@@ -46,25 +46,25 @@ export function skyColors(progress: number): { zenith: string; horizon: string }
 }
 
 /** Decorative stars appear with the twilight and dominate by space. */
-export const starOpacity = (p: number): number => smoothstep(0.17, 0.38, p);
+export const starOpacity = (p: number): number => smoothstep(0.09, 0.22, p);
 /** Low-atmosphere haze over the horizon fades as the user leaves the atmosphere. */
-export const hazeOpacity = (p: number): number => 0.3 * (1 - smoothstep(0.15, 0.45, p));
+export const hazeOpacity = (p: number): number => 0.3 * (1 - smoothstep(0.08, 0.2, p));
 /**
  * The Moon landmark is revealed when the frontier REACHES the Moon distance (progress
  * MOON_PROGRESS, during the night transition), fading in over a short window after it.
  * Hidden at load and in the daytime sky.
  */
-export const MOON_FADE_PROGRESS = 0.025;
+export const MOON_FADE_PROGRESS = 0.015;
 export const moonOpacity = (p: number): number => smoothstep(MOON_PROGRESS, MOON_PROGRESS + MOON_FADE_PROGRESS, p);
 /** The revealed-distance frontier line and its label, once the user has started travelling. */
-export const frontierOpacity = (p: number): number => smoothstep(0.03, 0.12, p);
+export const frontierOpacity = (p: number): number => smoothstep(0.015, 0.06, p);
 /** The million-km distance field fades in as the Moon is passed, fully present from 1M km. */
-export const fieldOpacity = (p: number): number => smoothstep(MOON_PROGRESS + 0.01, FIELD_PROGRESS, p);
+export const fieldOpacity = (p: number): number => smoothstep(MOON_PROGRESS + 0.005, FIELD_PROGRESS, p);
 /** Asteroid name labels, then names plus miss distance (only for asteroids at rest). */
-export const labelOpacity = (p: number): number => smoothstep(0.33, 0.37, p);
-export const labelDetailOpacity = (p: number): number => smoothstep(0.34, 0.39, p);
+export const labelOpacity = (p: number): number => smoothstep(0.215, 0.23, p);
+export const labelDetailOpacity = (p: number): number => smoothstep(0.22, 0.235, p);
 /** Opening title and "scroll to explore" hint. */
-export const introOpacity = (p: number): number => 1 - smoothstep(0.02, 0.1, p);
+export const introOpacity = (p: number): number => 1 - smoothstep(0.01, 0.05, p);
 /** Most labels shown at once (nearest first), so large populations never become a dashboard. */
 export const MAX_LABELS = 24;
 
@@ -73,14 +73,15 @@ export const MAX_LABELS = 24;
  *   - base by tier: every 10M (major) > every 5M (mid) > every 1M (minor);
  *   - emphasis on the distance currently being explored: the arc just behind the frontier is the
  *     strongest, falling off over ~1.5M km (sized so it always beats a major marker further back);
- *   - unrevealed arcs ahead of the frontier are nearly invisible (gone before 2M km ahead);
+ *   - unrevealed arcs ahead of the frontier are faint and fade out over ~2-3M km;
  *   - level of detail: a guide whose on-screen gap to its neighbours is only a few pixels fades
- *     (minor first, then mid), so the deep field never becomes a wall of lines. Majors never fade.
+ *     (minor first). In the distance world the gap is a constant ~120 px, so this only matters
+ *     on tiny viewports. Majors never fade.
  */
 export const GUIDE_BASE: Record<GuideTier, number> = { major: 0.2, mid: 0.13, minor: 0.09 };
 export const GUIDE_EMPHASIS = 0.5;
 export const GUIDE_FALLOFF_KM = 1.5 * SCALE_STEP_KM;
-export const GUIDE_AHEAD_KM = 0.42 * SCALE_STEP_KM;
+export const GUIDE_AHEAD_KM = 0.8 * SCALE_STEP_KM;
 
 export function guideOpacity(km: number, tier: GuideTier, frontierKm: number, spacingPx: number): number {
   const lod = tier === "major" ? 1 : tier === "mid" ? smoothstep(2, 5, spacingPx) : smoothstep(3, 9, spacingPx);
