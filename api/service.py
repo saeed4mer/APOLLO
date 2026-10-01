@@ -7,7 +7,9 @@ and query engine health checks while adhering to the locked M6.2 contract.
 from __future__ import annotations
 
 from datetime import datetime, timezone
+import hashlib
 import logging
+import math
 from pathlib import Path
 from typing import Any
 
@@ -36,8 +38,17 @@ from api.schemas import (
     HistoryResolutionEnvelope,
     CrosswalkRecord,
     CrosswalkResponse,
+    IllustrativeDirection,
+    WorldAsteroid,
+    WorldEncounter,
+    WorldResolution,
+    WorldResponse,
+    WorldSbdbAvailability,
+    WorldSentryAvailability,
+    WorldSnapshotInfo,
+    WorldSpatialModel,
 )
-from dashboard_data import DashboardDataProvider
+from dashboard_data import DashboardDataProvider, _nullable_bool
 
 logger = logging.getLogger(__name__)
 
@@ -574,3 +585,111 @@ def get_asteroid_crosswalk(
     )
 
     return CrosswalkResponse(meta=meta, data=records, resolution=resolution)
+
+
+ILLUSTRATIVE_DIRECTION_ALGORITHM = "sha256-uniform-sphere-v1"
+_DIRECTION_SALT = "nasa-asteroid-world/illustrative-direction/v1:"
+
+
+def illustrative_direction(neows_id: str) -> tuple[float, float, float]:
+    """Map a NeoWs ID to a deterministic ILLUSTRATIVE unit vector, uniform on the sphere.
+
+    NeoWs publishes no 3D direction, so this is a visualization device only. Two
+    64-bit uniforms from SHA-256(salt + neows_id) feed Archimedes' equal-area map
+    (z uniform in [-1, 1], azimuth uniform in [0, 2pi)). The seed is neows_id, not
+    asteroid_key, so an object does not move when its identity later resolves.
+    Changing this function changes every position: bump the algorithm version.
+    """
+    digest = hashlib.sha256((_DIRECTION_SALT + neows_id).encode("utf-8")).digest()
+    u = int.from_bytes(digest[0:8], "big") / 2**64
+    v = int.from_bytes(digest[8:16], "big") / 2**64
+    z = 1.0 - 2.0 * u
+    r = math.sqrt(max(0.0, 1.0 - z * z))
+    phi = 2.0 * math.pi * v
+    return (r * math.cos(phi), r * math.sin(phi), z)
+
+
+def _world_sbdb(row: dict[str, Any]) -> WorldSbdbAvailability:
+    if row["match_state"] != "RESOLVED":
+        return WorldSbdbAvailability(status="not_resolved")
+    if row["sbdb_spkid"] is None or row["sbdb_snapshot_key"] is None:
+        return WorldSbdbAvailability(status="not_present", spkid=row["sbdb_spkid"])
+    return WorldSbdbAvailability(
+        status="available",
+        spkid=row["sbdb_spkid"],
+        snapshot_key=row["sbdb_snapshot_key"],
+        run_id=row["sbdb_run_id"],
+    )
+
+
+def _world_sentry(row: dict[str, Any], latest_catalog_key: str | None) -> WorldSentryAvailability:
+    if row["match_state"] != "RESOLVED":
+        return WorldSentryAvailability(status="not_resolved")
+    link_count = int(row["sentry_link_count"] or 0)
+    if link_count == 0:
+        return WorldSentryAvailability(status="not_present")
+    if link_count > 1:
+        return WorldSentryAvailability(status="ambiguous")
+    if row["sentry_snapshot_key"] is None:
+        return WorldSentryAvailability(status="linked_no_record", sentry_id=row["sentry_id"])
+    return WorldSentryAvailability(
+        status="available",
+        sentry_id=row["sentry_id"],
+        latest_snapshot_key=row["sentry_snapshot_key"],
+        run_id=row["sentry_run_id"],
+        in_latest_catalog=row["sentry_snapshot_key"] == latest_catalog_key,
+    )
+
+
+def get_world(provider: DashboardDataProvider) -> WorldResponse:
+    """Build the world snapshot from ONE set-based provider retrieval.
+
+    Pure in-memory transformation per row: no per-object provider calls or queries.
+    """
+    snapshot = provider.get_world_snapshot()
+    df = snapshot["records"]
+    rows = [] if df.empty else df.astype(object).where(pd.notnull(df), None).to_dict(orient="records")
+    latest_catalog_key = rows[0]["sentry_latest_catalog_snapshot_key"] if rows else None
+
+    records = []
+    for row in rows:
+        x, y, z = illustrative_direction(str(row["neows_id"]))
+        records.append(
+            WorldAsteroid(
+                neows_id=row["neows_id"],
+                name=row["name"],
+                asteroid_key=row["asteroid_key"] if row["match_state"] == "RESOLVED" else None,
+                encounter=WorldEncounter(
+                    closest_approach_date=row["closest_approach_date"],
+                    miss_distance_km=row["miss_distance_km"],
+                    is_potentially_hazardous=_nullable_bool(row["hazardous"]),
+                ),
+                resolution=WorldResolution(
+                    match_state=row["match_state"],
+                    match_rule=row["match_rule"],
+                    resolved_at=row["resolved_at"],
+                ),
+                sbdb=_world_sbdb(row),
+                sentry=_world_sentry(row, latest_catalog_key),
+                illustrative_direction=IllustrativeDirection(x=x, y=y, z=z),
+            )
+        )
+
+    meta = MetaEnvelope(
+        api_version="1.0.0",
+        execution_mode=provider.get_execution_mode(),
+        timestamp=datetime.now(timezone.utc).isoformat(),
+    )
+    world = WorldSnapshotInfo(
+        object_count=len(records),
+        neows_run_id=snapshot["neows_run_id"],
+        sentry_latest_catalog_snapshot_key=latest_catalog_key,
+        spatial_model=WorldSpatialModel(
+            direction_algorithm=ILLUSTRATIVE_DIRECTION_ALGORITHM,
+            note=(
+                "Illustrative direction, real distance. Directions are derived deterministically from "
+                "neows_id for visualization only and are not astronomical positions or trajectories."
+            ),
+        ),
+    )
+    return WorldResponse(meta=meta, world=world, data=records)

@@ -414,3 +414,142 @@ class CrosswalkResponse(BaseModel):
     meta: MetaEnvelope = Field(..., description="Standard response metadata envelope")
     data: list[CrosswalkRecord] = Field(default_factory=list, description="List of multi-source identifier mapping records")
     resolution: ResolutionEnvelope = Field(..., description="Entity resolution state and evidence")
+
+
+# ============================================================================
+# WORLD SNAPSHOT CONTRACT — GET /asteroids/world
+# ============================================================================
+
+
+class WorldEncounter(BaseModel):
+    """NeoWs close-approach facts for the selected encounter. Source: NASA NeoWs only."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    source: Literal["nasa_neows"] = Field(default="nasa_neows", description="Source system for every field in this block")
+    closest_approach_date: str = Field(..., description="Date of closest observed approach (YYYY-MM-DD)")
+    miss_distance_km: float = Field(..., description="Real NeoWs miss distance in kilometers (source value, not normalized)")
+    is_potentially_hazardous: bool | None = Field(
+        ..., description="NeoWs potentially-hazardous flag; null if not reported. Independent of Sentry availability."
+    )
+
+
+class WorldResolution(BaseModel):
+    """Cross-source identity resolution state (same rules as GET /asteroids/{neows_id})."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    match_state: Literal["RESOLVED", "UNRESOLVED", "AMBIGUOUS", "INVALID"] = Field(..., description="Identity resolution state")
+    match_rule: str | None = Field(default=None, description="Resolution rule applied")
+    resolved_at: str | None = Field(default=None, description="Timestamp of the resolution run, if recorded")
+
+
+class WorldSbdbAvailability(BaseModel):
+    """Whether a JPL SBDB snapshot exists for this identity, with its provenance."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    status: Literal["available", "not_resolved", "not_present"] = Field(
+        ...,
+        description=(
+            "available: an SBDB snapshot exists; not_resolved: identity not resolved, so SBDB cannot be linked; "
+            "not_present: identity resolved but no SBDB snapshot is stored"
+        ),
+    )
+    spkid: str | None = Field(default=None, description="SBDB SPK-ID linked through the crosswalk")
+    snapshot_key: str | None = Field(default=None, description="Snapshot key of the SBDB snapshot served by /sbdb")
+    run_id: str | None = Field(default=None, description="Ingestion run ID of that SBDB snapshot")
+
+
+class WorldSentryAvailability(BaseModel):
+    """Whether a Sentry record exists via crosswalk membership. Never inferred from the PHA flag."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    status: Literal["available", "not_resolved", "not_present", "ambiguous", "linked_no_record"] = Field(
+        ...,
+        description=(
+            "available: one linked Sentry ID with stored snapshots; not_resolved: identity not resolved; "
+            "not_present: resolved but no Sentry link; ambiguous: multiple Sentry IDs linked; "
+            "linked_no_record: one Sentry ID linked but no stored snapshot"
+        ),
+    )
+    sentry_id: str | None = Field(default=None, description="Sentry object identifier when exactly one is linked")
+    latest_snapshot_key: str | None = Field(default=None, description="Snapshot key of the latest stored Sentry record")
+    run_id: str | None = Field(default=None, description="Ingestion run ID of that Sentry record")
+    in_latest_catalog: bool | None = Field(
+        default=None,
+        description="True if that record is in the latest stored Sentry catalog snapshot; null when no record",
+    )
+
+
+class IllustrativeDirection(BaseModel):
+    """Deterministic ILLUSTRATIVE unit vector for placing the object around Earth.
+
+    Not an astronomical direction: NeoWs publishes no 3D direction. Derived only from neows_id.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    x: float = Field(..., ge=-1.0, le=1.0, description="Unit vector x component (illustrative)")
+    y: float = Field(..., ge=-1.0, le=1.0, description="Unit vector y component (illustrative)")
+    z: float = Field(..., ge=-1.0, le=1.0, description="Unit vector z component (illustrative)")
+
+
+class WorldAsteroid(BaseModel):
+    """One NeoWs object in the world snapshot. Grain: (neows_id)."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    neows_id: str = Field(..., description="NeoWs asteroid identifier")
+    name: str = Field(..., description="NeoWs name / designation")
+    asteroid_key: str | None = Field(default=None, description="Canonical UUID5 key; null unless resolved")
+    encounter: WorldEncounter
+    resolution: WorldResolution
+    sbdb: WorldSbdbAvailability
+    sentry: WorldSentryAvailability
+    illustrative_direction: IllustrativeDirection
+
+
+class WorldSpatialModel(BaseModel):
+    """Declares how the world's spatial values may be interpreted."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    direction_semantics: Literal["illustrative"] = Field(
+        default="illustrative", description="Directions are illustrative, not astronomical"
+    )
+    direction_algorithm: str = Field(..., description="Versioned identifier of the deterministic direction algorithm")
+    direction_seed_field: Literal["neows_id"] = Field(default="neows_id", description="Only input to the direction algorithm")
+    distance_field: Literal["encounter.miss_distance_km"] = Field(
+        default="encounter.miss_distance_km", description="Real source distance; any visual scaling is the renderer's"
+    )
+    note: str = Field(..., description="Human-readable interpretation note")
+
+
+class WorldSnapshotInfo(BaseModel):
+    """Snapshot-level metadata shared by every world record."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    object_count: int = Field(..., ge=0, description="Number of NeoWs objects in this world snapshot")
+    encounter_selection_rule: Literal["CLOSEST_OBSERVED_APPROACH"] = Field(
+        default="CLOSEST_OBSERVED_APPROACH", description="Rule used to pick one encounter per NeoWs object"
+    )
+    neows_run_id: str | None = Field(
+        default=None, description="NeoWs ingestion run ID from dataset metadata; null if the dataset does not record one"
+    )
+    sentry_latest_catalog_snapshot_key: str | None = Field(
+        default=None, description="Latest stored Sentry catalog snapshot key; null if no Sentry data is stored"
+    )
+    spatial_model: WorldSpatialModel
+
+
+class WorldResponse(BaseModel):
+    """Authoritative response envelope for GET /asteroids/world."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    meta: MetaEnvelope = Field(..., description="Standard response metadata envelope")
+    world: WorldSnapshotInfo = Field(..., description="World snapshot metadata")
+    data: list[WorldAsteroid] = Field(..., description="One record per NeoWs object")

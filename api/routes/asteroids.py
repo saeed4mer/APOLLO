@@ -26,6 +26,7 @@ from api.schemas import (
     CrosswalkResponse,
     WatchlistQueryParams,
     WatchlistResponse,
+    WorldResponse,
 )
 from api.service import (
     get_asteroid_crosswalk,
@@ -35,6 +36,7 @@ from api.service import (
     get_asteroid_sentry,
     get_provider,
     get_watchlist,
+    get_world,
 )
 from dashboard_data import DashboardDataProvider
 
@@ -63,27 +65,20 @@ def get_asteroids(
 # order, so the ID route would otherwise capture "world" and reject it with 422.
 @router.get(
     "/asteroids/world",
-    status_code=status.HTTP_501_NOT_IMPLEMENTED,
-    responses={501: {"model": ErrorResponse, "description": "World snapshot contract not yet implemented."}},
-    summary="Batch world snapshot (not yet implemented)",
-    description="Reserved for the set-based world snapshot contract (Phase 1 Step 4).",
+    response_model=WorldResponse,
+    status_code=status.HTTP_200_OK,
+    summary="World snapshot: every current NeoWs object in one response",
+    description=(
+        "Returns one record per NeoWs object with real encounter facts, identity resolution, "
+        "SBDB/Sentry availability with provenance, and a deterministic ILLUSTRATIVE direction. "
+        "Retrieved with a single set-based query."
+    ),
 )
 def get_asteroids_world(
     provider: DashboardDataProvider = Depends(get_provider),
-) -> JSONResponse:
-    """Reserve the world route; returns an explicit 501 until Step 4 lands."""
-    error_payload = ErrorResponse(
-        meta=MetaEnvelope(
-            api_version="1.0.0",
-            execution_mode=provider.get_execution_mode(),
-            timestamp=datetime.now(timezone.utc).isoformat(),
-        ),
-        error=ErrorDetail(
-            code="NOT_IMPLEMENTED",
-            message="The world snapshot endpoint is not yet implemented.",
-        ),
-    )
-    return JSONResponse(status_code=status.HTTP_501_NOT_IMPLEMENTED, content=error_payload.model_dump())
+) -> WorldResponse:
+    """Return the full world snapshot for the renderer's initial load."""
+    return get_world(provider)
 
 
 @router.get(

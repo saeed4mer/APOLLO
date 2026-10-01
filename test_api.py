@@ -35,6 +35,7 @@ from api.schemas import (
     SentryHistoryRecord,
     SentryHistoryResponse,
     WatchlistResponse,
+    WorldResponse,
 )
 from api.service import REQUIRED_PARQUET_ASSETS
 from dashboard_data import DashboardDataProvider
@@ -2753,9 +2754,8 @@ def test_world_route_not_captured_by_neows_id_route(mock_client: TestClient):
     """Regression: /asteroids/world must hit the world route, not 422 from /asteroids/{neows_id}."""
     resp = mock_client.get("/asteroids/world")
     assert resp.status_code != 422
-    assert resp.status_code == 501
-    validated = ErrorResponse.model_validate(resp.json())
-    assert validated.error.code == "NOT_IMPLEMENTED"
+    assert resp.status_code == 200
+    WorldResponse.model_validate(resp.json())
 
 
 def test_world_route_registered_before_neows_id_route():
@@ -2993,3 +2993,489 @@ def test_sbdb_flag_tri_state_survives_ingestion_to_api(mock_lakehouse: Path, raw
     assert data["run_id"] == "run_ingested"
     assert data["is_neo"] is expected
     assert data["is_pha"] is expected
+
+
+# ============================================================================
+# PHASE 1 STEP 4 — GET /asteroids/world (set-based world snapshot contract)
+# ============================================================================
+
+import math as _math
+
+from api.service import ILLUSTRATIVE_DIRECTION_ALGORITHM, illustrative_direction
+from dashboard_data import LocalDuckDBDataProvider
+
+_WORLD_URL = "/asteroids/world"
+_TW54_NEOWS = "3548666"
+_ST_NEOWS = "3427460"
+
+
+def _world(client: TestClient) -> dict:
+    resp = client.get(_WORLD_URL)
+    assert resp.status_code == 200
+    body = resp.json()
+    WorldResponse.model_validate(body)
+    return body
+
+
+def _by_id(body: dict) -> dict[str, dict]:
+    return {rec["neows_id"]: rec for rec in body["data"]}
+
+
+def _write_table(lakehouse: Path, filename: str, rows: list[dict], schema) -> None:
+    pq.write_table(pa.Table.from_pylist(rows, schema=schema), lakehouse / filename)
+
+
+# --- 1-4: shape, cardinality, uniqueness ------------------------------------
+
+def test_world_returns_one_record_per_neows_object(mock_client: TestClient):
+    body = _world(mock_client)
+    ids = [rec["neows_id"] for rec in body["data"]]
+    assert len(ids) == len(set(ids)), "duplicate NeoWs IDs in world snapshot"
+    assert set(ids) == {a["id"] for a in _FIXTURE_ASTEROIDS}
+    assert body["world"]["object_count"] == len(ids) == 35
+
+
+def test_world_collapses_multiple_approaches_to_closest(mock_lakehouse: Path):
+    """An object with several approaches appears once, carrying its closest real miss distance."""
+    extra = [
+        {**_FIXTURE_ASTEROIDS[0], "closest_approach_date": "2026-10-02", "miss_distance_km": 9e9},
+        {**_FIXTURE_ASTEROIDS[0], "closest_approach_date": "2026-09-27", "miss_distance_km": 1234.5},
+    ]
+    _write_table(mock_lakehouse, "asteroids.parquet", _FIXTURE_ASTEROIDS + extra, ASTEROID_SCHEMA)
+    body = _world(_client_for(mock_lakehouse))
+    assert body["world"]["object_count"] == 35
+    rec = _by_id(body)[_FIXTURE_ASTEROIDS[0]["id"]]
+    assert rec["encounter"]["miss_distance_km"] == 1234.5
+    assert rec["encounter"]["closest_approach_date"] == "2026-09-27"
+
+
+# --- 5-6, 14: identity and real distance ------------------------------------
+
+def test_world_resolved_objects_carry_asteroid_key(mock_client: TestClient):
+    recs = _by_id(_world(mock_client))
+    assert recs[_TW54_NEOWS]["asteroid_key"] == "ast_b8259bf1-e6e5-5059-853e-9434274cdf2c"
+    assert recs[_ST_NEOWS]["asteroid_key"] == "ast_8520aaac-9c77-5e8f-9a88-b4e501749e26"
+    for rec in recs.values():
+        assert (rec["asteroid_key"] is not None) == (rec["resolution"]["match_state"] == "RESOLVED")
+
+
+def test_world_unresolved_objects_remain_present(mock_client: TestClient):
+    recs = _world(mock_client)["data"]
+    unresolved = [r for r in recs if r["resolution"]["match_state"] == "UNRESOLVED"]
+    assert len(unresolved) == 33
+    for rec in unresolved:
+        assert rec["asteroid_key"] is None
+        assert rec["sbdb"] == {"status": "not_resolved", "spkid": None, "snapshot_key": None, "run_id": None}
+        assert rec["sentry"]["status"] == "not_resolved"
+        assert rec["sentry"]["sentry_id"] is None and rec["sentry"]["in_latest_catalog"] is None
+
+
+def test_world_preserves_real_neows_miss_distance(mock_client: TestClient):
+    source = {a["id"]: a for a in _FIXTURE_ASTEROIDS}
+    for rec in _world(mock_client)["data"]:
+        src = source[rec["neows_id"]]
+        assert rec["name"] == src["name"]
+        assert rec["encounter"]["miss_distance_km"] == src["miss_distance_km"]
+        assert rec["encounter"]["closest_approach_date"] == src["closest_approach_date"]
+        assert rec["encounter"]["is_potentially_hazardous"] is src["hazardous"]
+        assert rec["encounter"]["source"] == "nasa_neows"
+
+
+# --- Parity: world agrees with the per-object endpoints ---------------------
+
+_PARITY_SAMPLE = (_TW54_NEOWS, _ST_NEOWS, "2138971")  # both resolved objects + an unresolved PHA control
+
+
+def _assert_world_matches_per_object_endpoints(client: TestClient, ids: tuple[str, ...] | None = None) -> None:
+    """World records agree with /asteroids/{id}, /sbdb and /sentry (all objects, or only `ids`)."""
+    for rec in _world(client)["data"]:
+        nid = rec["neows_id"]
+        if ids is not None and nid not in ids:
+            continue
+        detail = client.get(f"/asteroids/{nid}").json()
+        assert rec["resolution"]["match_state"] == detail["resolution"]["match_state"], nid
+        assert rec["resolution"]["match_rule"] == detail["resolution"]["match_rule"], nid
+        assert rec["asteroid_key"] == detail["resolution"]["asteroid_key"], nid
+
+        sbdb = client.get(f"/asteroids/{nid}/sbdb").json()["data"]
+        assert (rec["sbdb"]["status"] == "available") == (sbdb is not None), nid
+        if sbdb is not None:
+            assert (rec["sbdb"]["spkid"], rec["sbdb"]["snapshot_key"], rec["sbdb"]["run_id"]) == (
+                sbdb["spkid"], sbdb["snapshot_key"], sbdb["run_id"]), nid
+
+        sentry = client.get(f"/asteroids/{nid}/sentry").json()["data"]
+        if sentry is None:
+            assert rec["sentry"]["status"] == "not_resolved", nid
+        else:
+            assert rec["sentry"]["sentry_id"] == sentry["sentry_id"], nid
+            assert rec["sentry"]["latest_snapshot_key"] == sentry["latest_snapshot_key"], nid
+            assert (rec["sentry"]["status"] == "ambiguous") == sentry["is_sentry_ambiguous"], nid
+            assert (rec["sentry"]["status"] == "not_present") == (not sentry["has_sentry_monitoring"]), nid
+            if rec["sentry"]["status"] == "available":
+                assert rec["sentry"]["in_latest_catalog"] == sentry["is_currently_active"], nid
+
+
+def test_world_matches_per_object_endpoints(mock_client: TestClient):
+    _assert_world_matches_per_object_endpoints(mock_client)
+
+
+def test_world_resolution_bridge_fallback_matches_detail(mock_lakehouse: Path):
+    """Without the audit log, both world and detail fall back to the bridge identically."""
+    (mock_lakehouse / "fact_entity_resolution.parquet").unlink()
+    client = _client_for(mock_lakehouse)
+    recs = _by_id(_world(client))
+    assert recs[_TW54_NEOWS]["resolution"]["match_rule"] == "BRIDGE_EXACT_NEOWS_ID"
+    assert recs["2138971"]["resolution"]["match_rule"] == "NO_RESOLUTION_RECORD"
+    _assert_world_matches_per_object_endpoints(client, _PARITY_SAMPLE)
+
+
+def test_world_ambiguous_bridge_resolution_matches_detail(mock_lakehouse: Path):
+    (mock_lakehouse / "fact_entity_resolution.parquet").unlink()
+    extra = {**next(r for r in _FIXTURE_BRIDGE if r["source_system"] == "neows" and r["identifier_value"] == _TW54_NEOWS),
+             "asteroid_key": "ast_00000000-0000-5000-8000-000000000000"}
+    _write_table(mock_lakehouse, "bridge_asteroid_identifier.parquet", _FIXTURE_BRIDGE + [extra],
+                 BRIDGE_ASTEROID_IDENTIFIER_SCHEMA)
+    client = _client_for(mock_lakehouse)
+    rec = _by_id(_world(client))[_TW54_NEOWS]
+    assert rec["resolution"]["match_state"] == "AMBIGUOUS"
+    assert rec["asteroid_key"] is None
+    assert rec["sbdb"]["status"] == "not_resolved" and rec["sentry"]["status"] == "not_resolved"
+    _assert_world_matches_per_object_endpoints(client, _PARITY_SAMPLE)
+
+
+# --- 7-9: SBDB / Sentry availability and PHA independence -------------------
+
+def test_world_sbdb_availability_and_provenance(mock_client: TestClient):
+    recs = _by_id(_world(mock_client))
+    assert recs[_TW54_NEOWS]["sbdb"] == {
+        "status": "available", "spkid": "50548689", "snapshot_key": "2026-09-26", "run_id": "26b0c1ef0bba"}
+    assert recs[_ST_NEOWS]["sbdb"]["run_id"] == "3a217b3b1657"
+
+
+def test_world_sbdb_uses_same_latest_snapshot_as_profile(mock_lakehouse: Path):
+    newer = _sbdb_snapshot_rows("2026-09-30", "run_newer", "2026-09-30T00:00:00+00:00", 2.0)
+    _write_sbdb_tables(mock_lakehouse, newer)
+    client = _client_for(mock_lakehouse)
+    rec = _by_id(_world(client))[_TW54_NEOWS]
+    assert (rec["sbdb"]["snapshot_key"], rec["sbdb"]["run_id"]) == ("2026-09-30", "run_newer")
+    _assert_world_matches_per_object_endpoints(client, _PARITY_SAMPLE)
+
+
+def test_world_sbdb_not_present_when_resolved_without_snapshot(mock_lakehouse: Path):
+    rows = [r for r in _FIXTURE_SBDB_OBJ if r["spkid"] != _TW54_SPKID]
+    _write_table(mock_lakehouse, "fact_sbdb_object_snapshot.parquet", rows, SBDB_OBJECT_SCHEMA)
+    rows = [r for r in _FIXTURE_SBDB_ORB if r["spkid"] != _TW54_SPKID]
+    _write_table(mock_lakehouse, "fact_sbdb_orbit.parquet", rows, SBDB_ORBIT_SCHEMA)
+    client = _client_for(mock_lakehouse)
+    rec = _by_id(_world(client))[_TW54_NEOWS]
+    assert rec["sbdb"] == {"status": "not_present", "spkid": "50548689", "snapshot_key": None, "run_id": None}
+    _assert_world_matches_per_object_endpoints(client, _PARITY_SAMPLE)
+
+
+def test_world_sentry_availability_and_provenance(mock_client: TestClient):
+    body = _world(mock_client)
+    recs = _by_id(body)
+    assert recs[_TW54_NEOWS]["sentry"] == {
+        "status": "available", "sentry_id": "bK10T54W", "latest_snapshot_key": "2026-09-26",
+        "run_id": "7d446dc65b5a", "in_latest_catalog": True}
+    assert recs[_ST_NEOWS]["sentry"]["sentry_id"] == "bK08S00T"
+    assert body["world"]["sentry_latest_catalog_snapshot_key"] == "2026-09-26"
+
+
+def test_world_sentry_not_present_ambiguous_and_linked_no_record(mock_lakehouse: Path):
+    """Crosswalk membership drives every Sentry status; metrics never leak across ambiguous links."""
+    bridge = [r for r in _FIXTURE_BRIDGE
+              if not (r["source_system"] == "sentry" and r["asteroid_key"].startswith("ast_b8259"))]  # TW54: unlinked
+    st_link = next(r for r in _FIXTURE_BRIDGE if r["source_system"] == "sentry"
+                   and r["identifier_name"] == "sentry_id" and r["asteroid_key"].startswith("ast_8520"))
+    bridge.append({**st_link, "identifier_value": "bKXXXXXX"})  # 2008 ST: two Sentry IDs
+    _write_table(mock_lakehouse, "bridge_asteroid_identifier.parquet", bridge, BRIDGE_ASTEROID_IDENTIFIER_SCHEMA)
+    client = _client_for(mock_lakehouse)
+    recs = _by_id(_world(client))
+    assert recs[_TW54_NEOWS]["sentry"]["status"] == "not_present"
+    assert recs[_ST_NEOWS]["sentry"] == {"status": "ambiguous", "sentry_id": None, "latest_snapshot_key": None,
+                                          "run_id": None, "in_latest_catalog": None}
+    _assert_world_matches_per_object_endpoints(client, _PARITY_SAMPLE)
+
+    _write_table(mock_lakehouse, "fact_sentry_risk_snapshot.parquet",
+                 [r for r in _FIXTURE_SENTRY if r["sentry_id"] != "bK10T54W"], SENTRY_RISK_SNAPSHOT_SCHEMA)
+    _write_table(mock_lakehouse, "bridge_asteroid_identifier.parquet", _FIXTURE_BRIDGE, BRIDGE_ASTEROID_IDENTIFIER_SCHEMA)
+    client = _client_for(mock_lakehouse)
+    assert _by_id(_world(client))[_TW54_NEOWS]["sentry"] == {
+        "status": "linked_no_record", "sentry_id": "bK10T54W", "latest_snapshot_key": None,
+        "run_id": None, "in_latest_catalog": None}
+    _assert_world_matches_per_object_endpoints(client, _PARITY_SAMPLE)
+
+
+def test_world_pha_flag_is_independent_of_sentry_availability(mock_lakehouse: Path):
+    """Sentry objects that are not PHA keep sentry=available; PHA objects without links do not gain Sentry."""
+    rows = [{**a, "hazardous": True} if a["id"] == _TW54_NEOWS else a for a in _FIXTURE_ASTEROIDS]
+    _write_table(mock_lakehouse, "asteroids.parquet", rows, ASTEROID_SCHEMA)
+    recs = _by_id(_world(_client_for(mock_lakehouse)))
+
+    st = recs[_ST_NEOWS]
+    assert st["encounter"]["is_potentially_hazardous"] is False and st["sentry"]["status"] == "available"
+    tw54 = recs[_TW54_NEOWS]
+    assert tw54["encounter"]["is_potentially_hazardous"] is True and tw54["sentry"]["status"] == "available"
+    pha_unlinked = [r for r in recs.values()
+                    if r["encounter"]["is_potentially_hazardous"] and r["resolution"]["match_state"] != "RESOLVED"]
+    assert pha_unlinked, "fixture must contain PHA objects without Sentry linkage"
+    assert all(r["sentry"]["status"] == "not_resolved" for r in pha_unlinked)
+
+
+# --- 15: unknown stays null --------------------------------------------------
+
+def test_world_unknown_pha_is_null_not_false(mock_lakehouse: Path):
+    rows = [{**a, "hazardous": None} if a["id"] == "2138971" else a for a in _FIXTURE_ASTEROIDS]
+    _write_table(mock_lakehouse, "asteroids.parquet", rows, ASTEROID_SCHEMA)
+    rec = _by_id(_world(_client_for(mock_lakehouse)))["2138971"]
+    assert rec["encounter"]["is_potentially_hazardous"] is None
+
+
+def test_world_neows_run_id_from_dataset_metadata_only(mock_lakehouse: Path):
+    """No metadata -> null (never guessed); real run_id metadata written by ingestion -> served."""
+    import nasa_asteroids
+
+    assert _world(_client_for(mock_lakehouse))["world"]["neows_run_id"] is None
+    nasa_asteroids.save_to_parquet(_FIXTURE_ASTEROIDS, filename=str(mock_lakehouse / "asteroids.parquet"),
+                                   run_id="abc123def456")
+    assert _world(_client_for(mock_lakehouse))["world"]["neows_run_id"] == "abc123def456"
+
+
+def test_world_survives_missing_enrichment_assets(mock_lakehouse: Path):
+    """With only NeoWs data present, every object is still served, all unresolved, nothing fabricated."""
+    for name in ("bridge_asteroid_identifier.parquet", "fact_entity_resolution.parquet",
+                 "fact_sentry_risk_snapshot.parquet", "fact_sbdb_object_snapshot.parquet", "fact_sbdb_orbit.parquet"):
+        (mock_lakehouse / name).unlink()
+    body = _world(_client_for(mock_lakehouse))
+    assert body["world"]["object_count"] == 35
+    assert body["world"]["sentry_latest_catalog_snapshot_key"] is None
+    for rec in body["data"]:
+        assert rec["resolution"] == {"match_state": "UNRESOLVED", "match_rule": "NO_RESOLUTION_RECORD", "resolved_at": None}
+        assert rec["sbdb"]["status"] == "not_resolved" and rec["sentry"]["status"] == "not_resolved"
+
+
+def test_world_empty_when_neows_dataset_absent(mock_lakehouse: Path):
+    (mock_lakehouse / "asteroids.parquet").unlink()
+    body = _world(_client_for(mock_lakehouse))
+    assert body["data"] == [] and body["world"]["object_count"] == 0
+
+
+# --- 10-13: illustrative direction -------------------------------------------
+
+def test_illustrative_direction_is_pinned_and_deterministic():
+    """Golden values pin the algorithm: any change must bump ILLUSTRATIVE_DIRECTION_ALGORITHM."""
+    assert ILLUSTRATIVE_DIRECTION_ALGORITHM == "sha256-uniform-sphere-v1"
+    x, y, z = illustrative_direction(_ST_NEOWS)
+    assert (x, y, z) == pytest.approx((0.41789421064936794, 0.4178751627645238, -0.8066875337144268), abs=1e-15)
+    assert illustrative_direction(_ST_NEOWS) == illustrative_direction(_ST_NEOWS)
+
+
+def test_world_direction_stable_across_requests(mock_client: TestClient):
+    first = {r["neows_id"]: r["illustrative_direction"] for r in _world(mock_client)["data"]}
+    second = {r["neows_id"]: r["illustrative_direction"] for r in _world(mock_client)["data"]}
+    assert first == second
+    for nid, d in first.items():
+        assert (d["x"], d["y"], d["z"]) == illustrative_direction(nid)
+
+
+def test_world_direction_independent_of_resolution(mock_lakehouse: Path):
+    """An object keeps its direction when its identity changes from unresolved to resolved."""
+    resolved = _by_id(_world(_client_for(mock_lakehouse)))
+    for name in ("bridge_asteroid_identifier.parquet", "fact_entity_resolution.parquet"):
+        (mock_lakehouse / name).unlink()
+    unresolved = _by_id(_world(_client_for(mock_lakehouse)))
+    assert resolved[_TW54_NEOWS]["asteroid_key"] is not None
+    assert unresolved[_TW54_NEOWS]["asteroid_key"] is None
+    for nid in resolved:
+        assert resolved[nid]["illustrative_direction"] == unresolved[nid]["illustrative_direction"]
+
+
+def test_world_every_object_has_valid_unit_direction(mock_client: TestClient):
+    for rec in _world(mock_client)["data"]:
+        d = rec["illustrative_direction"]
+        assert _math.isclose(d["x"] ** 2 + d["y"] ** 2 + d["z"] ** 2, 1.0, abs_tol=1e-12), rec["neows_id"]
+
+
+def test_illustrative_direction_distribution_is_spread_over_sphere():
+    """Over many IDs, directions are uniform on the sphere: near-zero mean, every octant used, no collisions."""
+    ids = [str(3_000_000 + i) for i in range(4000)]
+    vecs = [illustrative_direction(i) for i in ids]
+    for axis in range(3):
+        assert abs(sum(v[axis] for v in vecs) / len(vecs)) < 0.05
+    octants = {(v[0] > 0, v[1] > 0, v[2] > 0) for v in vecs}
+    assert len(octants) == 8
+    upper = sum(v[2] > 0 for v in vecs) / len(vecs)
+    assert 0.45 < upper < 0.55
+    assert len(set(vecs)) == len(vecs)
+
+
+def test_world_declares_illustrative_spatial_model(mock_client: TestClient):
+    model = _world(mock_client)["world"]["spatial_model"]
+    assert model["direction_semantics"] == "illustrative"
+    assert model["direction_seed_field"] == "neows_id"
+    assert model["distance_field"] == "encounter.miss_distance_km"
+    assert model["direction_algorithm"] == ILLUSTRATIVE_DIRECTION_ALGORITHM
+    assert "not astronomical" in model["note"]
+
+
+# --- 16-17: no N+1, set-based ------------------------------------------------
+
+class _CountingConnection:
+    def __init__(self, conn, log: list[str]):
+        self._conn, self._log = conn, log
+
+    def execute(self, query, *args, **kwargs):
+        self._log.append(query)
+        return self._conn.execute(query, *args, **kwargs)
+
+    def close(self):
+        self._conn.close()
+
+
+def _instrumented_world_call(lakehouse: Path) -> tuple[list[str], int, int]:
+    """Return (executed statements, connections opened, objects served) for one world request."""
+    executed: list[str] = []
+    opened = 0
+    real_connect = LocalDuckDBDataProvider._get_connection
+
+    def counting_connect(self):
+        nonlocal opened
+        opened += 1
+        return _CountingConnection(real_connect(self), executed)
+
+    def forbidden(*_args, **_kwargs):
+        raise AssertionError("world endpoint must not call per-object provider methods")
+
+    with patch.object(LocalDuckDBDataProvider, "_get_connection", counting_connect), \
+         patch.object(LocalDuckDBDataProvider, "get_threat_watchlist", forbidden), \
+         patch.object(LocalDuckDBDataProvider, "get_resolution_state", forbidden), \
+         patch.object(LocalDuckDBDataProvider, "get_sbdb_profile", forbidden), \
+         patch.object(LocalDuckDBDataProvider, "get_sentry_profile", forbidden), \
+         patch.object(LocalDuckDBDataProvider, "get_crosswalk", forbidden):
+        body = _world(_client_for(lakehouse))
+    return executed, opened, len(body["data"])
+
+
+def test_world_uses_one_connection_and_one_query_without_per_object_calls(mock_lakehouse: Path):
+    executed, opened, served = _instrumented_world_call(mock_lakehouse)
+    assert served == 35
+    assert opened == 1
+    assert len(executed) == 1
+
+
+def test_world_query_count_does_not_grow_with_population(mock_lakehouse: Path):
+    """150 objects cost exactly the same number of connections/queries as 35 (no N+1)."""
+    small = _instrumented_world_call(mock_lakehouse)
+    extra = [{"id": str(9_000_000 + i), "name": f"(SYNTH {i})", "closest_approach_date": "2026-09-30",
+              "miss_distance_km": 1e6 + i, "hazardous": False} for i in range(115)]
+    _write_table(mock_lakehouse, "asteroids.parquet", _FIXTURE_ASTEROIDS + extra, ASTEROID_SCHEMA)
+    large = _instrumented_world_call(mock_lakehouse)
+    assert (small[2], large[2]) == (35, 150)
+    assert (len(large[0]), large[1]) == (len(small[0]), small[1]) == (1, 1)
+
+
+# --- 16 (real data): actual local Parquet lakehouse ---------------------------
+
+@pytest.mark.skipif(
+    not (_REAL_LAKEHOUSE / "asteroids.parquet").exists(),
+    reason="Local Parquet lakehouse not present (gitignored; absent in CI).",
+)
+def test_world_real_local_lakehouse():
+    import duckdb
+
+    client = _client_for(_REAL_LAKEHOUSE)
+    body = _world(client)
+    ast_path = str(_REAL_LAKEHOUSE / "asteroids.parquet").replace("\\", "/")
+    source = dict(duckdb.connect().execute(
+        f"SELECT id, MIN(miss_distance_km) FROM '{ast_path}' GROUP BY id").fetchall())
+    recs = _by_id(body)
+    assert set(recs) == set(source) and body["world"]["object_count"] == len(source)
+    for nid, rec in recs.items():
+        assert rec["encounter"]["miss_distance_km"] == source[nid]
+    resolved = {nid for nid, r in recs.items() if r["resolution"]["match_state"] == "RESOLVED"}
+    assert {_TW54_NEOWS, _ST_NEOWS} <= resolved
+    for nid in resolved:
+        assert recs[nid]["sbdb"]["status"] == "available"
+        assert recs[nid]["sentry"]["status"] == "available"
+    _assert_world_matches_per_object_endpoints(client)
+
+
+# --- Resolution consistency: GET /asteroids == GET /asteroids/world == detail ----
+
+def _assert_list_world_detail_resolution_agree(client: TestClient) -> dict[str, dict]:
+    """Every object has the same match_state/asteroid_key in the list, the world and the detail route."""
+    listed = client.get("/asteroids", params={"limit": 500}).json()["data"]
+    world = _by_id(_world(client))
+    assert {r["neows_id"] for r in listed} == set(world)
+    for row in listed:
+        rec = world[row["neows_id"]]
+        assert row["match_state"] == rec["resolution"]["match_state"], row["neows_id"]
+        assert row["asteroid_key"] == rec["asteroid_key"], row["neows_id"]
+    for nid in _PARITY_SAMPLE:
+        detail = client.get(f"/asteroids/{nid}").json()
+        assert detail["data"]["match_state"] == world[nid]["resolution"]["match_state"], nid
+        assert detail["resolution"]["match_state"] == world[nid]["resolution"]["match_state"], nid
+        assert detail["data"]["asteroid_key"] == world[nid]["asteroid_key"], nid
+    return {r["neows_id"]: r for r in listed}
+
+
+def test_list_and_world_resolution_agree_on_fixture(mock_client: TestClient):
+    listed = _assert_list_world_detail_resolution_agree(mock_client)
+    assert listed[_TW54_NEOWS]["match_state"] == "RESOLVED"
+    assert sum(r["match_state"] == "UNRESOLVED" for r in listed.values()) == 33
+
+
+def test_list_follows_audit_log_over_bridge(mock_lakehouse: Path):
+    """Audit says UNRESOLVED while the bridge still holds a key: the audit log wins everywhere.
+
+    The previous bridge-only watchlist reported RESOLVED here while detail/world said UNRESOLVED.
+    """
+    audit = [{**r, "match_state": "UNRESOLVED", "assigned_asteroid_key": None, "match_rule": "NO_CROSS_SOURCE_MATCH"}
+             if r["source_system"] == "neows" and r["source_identifier_value"] == _TW54_NEOWS else r
+             for r in _FIXTURE_RESOLUTION]
+    _write_table(mock_lakehouse, "fact_entity_resolution.parquet", audit, FACT_ENTITY_RESOLUTION_SCHEMA)
+    client = _client_for(mock_lakehouse)
+    listed = _assert_list_world_detail_resolution_agree(client)
+    row = listed[_TW54_NEOWS]
+    assert (row["match_state"], row["asteroid_key"]) == ("UNRESOLVED", None)
+    assert row["is_sentry_monitored"] is False and row["has_sbdb_characterization"] is False
+    assert listed[_ST_NEOWS]["match_state"] == "RESOLVED"
+
+
+def test_list_resolves_from_audit_when_enrichment_assets_missing(mock_lakehouse: Path):
+    """Audit says RESOLVED but bridge/Sentry files are absent: still RESOLVED, enrichment simply empty.
+
+    The previous watchlist fell back to all-UNRESOLVED whenever any enrichment file was missing.
+    """
+    for name in ("bridge_asteroid_identifier.parquet", "fact_sentry_risk_snapshot.parquet"):
+        (mock_lakehouse / name).unlink()
+    client = _client_for(mock_lakehouse)
+    listed = _assert_list_world_detail_resolution_agree(client)
+    row = listed[_TW54_NEOWS]
+    assert (row["match_state"], row["asteroid_key"]) == ("RESOLVED", "ast_b8259bf1-e6e5-5059-853e-9434274cdf2c")
+    assert row["is_sentry_monitored"] is False and row["sentry_id"] is None
+    assert row["has_sbdb_characterization"] is False
+
+
+def test_list_bridge_fallback_and_ambiguity_match_world(mock_lakehouse: Path):
+    """Without the audit log both paths use the bridge; multiple candidate keys are AMBIGUOUS in both."""
+    (mock_lakehouse / "fact_entity_resolution.parquet").unlink()
+    extra = {**next(r for r in _FIXTURE_BRIDGE if r["source_system"] == "neows" and r["identifier_value"] == _TW54_NEOWS),
+             "asteroid_key": "ast_00000000-0000-5000-8000-000000000000"}
+    _write_table(mock_lakehouse, "bridge_asteroid_identifier.parquet", _FIXTURE_BRIDGE + [extra],
+                 BRIDGE_ASTEROID_IDENTIFIER_SCHEMA)
+    client = _client_for(mock_lakehouse)
+    listed = _assert_list_world_detail_resolution_agree(client)
+    assert (listed[_TW54_NEOWS]["match_state"], listed[_TW54_NEOWS]["asteroid_key"]) == ("AMBIGUOUS", None)
+    assert listed[_TW54_NEOWS]["is_sentry_monitored"] is False
+    assert (listed[_ST_NEOWS]["match_state"], listed[_ST_NEOWS]["asteroid_key"]) == (
+        "RESOLVED", "ast_8520aaac-9c77-5e8f-9a88-b4e501749e26")
+
+
+@pytest.mark.skipif(
+    not (_REAL_LAKEHOUSE / "asteroids.parquet").exists(),
+    reason="Local Parquet lakehouse not present (gitignored; absent in CI).",
+)
+def test_list_and_world_resolution_agree_on_real_lakehouse():
+    _assert_list_world_detail_resolution_agree(_client_for(_REAL_LAKEHOUSE))

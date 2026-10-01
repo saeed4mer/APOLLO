@@ -19,6 +19,7 @@ from typing import Any
 
 import duckdb
 import pandas as pd
+import pyarrow.parquet as pq
 
 logger = logging.getLogger(__name__)
 
@@ -26,6 +27,24 @@ UUID5_PATTERN = re.compile(
     r"^ast_[0-9a-f]{8}-[0-9a-f]{4}-5[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$",
     re.IGNORECASE,
 )
+
+
+def _parquet_relation(path: Path, columns: dict[str, str]) -> str:
+    """Return a SQL relation for a Parquet file, or an empty typed relation if it is absent.
+
+    Lets set-based queries keep one shape regardless of which lakehouse assets exist.
+    """
+    if path.exists():
+        return "read_parquet('" + str(path).replace("\\", "/") + "')"
+    casts = ", ".join(f"CAST(NULL AS {sql_type}) AS {name}" for name, sql_type in columns.items())
+    return f"(SELECT {casts} WHERE FALSE)"
+
+
+_SNAPSHOT_COLUMNS = {"spkid": "VARCHAR", "snapshot_key": "VARCHAR", "snapshot_time": "VARCHAR", "run_id": "VARCHAR"}
+_BRIDGE_COLUMNS = {
+    "asteroid_key": "VARCHAR", "source_system": "VARCHAR", "identifier_name": "VARCHAR",
+    "identifier_value": "VARCHAR", "is_primary_pivot": "BOOLEAN",
+}
 
 
 def _nullable_bool(value: Any) -> bool | None:
@@ -61,6 +80,105 @@ class LocalDuckDBDataProvider:
     def get_execution_mode(self) -> str:
         return "LOCAL (DUCKDB / PARQUET LAKEHOUSE)"
 
+    def _sbdb_latest_snapshot_sql(self) -> str:
+        """SQL selecting ONE coherent SBDB snapshot (snapshot_key, run_id) per SPK-ID.
+
+        Ingestion writes object/orbit/element/physical rows for a target in a single
+        run under one (snapshot_key, run_id), so that pair identifies a coherent
+        snapshot. The latest is the newest run that wrote an object or orbit row.
+        Shared by the per-object profile and the world snapshot so both agree.
+        """
+        obj = _parquet_relation(self._sbdb_object_file, _SNAPSHOT_COLUMNS)
+        orb = _parquet_relation(self._sbdb_orbit_file, _SNAPSHOT_COLUMNS)
+        return f"""
+            SELECT spkid, snapshot_key, run_id, snapshot_time
+            FROM (
+                SELECT
+                    spkid, snapshot_key, run_id, snapshot_time,
+                    ROW_NUMBER() OVER (
+                        PARTITION BY spkid
+                        ORDER BY snapshot_key DESC, snapshot_time DESC, run_id DESC
+                    ) AS rn
+                FROM (
+                    SELECT spkid, snapshot_key, snapshot_time, run_id FROM {obj}
+                    UNION ALL
+                    SELECT spkid, snapshot_key, snapshot_time, run_id FROM {orb}
+                )
+            )
+            WHERE rn = 1
+        """
+
+    def _neows_resolution_sql(self, neows_ids_sql: str) -> str:
+        """SQL resolving every NeoWs ID in `neows_ids_sql` (one column: neows_id) in bulk.
+
+        Canonical set-based form of get_resolution_state(), branch for branch: the
+        latest entity-resolution audit record wins; without one, the bridge is the
+        fallback (one key -> RESOLVED, several -> AMBIGUOUS). Shared by the
+        watchlist (GET /asteroids) and the world snapshot so all routes agree.
+        Returns: neows_id, match_state, asteroid_key, match_rule, resolved_at.
+        """
+        bridge = _parquet_relation(self._bridge_file, _BRIDGE_COLUMNS)
+        audit = _parquet_relation(self._resolution_file, {
+            "source_system": "VARCHAR", "identifier_name": "VARCHAR", "source_identifier_value": "VARCHAR",
+            "match_state": "VARCHAR", "assigned_asteroid_key": "VARCHAR", "match_rule": "VARCHAR",
+            "resolved_at": "VARCHAR",
+        })
+        return f"""
+            SELECT
+                ids.neows_id,
+                CASE
+                    WHEN NOT regexp_full_match(ids.neows_id, '[0-9]+') THEN 'INVALID'
+                    WHEN a.neows_id IS NOT NULL THEN
+                        CASE
+                            WHEN a.match_state = 'RESOLVED' AND a.assigned_asteroid_key IS NOT NULL THEN 'RESOLVED'
+                            WHEN a.match_state IN ('AMBIGUOUS', 'INVALID') THEN a.match_state
+                            ELSE 'UNRESOLVED'
+                        END
+                    WHEN b.key_count = 1 THEN 'RESOLVED'
+                    WHEN b.key_count > 1 THEN 'AMBIGUOUS'
+                    ELSE 'UNRESOLVED'
+                END AS match_state,
+                CASE
+                    WHEN NOT regexp_full_match(ids.neows_id, '[0-9]+') THEN NULL
+                    WHEN a.neows_id IS NOT NULL THEN
+                        CASE WHEN a.match_state = 'RESOLVED' THEN a.assigned_asteroid_key END
+                    WHEN b.key_count = 1 THEN b.asteroid_key
+                END AS asteroid_key,
+                CASE
+                    WHEN NOT regexp_full_match(ids.neows_id, '[0-9]+') THEN 'INVALID_SYNTAX'
+                    WHEN a.neows_id IS NOT NULL THEN
+                        CASE
+                            WHEN a.match_state = 'RESOLVED' AND a.assigned_asteroid_key IS NOT NULL THEN a.match_rule
+                            WHEN a.match_state IN ('AMBIGUOUS', 'INVALID') THEN a.match_rule
+                            ELSE COALESCE(a.match_rule, 'NO_CROSS_SOURCE_MATCH')
+                        END
+                    WHEN b.key_count = 1 THEN 'BRIDGE_EXACT_NEOWS_ID'
+                    WHEN b.key_count > 1 THEN 'BRIDGE_MULTIPLE_CANDIDATE_KEYS'
+                    ELSE 'NO_RESOLUTION_RECORD'
+                END AS match_rule,
+                a.resolved_at
+            FROM ({neows_ids_sql}) ids
+            LEFT JOIN (
+                SELECT
+                    source_identifier_value AS neows_id, match_state, assigned_asteroid_key,
+                    match_rule, resolved_at,
+                    ROW_NUMBER() OVER (
+                        PARTITION BY source_identifier_value ORDER BY resolved_at DESC
+                    ) AS rn
+                FROM {audit}
+                WHERE source_system = 'neows' AND identifier_name = 'id'
+            ) a ON a.neows_id = ids.neows_id AND a.rn = 1
+            LEFT JOIN (
+                SELECT
+                    identifier_value AS neows_id,
+                    COUNT(DISTINCT asteroid_key) AS key_count,
+                    MIN(asteroid_key) AS asteroid_key
+                FROM {bridge}
+                WHERE source_system = 'neows' AND identifier_name = 'id'
+                GROUP BY identifier_value
+            ) b ON b.neows_id = ids.neows_id
+        """
+
     def get_threat_watchlist(self) -> pd.DataFrame:
         """Produce the operational close-approach threat watchlist.
 
@@ -94,14 +212,20 @@ class LocalDuckDBDataProvider:
                 ]
             )
 
-        conn = self._get_connection()
+        ast = _parquet_relation(self._asteroids_file, {})
+        bridge = _parquet_relation(self._bridge_file, _BRIDGE_COLUMNS)
+        sentry = _parquet_relation(self._sentry_risk_file, {
+            "sentry_id": "VARCHAR", "impact_probability": "DOUBLE", "palermo_scale_max": "DOUBLE",
+            "torino_scale_max": "BIGINT", "potential_impacts_count": "BIGINT", "impact_year_range": "VARCHAR",
+            "snapshot_key": "VARCHAR", "snapshot_time": "VARCHAR", "run_id": "VARCHAR",
+        })
+        sbdb_obj = _parquet_relation(self._sbdb_object_file, {
+            **_SNAPSHOT_COLUMNS, "designation": "VARCHAR", "fullname": "VARCHAR",
+            "is_pha": "BOOLEAN", "orbit_class_name": "VARCHAR",
+        })
 
-        # Build DuckDB query over local Parquet assets
-        ast_path = str(self._asteroids_file).replace("\\", "/")
-        bridge_path = str(self._bridge_file).replace("\\", "/") if self._bridge_file.exists() else None
-        sentry_path = str(self._sentry_risk_file).replace("\\", "/") if self._sentry_risk_file.exists() else None
-        sbdb_obj_path = str(self._sbdb_object_file).replace("\\", "/") if self._sbdb_object_file.exists() else None
-
+        # Missing enrichment assets become empty relations, so resolution always
+        # follows the canonical rules and enrichment columns are simply NULL/FALSE.
         query = f"""
         WITH deduped_neows AS (
             SELECT
@@ -121,154 +245,221 @@ class LocalDuckDBDataProvider:
                         PARTITION BY id, closest_approach_date
                         ORDER BY miss_distance_km ASC
                     ) AS rn
-                FROM '{ast_path}'
+                FROM {ast}
+            )
+            WHERE rn = 1
+        ),
+        resolution AS ({self._neows_resolution_sql("SELECT DISTINCT neows_id FROM deduped_neows")}),
+        latest_sentry AS (
+            SELECT
+                sentry_id,
+                impact_probability,
+                palermo_scale_max,
+                torino_scale_max,
+                potential_impacts_count,
+                impact_year_range,
+                ROW_NUMBER() OVER (
+                    PARTITION BY sentry_id
+                    ORDER BY snapshot_key DESC, snapshot_time DESC, run_id DESC
+                ) AS rn
+            FROM {sentry}
+        ),
+        sentry_by_asteroid_key AS (
+            SELECT
+                b.asteroid_key,
+                COUNT(DISTINCT b.identifier_value) AS sentry_identifier_count,
+                CASE WHEN COUNT(DISTINCT b.identifier_value) > 1 THEN TRUE ELSE FALSE END AS is_sentry_ambiguous,
+                CASE WHEN COUNT(DISTINCT b.identifier_value) = 1 THEN MAX(b.identifier_value) ELSE NULL END AS sentry_id,
+                CASE WHEN COUNT(DISTINCT b.identifier_value) = 1 THEN MAX(s.impact_probability) ELSE NULL END AS sentry_impact_probability,
+                CASE WHEN COUNT(DISTINCT b.identifier_value) = 1 THEN MAX(s.palermo_scale_max) ELSE NULL END AS sentry_palermo_scale_max,
+                CASE WHEN COUNT(DISTINCT b.identifier_value) = 1 THEN MAX(s.torino_scale_max) ELSE NULL END AS sentry_torino_scale_max,
+                CASE WHEN COUNT(DISTINCT b.identifier_value) = 1 THEN MAX(s.potential_impacts_count) ELSE NULL END AS sentry_potential_impacts_count,
+                CASE WHEN COUNT(DISTINCT b.identifier_value) = 1 THEN MAX(s.impact_year_range) ELSE NULL END AS sentry_impact_year_range
+            FROM {bridge} b
+            LEFT JOIN latest_sentry s
+                ON s.sentry_id = b.identifier_value AND s.rn = 1
+            WHERE b.source_system = 'sentry'
+              AND b.identifier_name = 'sentry_id'
+            GROUP BY b.asteroid_key
+        ),
+        bridge_sbdb_pivot AS (
+            SELECT
+                asteroid_key,
+                MAX(identifier_value) AS spkid
+            FROM {bridge}
+            WHERE source_system = 'sbdb'
+              AND identifier_name = 'spkid'
+              AND is_primary_pivot = TRUE
+            GROUP BY asteroid_key
+        ),
+        sbdb_info AS (
+            SELECT
+                spkid,
+                designation AS sbdb_designation,
+                fullname AS sbdb_fullname,
+                is_pha AS sbdb_is_pha,
+                orbit_class_name AS sbdb_orbit_class_name
+            FROM (
+                SELECT
+                    spkid,
+                    designation,
+                    fullname,
+                    is_pha,
+                    orbit_class_name,
+                    ROW_NUMBER() OVER (
+                        PARTITION BY spkid
+                        ORDER BY snapshot_key DESC, snapshot_time DESC, run_id DESC
+                    ) AS rn
+                FROM {sbdb_obj}
             )
             WHERE rn = 1
         )
+        SELECT
+            n.closest_approach_date,
+            n.neows_id,
+            n.name,
+            n.miss_distance_km,
+            (n.miss_distance_km / 384400.0) AS miss_distance_lunar,
+            n.hazardous,
+            res.asteroid_key,
+            res.match_state,
+            CASE
+                WHEN s.asteroid_key IS NOT NULL AND s.sentry_identifier_count > 0 THEN TRUE
+                ELSE FALSE
+            END AS is_sentry_monitored,
+            COALESCE(s.is_sentry_ambiguous, FALSE) AS is_sentry_ambiguous,
+            s.sentry_id,
+            s.sentry_impact_probability,
+            s.sentry_palermo_scale_max,
+            s.sentry_torino_scale_max,
+            s.sentry_potential_impacts_count,
+            s.sentry_impact_year_range,
+            CASE
+                WHEN b_sbdb.spkid IS NOT NULL THEN TRUE
+                ELSE FALSE
+            END AS has_sbdb_characterization,
+            b_sbdb.spkid AS sbdb_spkid,
+            sbdb.sbdb_designation,
+            sbdb.sbdb_fullname,
+            sbdb.sbdb_orbit_class_name
+        FROM deduped_neows n
+        JOIN resolution res ON res.neows_id = n.neows_id
+        LEFT JOIN sentry_by_asteroid_key s ON s.asteroid_key = res.asteroid_key
+        LEFT JOIN bridge_sbdb_pivot b_sbdb ON b_sbdb.asteroid_key = res.asteroid_key
+        LEFT JOIN sbdb_info sbdb ON sbdb.spkid = b_sbdb.spkid
+        ORDER BY n.miss_distance_km ASC
         """
 
-        if bridge_path and sentry_path and sbdb_obj_path:
-            query += f""",
-            bridge_neows AS (
-                SELECT
-                    identifier_value AS neows_id,
-                    MAX(asteroid_key) AS asteroid_key
-                FROM '{bridge_path}'
-                WHERE source_system = 'neows'
-                  AND identifier_name = 'id'
-                GROUP BY identifier_value
-            ),
-            latest_sentry AS (
-                SELECT
-                    sentry_id,
-                    impact_probability,
-                    palermo_scale_max,
-                    torino_scale_max,
-                    potential_impacts_count,
-                    impact_year_range,
-                    ROW_NUMBER() OVER (
-                        PARTITION BY sentry_id
-                        ORDER BY snapshot_key DESC, snapshot_time DESC, run_id DESC
-                    ) AS rn
-                FROM '{sentry_path}'
-            ),
-            sentry_by_asteroid_key AS (
-                SELECT
-                    b.asteroid_key,
-                    COUNT(DISTINCT b.identifier_value) AS sentry_identifier_count,
-                    CASE WHEN COUNT(DISTINCT b.identifier_value) > 1 THEN TRUE ELSE FALSE END AS is_sentry_ambiguous,
-                    CASE WHEN COUNT(DISTINCT b.identifier_value) = 1 THEN MAX(b.identifier_value) ELSE NULL END AS sentry_id,
-                    CASE WHEN COUNT(DISTINCT b.identifier_value) = 1 THEN MAX(s.impact_probability) ELSE NULL END AS sentry_impact_probability,
-                    CASE WHEN COUNT(DISTINCT b.identifier_value) = 1 THEN MAX(s.palermo_scale_max) ELSE NULL END AS sentry_palermo_scale_max,
-                    CASE WHEN COUNT(DISTINCT b.identifier_value) = 1 THEN MAX(s.torino_scale_max) ELSE NULL END AS sentry_torino_scale_max,
-                    CASE WHEN COUNT(DISTINCT b.identifier_value) = 1 THEN MAX(s.potential_impacts_count) ELSE NULL END AS sentry_potential_impacts_count,
-                    CASE WHEN COUNT(DISTINCT b.identifier_value) = 1 THEN MAX(s.impact_year_range) ELSE NULL END AS sentry_impact_year_range
-                FROM '{bridge_path}' b
-                LEFT JOIN latest_sentry s
-                    ON s.sentry_id = b.identifier_value AND s.rn = 1
-                WHERE b.source_system = 'sentry'
-                  AND b.identifier_name = 'sentry_id'
-                GROUP BY b.asteroid_key
-            ),
-            bridge_sbdb_pivot AS (
-                SELECT
-                    asteroid_key,
-                    MAX(identifier_value) AS spkid
-                FROM '{bridge_path}'
-                WHERE source_system = 'sbdb'
-                  AND identifier_name = 'spkid'
-                  AND is_primary_pivot = TRUE
-                GROUP BY asteroid_key
-            ),
-            sbdb_info AS (
-                SELECT
-                    spkid,
-                    designation AS sbdb_designation,
-                    fullname AS sbdb_fullname,
-                    is_pha AS sbdb_is_pha,
-                    orbit_class_name AS sbdb_orbit_class_name
-                FROM (
-                    SELECT
-                        spkid,
-                        designation,
-                        fullname,
-                        is_pha,
-                        orbit_class_name,
-                        ROW_NUMBER() OVER (
-                            PARTITION BY spkid
-                            ORDER BY snapshot_key DESC, snapshot_time DESC, run_id DESC
-                        ) AS rn
-                    FROM '{sbdb_obj_path}'
-                )
-                WHERE rn = 1
-            )
-            SELECT
-                n.closest_approach_date,
-                n.neows_id,
-                n.name,
-                n.miss_distance_km,
-                (n.miss_distance_km / 384400.0) AS miss_distance_lunar,
-                n.hazardous,
-                bn.asteroid_key,
-                CASE WHEN bn.asteroid_key IS NOT NULL THEN 'RESOLVED' ELSE 'UNRESOLVED' END AS match_state,
-                CASE
-                    WHEN s.asteroid_key IS NOT NULL AND s.sentry_identifier_count > 0 THEN TRUE
-                    ELSE FALSE
-                END AS is_sentry_monitored,
-                COALESCE(s.is_sentry_ambiguous, FALSE) AS is_sentry_ambiguous,
-                s.sentry_id,
-                s.sentry_impact_probability,
-                s.sentry_palermo_scale_max,
-                s.sentry_torino_scale_max,
-                s.sentry_potential_impacts_count,
-                s.sentry_impact_year_range,
-                CASE
-                    WHEN b_sbdb.spkid IS NOT NULL THEN TRUE
-                    ELSE FALSE
-                END AS has_sbdb_characterization,
-                b_sbdb.spkid AS sbdb_spkid,
-                sbdb.sbdb_designation,
-                sbdb.sbdb_fullname,
-                sbdb.sbdb_orbit_class_name
-            FROM deduped_neows n
-            LEFT JOIN bridge_neows bn ON bn.neows_id = n.neows_id
-            LEFT JOIN sentry_by_asteroid_key s ON s.asteroid_key = bn.asteroid_key
-            LEFT JOIN bridge_sbdb_pivot b_sbdb ON b_sbdb.asteroid_key = bn.asteroid_key
-            LEFT JOIN sbdb_info sbdb ON sbdb.spkid = b_sbdb.spkid
-            ORDER BY n.miss_distance_km ASC
-            """
-        else:
-            # Fallback if bridge or Sentry files are missing
-            query += """
-            SELECT
-                n.closest_approach_date,
-                n.neows_id,
-                n.name,
-                n.miss_distance_km,
-                (n.miss_distance_km / 384400.0) AS miss_distance_lunar,
-                n.hazardous,
-                CAST(NULL AS VARCHAR) AS asteroid_key,
-                'UNRESOLVED' AS match_state,
-                FALSE AS is_sentry_monitored,
-                FALSE AS is_sentry_ambiguous,
-                CAST(NULL AS VARCHAR) AS sentry_id,
-                CAST(NULL AS DOUBLE) AS sentry_impact_probability,
-                CAST(NULL AS DOUBLE) AS sentry_palermo_scale_max,
-                CAST(NULL AS BIGINT) AS sentry_torino_scale_max,
-                CAST(NULL AS BIGINT) AS sentry_potential_impacts_count,
-                CAST(NULL AS VARCHAR) AS sentry_impact_year_range,
-                FALSE AS has_sbdb_characterization,
-                CAST(NULL AS VARCHAR) AS sbdb_spkid,
-                CAST(NULL AS VARCHAR) AS sbdb_designation,
-                CAST(NULL AS VARCHAR) AS sbdb_fullname,
-                CAST(NULL AS VARCHAR) AS sbdb_orbit_class_name
-            FROM deduped_neows n
-            ORDER BY n.miss_distance_km ASC
-            """
-
+        conn = self._get_connection()
         df = conn.execute(query).df()
         conn.close()
         return df
+
+    def get_world_snapshot(self) -> dict[str, Any]:
+        """Retrieve the world population: one row per NeoWs object, in ONE set-based query.
+
+        Grain: (neows_id). Encounter selected via CLOSEST_OBSERVED_APPROACH (min
+        miss_distance_km, tie-breaker closest_approach_date ASC), as in the detail route.
+        Resolution mirrors get_resolution_state (audit log first, bridge fallback);
+        SBDB availability uses the shared latest-snapshot selection; Sentry
+        availability comes from crosswalk membership, never from the NeoWs PHA flag.
+        """
+        if not self._asteroids_file.exists():
+            return {"records": pd.DataFrame(), "neows_run_id": None}
+
+        ast = _parquet_relation(self._asteroids_file, {})
+        bridge = _parquet_relation(self._bridge_file, _BRIDGE_COLUMNS)
+        sentry = _parquet_relation(self._sentry_risk_file, {
+            "sentry_id": "VARCHAR", "snapshot_key": "VARCHAR", "snapshot_time": "VARCHAR", "run_id": "VARCHAR",
+        })
+
+        query = f"""
+        WITH neows AS (
+            SELECT
+                id AS neows_id, name, closest_approach_date, miss_distance_km, hazardous,
+                ROW_NUMBER() OVER (
+                    PARTITION BY id
+                    ORDER BY miss_distance_km ASC, closest_approach_date ASC
+                ) AS rn
+            FROM {ast}
+        ),
+        resolved AS (
+            SELECT
+                n.neows_id, n.name, n.closest_approach_date, n.miss_distance_km, n.hazardous,
+                res.match_state, res.asteroid_key, res.match_rule, res.resolved_at
+            FROM neows n
+            JOIN ({self._neows_resolution_sql("SELECT neows_id FROM neows WHERE rn = 1")}) res
+                ON res.neows_id = n.neows_id
+            WHERE n.rn = 1
+        ),
+        sbdb_spkid AS (
+            SELECT
+                asteroid_key, identifier_value AS spkid,
+                ROW_NUMBER() OVER (
+                    PARTITION BY asteroid_key ORDER BY is_primary_pivot DESC, identifier_value ASC
+                ) AS rn
+            FROM {bridge}
+            WHERE source_system = 'sbdb' AND identifier_name = 'spkid'
+        ),
+        sbdb_snapshot AS ({self._sbdb_latest_snapshot_sql()}),
+        sentry_links AS (
+            SELECT
+                asteroid_key,
+                COUNT(DISTINCT identifier_value) AS sentry_link_count,
+                MIN(identifier_value) AS sentry_id
+            FROM {bridge}
+            WHERE source_system = 'sentry' AND identifier_name = 'sentry_id'
+              AND identifier_value IS NOT NULL AND identifier_value <> ''
+            GROUP BY asteroid_key
+        ),
+        sentry_latest AS (
+            SELECT
+                sentry_id, snapshot_key, run_id,
+                ROW_NUMBER() OVER (
+                    PARTITION BY sentry_id ORDER BY snapshot_key DESC, snapshot_time DESC, run_id DESC
+                ) AS rn
+            FROM {sentry}
+        ),
+        sentry_catalog AS (
+            SELECT MAX(snapshot_key) AS latest_catalog_snapshot_key FROM {sentry}
+        )
+        SELECT
+            r.neows_id, r.name, r.closest_approach_date, r.miss_distance_km, r.hazardous,
+            r.match_state, r.asteroid_key, r.match_rule, r.resolved_at,
+            sp.spkid AS sbdb_spkid,
+            ss.snapshot_key AS sbdb_snapshot_key,
+            ss.run_id AS sbdb_run_id,
+            COALESCE(sl.sentry_link_count, 0) AS sentry_link_count,
+            CASE WHEN sl.sentry_link_count = 1 THEN sl.sentry_id END AS sentry_id,
+            sx.snapshot_key AS sentry_snapshot_key,
+            sx.run_id AS sentry_run_id,
+            sc.latest_catalog_snapshot_key AS sentry_latest_catalog_snapshot_key
+        FROM resolved r
+        LEFT JOIN sbdb_spkid sp
+            ON r.match_state = 'RESOLVED' AND sp.asteroid_key = r.asteroid_key AND sp.rn = 1
+        LEFT JOIN sbdb_snapshot ss ON ss.spkid = sp.spkid
+        LEFT JOIN sentry_links sl
+            ON r.match_state = 'RESOLVED' AND sl.asteroid_key = r.asteroid_key
+        LEFT JOIN sentry_latest sx
+            ON sl.sentry_link_count = 1 AND sx.sentry_id = sl.sentry_id AND sx.rn = 1
+        CROSS JOIN sentry_catalog sc
+        ORDER BY r.miss_distance_km ASC, r.neows_id ASC
+        """
+
+        conn = self._get_connection()
+        try:
+            df = conn.execute(query).df()
+        finally:
+            conn.close()
+
+        # NeoWs dataset provenance: save_to_parquet stamps run_id into file metadata
+        # when available; older files carry none, which is reported as None.
+        neows_meta = pq.read_schema(self._asteroids_file).metadata or {}
+        neows_run_id = neows_meta.get(b"run_id")
+        return {
+            "records": df,
+            "neows_run_id": neows_run_id.decode("utf-8") if neows_run_id else None,
+        }
 
     def get_resolution_state(self, neows_id: str | None) -> dict[str, Any]:
         """Resolve a NeoWs source identifier to its entity-resolution state.
@@ -439,31 +630,16 @@ class LocalDuckDBDataProvider:
 
         spkid = spkid_rows[0][0]
 
-        # Step 2: Select ONE coherent SBDB snapshot for this SPK-ID.
-        # Ingestion writes object/orbit/element/physical rows for a target in a
-        # single run under one (snapshot_key, run_id), so that pair identifies a
-        # coherent snapshot. Every table below is pinned to it; nothing falls
-        # back to an older snapshot, so absent fields stay None rather than mixing.
-        anchor_sources = [
-            str(f).replace("\\", "/")
-            for f in (self._sbdb_object_file, self._sbdb_orbit_file)
-            if f.exists()
-        ]
-        if not anchor_sources:
-            conn.close()
-            return None
-        anchor_union = " UNION ALL ".join(
-            f"SELECT snapshot_key, snapshot_time, run_id FROM '{path}' WHERE spkid = ?"
-            for path in anchor_sources
-        )
+        # Step 2: Select ONE coherent SBDB snapshot for this SPK-ID (see
+        # _sbdb_latest_snapshot_sql). Every table below is pinned to it; nothing
+        # falls back to an older snapshot, so absent fields stay None rather than mixing.
         anchor_rows = conn.execute(
             f"""
             SELECT snapshot_key, run_id, snapshot_time
-            FROM ({anchor_union})
-            ORDER BY snapshot_key DESC, snapshot_time DESC, run_id DESC
-            LIMIT 1
+            FROM ({self._sbdb_latest_snapshot_sql()})
+            WHERE spkid = ?
             """,
-            [spkid] * len(anchor_sources),
+            [spkid],
         ).fetchall()
         if not anchor_rows:
             conn.close()
@@ -1034,6 +1210,9 @@ class AthenaDataProvider:
             "Athena cloud queries are not active in this offline execution step. Use LOCAL provider."
         )
 
+    def get_world_snapshot(self) -> dict[str, Any]:
+        raise NotImplementedError("Athena cloud queries are not active in this offline execution step.")
+
     def get_resolution_state(self, neows_id: str | None) -> dict[str, Any]:
         raise NotImplementedError("Athena cloud queries are not active in this offline execution step.")
 
@@ -1074,6 +1253,9 @@ class DashboardDataProvider:
 
     def get_threat_watchlist(self) -> pd.DataFrame:
         return self._provider.get_threat_watchlist()
+
+    def get_world_snapshot(self) -> dict[str, Any]:
+        return self._provider.get_world_snapshot()
 
     def get_resolution_state(self, neows_id: str | None) -> dict[str, Any]:
         return self._provider.get_resolution_state(neows_id)
