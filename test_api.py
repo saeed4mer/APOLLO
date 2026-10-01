@@ -2731,7 +2731,7 @@ def test_crosswalk_envelope_isolation_across_all_endpoints(mock_client: TestClie
 # ============================================================================
 
 _NEOWS_ID_ROUTES = ["/asteroids/{}", "/asteroids/{}/sbdb", "/asteroids/{}/sentry",
-                    "/asteroids/{}/history", "/asteroids/{}/crosswalk"]
+                    "/asteroids/{}/history", "/asteroids/{}/crosswalk", "/asteroids/{}/profile"]
 
 
 @pytest.mark.parametrize("route", _NEOWS_ID_ROUTES)
@@ -3479,3 +3479,371 @@ def test_list_bridge_fallback_and_ambiguity_match_world(mock_lakehouse: Path):
 )
 def test_list_and_world_resolution_agree_on_real_lakehouse():
     _assert_list_world_detail_resolution_agree(_client_for(_REAL_LAKEHOUSE))
+
+
+# ============================================================================
+# PHASE 1 STEP 5 — GET /asteroids/{neows_id}/profile
+# ============================================================================
+
+from api.schemas import AsteroidProfileResponse
+
+_PROFILE_ORBIT_FIELDS = (
+    "orbit_class_code", "orbit_class_name", "is_neo", "is_pha", "orbit_id", "epoch_jd", "equinox",
+    "semi_major_axis_au", "eccentricity", "perihelion_distance_au", "aphelion_distance_au", "inclination_deg",
+    "ascending_node_longitude_deg", "argument_of_perihelion_deg", "mean_anomaly_deg", "mean_motion_deg_per_day",
+    "orbital_period_days", "time_of_perihelion_jd_tdb", "soln_date", "first_obs", "last_obs", "data_arc_days",
+    "n_obs_used", "condition_code", "rms", "earth_moid_au", "jupiter_moid_au", "t_jup",
+)
+_PROFILE_PHYSICAL_FIELDS = ("absolute_magnitude", "estimated_diameter_km", "albedo", "rotational_period_hr")
+_SENTRY_RISK_KEYS = {"impact_probability", "palermo_scale_max", "palermo_scale_cum", "torino_scale_max",
+                     "potential_impacts_count", "danger", "risk", "score"}
+
+
+def _profile(client: TestClient, neows_id: str) -> dict:
+    resp = client.get(f"/asteroids/{neows_id}/profile")
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    AsteroidProfileResponse.model_validate(body)
+    return body["data"]
+
+
+def _assert_profile_matches_existing_endpoints(client: TestClient, neows_id: str) -> None:
+    """The profile agrees field-for-field with /asteroids/{id}, /sbdb, /sentry and /crosswalk."""
+    prof = _profile(client, neows_id)
+    detail = client.get(f"/asteroids/{neows_id}").json()
+    assert prof["identity"]["match_state"] == detail["resolution"]["match_state"]
+    assert prof["identity"]["asteroid_key"] == detail["resolution"]["asteroid_key"]
+    assert prof["identity"]["name"] == detail["data"]["name"]
+    assert prof["encounter"]["closest_approach_date"] == detail["data"]["closest_approach_date"]
+    assert prof["encounter"]["miss_distance_km"] == detail["data"]["miss_distance_km"]
+    assert prof["encounter"]["is_potentially_hazardous"] == detail["data"]["hazardous"]
+    assert prof["provenance"]["resolution"]["match_rule"] == detail["resolution"]["match_rule"]
+
+    sbdb = client.get(f"/asteroids/{neows_id}/sbdb").json()["data"]
+    if sbdb is None:
+        assert all(prof["orbit"][f] is None for f in _PROFILE_ORBIT_FIELDS)
+        assert all(prof["physical"][f] is None for f in _PROFILE_PHYSICAL_FIELDS)
+        assert prof["provenance"]["sbdb"]["run_id"] is None
+    else:
+        for field in _PROFILE_ORBIT_FIELDS:
+            assert prof["orbit"][field] == sbdb[field], field
+        for field in _PROFILE_PHYSICAL_FIELDS:
+            assert prof["physical"][field] == sbdb[field], field
+        assert prof["identity"]["sbdb_spkid"] == sbdb["spkid"]
+        assert prof["identity"]["sbdb_designation"] == sbdb["designation"]
+        assert (prof["provenance"]["sbdb"]["snapshot_key"], prof["provenance"]["sbdb"]["run_id"],
+                prof["provenance"]["sbdb"]["snapshot_time"]) == (sbdb["snapshot_key"], sbdb["run_id"], sbdb["snapshot_time"])
+
+    sentry = client.get(f"/asteroids/{neows_id}/sentry").json()["data"]
+    if sentry is None:
+        assert prof["sentry"]["status"] == "not_resolved"
+    else:
+        assert prof["identity"]["sentry_id"] == sentry["sentry_id"]
+        assert prof["provenance"]["sentry"]["latest_snapshot_key"] == sentry["latest_snapshot_key"]
+
+    crosswalk = client.get(f"/asteroids/{neows_id}/crosswalk").json()["data"]
+    assert prof["identity"]["crosswalk"] == crosswalk
+
+
+# --- 1, 3, 10: resolved profile, identity, provenance ------------------------
+
+def test_profile_resolved_identity_and_provenance(mock_client: TestClient):
+    prof = _profile(mock_client, _TW54_NEOWS)
+    ident = prof["identity"]
+    assert (ident["neows_id"], ident["name"], ident["match_state"]) == (_TW54_NEOWS, "(2010 TW54)", "RESOLVED")
+    assert ident["asteroid_key"] == "ast_b8259bf1-e6e5-5059-853e-9434274cdf2c"
+    assert (ident["sbdb_spkid"], ident["sbdb_designation"], ident["sbdb_fullname"]) == ("50548689", "2010 TW54", "(2010 TW54)")
+    assert ident["sentry_id"] == "bK10T54W"
+    assert {(r["source_system"], r["identifier_name"]) for r in ident["crosswalk"]} >= {
+        ("neows", "id"), ("sbdb", "spkid"), ("sentry", "sentry_id")}
+    assert ident["availability"] == {"status": "available", "unavailable": {}}
+
+    prov = prof["provenance"]
+    assert prov["neows"] == {"source": "nasa_neows", "dataset_run_id": None}
+    assert prov["resolution"]["source"] == "entity_resolution"
+    assert prov["resolution"]["match_rule"] == "EXACT_DESIGNATION_MATCH"
+    assert prov["sbdb"] == {"source": "jpl_sbdb", "spkid": "50548689", "snapshot_key": "2026-09-26",
+                            "run_id": "26b0c1ef0bba", "snapshot_time": "2026-09-26T20:27:39.451638+00:00"}
+    assert prov["sentry"] == {"source": "jpl_sentry", "sentry_id": "bK10T54W",
+                              "latest_snapshot_key": "2026-09-26", "run_id": "7d446dc65b5a"}
+
+
+def test_profile_sections_declare_their_source(mock_client: TestClient):
+    prof = _profile(mock_client, _TW54_NEOWS)
+    assert prof["orbit"]["source"] == "jpl_sbdb"
+    assert prof["physical"]["source"] == "jpl_sbdb"
+    assert prof["encounter"]["source"] == "nasa_neows"
+    assert prof["sentry"]["source"] == "jpl_sentry"
+
+
+# --- 4, 6: orbit fields and source period ------------------------------------
+
+@pytest.mark.parametrize("field,element_name", sorted(_SBDB_ELEMENT_FIELDS.items()))
+def test_profile_orbit_serves_source_elements(mock_client: TestClient, field: str, element_name: str):
+    assert _profile(mock_client, _TW54_NEOWS)["orbit"][field] == pytest.approx(
+        _fixture_element(_TW54_SPKID, element_name), rel=1e-12)
+
+
+def test_profile_orbit_epoch_equinox_class_and_fit(mock_client: TestClient):
+    orbit = _profile(mock_client, _TW54_NEOWS)["orbit"]
+    assert (orbit["epoch_jd"], orbit["equinox"], orbit["orbit_id"]) == (2461200.5, "J2000", "14")
+    assert (orbit["orbit_class_code"], orbit["orbit_class_name"]) == ("APO", "Apollo")
+    assert (orbit["is_neo"], orbit["is_pha"]) == (True, False)
+    assert (orbit["data_arc_days"], orbit["n_obs_used"], orbit["condition_code"]) == (5, 70, "6")
+    assert orbit["availability"] == {"status": "available", "unavailable": {}}
+
+
+def test_profile_period_is_source_days_only(mock_client: TestClient):
+    """The profile serves SBDB 'per' in days and does not carry the deprecated derived year field."""
+    orbit = _profile(mock_client, _TW54_NEOWS)["orbit"]
+    assert orbit["orbital_period_days"] == _fixture_element(_TW54_SPKID, "per")
+    assert "orbital_period_yr" not in orbit
+    assert "astrometric_data_quality_tier" not in orbit
+
+
+# --- 5: coherent snapshot ------------------------------------------------------
+
+def test_profile_uses_single_latest_sbdb_snapshot(mock_lakehouse: Path):
+    older = _sbdb_snapshot_rows("2026-09-01", "run_older", "2026-09-01T00:00:00+00:00", 0.5)
+    newer = _sbdb_snapshot_rows("2026-09-30", "run_newer", "2026-09-30T00:00:00+00:00", 2.0)
+    _write_sbdb_tables(mock_lakehouse, older, newer)
+    client = _client_for(mock_lakehouse)
+    prof = _profile(client, _TW54_NEOWS)
+    assert (prof["provenance"]["sbdb"]["snapshot_key"], prof["provenance"]["sbdb"]["run_id"]) == ("2026-09-30", "run_newer")
+    for field, element_name in _SBDB_ELEMENT_FIELDS.items():
+        assert prof["orbit"][field] == pytest.approx(_fixture_element(_TW54_SPKID, element_name) * 2.0, rel=1e-12)
+    assert prof["physical"]["absolute_magnitude"] == pytest.approx(27.6 * 2.0)
+    world = _by_id(_world(client))[_TW54_NEOWS]
+    assert (world["sbdb"]["snapshot_key"], world["sbdb"]["run_id"]) == ("2026-09-30", "run_newer")
+    _assert_profile_matches_existing_endpoints(client, _TW54_NEOWS)
+
+
+def test_profile_partial_snapshot_reports_not_in_source(mock_lakehouse: Path):
+    """Fields absent from the selected snapshot are null with reason not_in_source, never older values."""
+    newer = _sbdb_snapshot_rows("2026-09-30", "run_partial", "2026-09-30T00:00:00+00:00", 2.0,
+                                element_names=["a", "e"], include_physical=False)
+    _write_sbdb_tables(mock_lakehouse, newer)
+    prof = _profile(_client_for(mock_lakehouse), _TW54_NEOWS)
+    orbit = prof["orbit"]
+    assert orbit["semi_major_axis_au"] == pytest.approx(_fixture_element(_TW54_SPKID, "a") * 2.0)
+    assert orbit["inclination_deg"] is None and orbit["mean_anomaly_deg"] is None
+    assert orbit["availability"]["status"] == "partial"
+    assert orbit["availability"]["unavailable"]["inclination_deg"] == "not_in_source"
+    assert "semi_major_axis_au" not in orbit["availability"]["unavailable"]
+    physical = prof["physical"]
+    assert physical["absolute_magnitude"] is None
+    assert physical["availability"]["status"] == "unavailable"
+    assert set(physical["availability"]["unavailable"].values()) == {"not_in_source"}
+
+
+# --- 7: physical ------------------------------------------------------------
+
+def test_profile_physical_serves_only_source_values(mock_client: TestClient):
+    physical = _profile(mock_client, _ST_NEOWS)["physical"]
+    assert physical["absolute_magnitude"] == 27.1
+    assert physical["estimated_diameter_km"] is None and physical["albedo"] is None
+    assert physical["rotational_period_hr"] is None
+    assert physical["availability"] == {"status": "partial", "unavailable": {
+        "estimated_diameter_km": "not_in_source", "albedo": "not_in_source", "rotational_period_hr": "not_in_source"}}
+
+
+# --- 8: encounter -------------------------------------------------------------
+
+def test_profile_encounter_is_neows_closest_approach(mock_lakehouse: Path):
+    extra = [{**_FIXTURE_ASTEROIDS[0], "closest_approach_date": "2026-09-27", "miss_distance_km": 1234.5}]
+    _write_table(mock_lakehouse, "asteroids.parquet", _FIXTURE_ASTEROIDS + extra, ASTEROID_SCHEMA)
+    client = _client_for(mock_lakehouse)
+    enc = _profile(client, _FIXTURE_ASTEROIDS[0]["id"])["encounter"]
+    assert enc["selection_rule"] == "CLOSEST_OBSERVED_APPROACH"
+    assert (enc["closest_approach_date"], enc["miss_distance_km"]) == ("2026-09-27", 1234.5)
+    assert enc["is_potentially_hazardous"] is True
+    assert enc["availability"]["status"] == "available"
+    _assert_profile_matches_existing_endpoints(client, _FIXTURE_ASTEROIDS[0]["id"])
+
+
+# --- 2, 9: unresolved profile and null semantics ------------------------------
+
+def test_profile_unresolved_object_is_served_with_reasons(mock_client: TestClient):
+    unresolved_id = "2138971"
+    prof = _profile(mock_client, unresolved_id)
+    assert prof["identity"]["match_state"] == "UNRESOLVED"
+    assert prof["identity"]["asteroid_key"] is None and prof["identity"]["crosswalk"] == []
+    assert set(prof["identity"]["availability"]["unavailable"].values()) == {"not_resolved"}
+    for section, fields in (("orbit", _PROFILE_ORBIT_FIELDS), ("physical", _PROFILE_PHYSICAL_FIELDS)):
+        assert all(prof[section][f] is None for f in fields), section
+        assert prof[section]["availability"]["status"] == "unavailable"
+        assert set(prof[section]["availability"]["unavailable"]) == set(fields)
+        assert set(prof[section]["availability"]["unavailable"].values()) == {"not_resolved"}
+    assert prof["encounter"]["miss_distance_km"] == next(
+        a["miss_distance_km"] for a in _FIXTURE_ASTEROIDS if a["id"] == unresolved_id)
+    assert prof["sentry"] == {"source": "jpl_sentry", "status": "not_resolved", "sentry_id": None,
+                              "in_latest_catalog": None, "assessment_endpoint": None}
+    assert prof["provenance"]["sbdb"]["run_id"] is None and prof["provenance"]["sentry"]["run_id"] is None
+
+
+def test_profile_unknown_flags_are_null_not_false(mock_lakehouse: Path):
+    """Unknown NeoWs PHA and unknown SBDB NEO/PHA flags are null with not_in_source, never false."""
+    rows = [{**a, "hazardous": None} if a["id"] == _TW54_NEOWS else a for a in _FIXTURE_ASTEROIDS]
+    _write_table(mock_lakehouse, "asteroids.parquet", rows, ASTEROID_SCHEMA)
+    newer = _sbdb_snapshot_rows("2026-09-30", "run_flags", "2026-09-30T00:00:00+00:00", 1.0, is_neo=None, is_pha=None)
+    _write_sbdb_tables(mock_lakehouse, newer)
+    prof = _profile(_client_for(mock_lakehouse), _TW54_NEOWS)
+    assert prof["encounter"]["is_potentially_hazardous"] is None
+    assert prof["encounter"]["availability"] == {
+        "status": "unavailable", "unavailable": {"is_potentially_hazardous": "not_in_source"}}
+    assert prof["orbit"]["is_neo"] is None and prof["orbit"]["is_pha"] is None
+    assert prof["orbit"]["availability"]["unavailable"] == {"is_neo": "not_in_source", "is_pha": "not_in_source"}
+
+
+# --- 11, 13: Sentry linkage ----------------------------------------------------
+
+def test_profile_sentry_is_linkage_only(mock_client: TestClient):
+    """The profile exposes Sentry linkage/status and points to the assessment; no risk values or scores."""
+    prof = _profile(mock_client, _TW54_NEOWS)
+    assert prof["sentry"] == {"source": "jpl_sentry", "status": "available", "sentry_id": "bK10T54W",
+                              "in_latest_catalog": True, "assessment_endpoint": f"/asteroids/{_TW54_NEOWS}/sentry"}
+
+    def keys(obj):
+        if isinstance(obj, dict):
+            for k, v in obj.items():
+                yield k
+                yield from keys(v)
+        elif isinstance(obj, list):
+            for v in obj:
+                yield from keys(v)
+
+    assert not (set(keys(prof)) & _SENTRY_RISK_KEYS)
+
+
+def test_profile_sentry_statuses_follow_crosswalk(mock_lakehouse: Path):
+    bridge = [r for r in _FIXTURE_BRIDGE
+              if not (r["source_system"] == "sentry" and r["asteroid_key"].startswith("ast_b8259"))]
+    st_link = next(r for r in _FIXTURE_BRIDGE if r["source_system"] == "sentry"
+                   and r["identifier_name"] == "sentry_id" and r["asteroid_key"].startswith("ast_8520"))
+    bridge.append({**st_link, "identifier_value": "bKXXXXXX"})
+    _write_table(mock_lakehouse, "bridge_asteroid_identifier.parquet", bridge, BRIDGE_ASTEROID_IDENTIFIER_SCHEMA)
+    client = _client_for(mock_lakehouse)
+
+    tw54 = _profile(client, _TW54_NEOWS)  # resolved, SBDB present, no Sentry link
+    assert tw54["sentry"]["status"] == "not_present" and tw54["sentry"]["assessment_endpoint"] is None
+    assert tw54["identity"]["sentry_id"] is None
+    assert tw54["identity"]["availability"]["unavailable"] == {"sentry_id": "not_in_source"}
+    assert tw54["orbit"]["availability"]["status"] == "available"
+
+    st = _profile(client, _ST_NEOWS)  # two Sentry IDs: ambiguous, nothing leaks
+    assert st["sentry"]["status"] == "ambiguous" and st["sentry"]["sentry_id"] is None
+    assert st["provenance"]["sentry"] == {"source": "jpl_sentry", "sentry_id": None,
+                                          "latest_snapshot_key": None, "run_id": None}
+    for nid in (_TW54_NEOWS, _ST_NEOWS):
+        _assert_profile_matches_existing_endpoints(client, nid)
+
+
+def test_profile_sentry_linked_without_record(mock_lakehouse: Path):
+    _write_table(mock_lakehouse, "fact_sentry_risk_snapshot.parquet",
+                 [r for r in _FIXTURE_SENTRY if r["sentry_id"] != "bK10T54W"], SENTRY_RISK_SNAPSHOT_SCHEMA)
+    client = _client_for(mock_lakehouse)
+    prof = _profile(client, _TW54_NEOWS)
+    assert prof["sentry"]["status"] == "linked_no_record"
+    assert prof["sentry"]["sentry_id"] == "bK10T54W"
+    assert prof["sentry"]["assessment_endpoint"] == f"/asteroids/{_TW54_NEOWS}/sentry"
+    assert prof["provenance"]["sentry"]["latest_snapshot_key"] is None
+    _assert_profile_matches_existing_endpoints(client, _TW54_NEOWS)
+
+
+# --- 12: missing SBDB ----------------------------------------------------------
+
+def test_profile_resolved_without_sbdb_snapshot(mock_lakehouse: Path):
+    """Resolved identity, SPK-ID linked, but no SBDB snapshot stored: SBDB sections are not_in_source."""
+    _write_table(mock_lakehouse, "fact_sbdb_object_snapshot.parquet",
+                 [r for r in _FIXTURE_SBDB_OBJ if r["spkid"] != _TW54_SPKID], SBDB_OBJECT_SCHEMA)
+    _write_table(mock_lakehouse, "fact_sbdb_orbit.parquet",
+                 [r for r in _FIXTURE_SBDB_ORB if r["spkid"] != _TW54_SPKID], SBDB_ORBIT_SCHEMA)
+    client = _client_for(mock_lakehouse)
+    prof = _profile(client, _TW54_NEOWS)
+    assert prof["identity"]["match_state"] == "RESOLVED"
+    assert prof["identity"]["sbdb_spkid"] == "50548689"
+    assert prof["identity"]["availability"]["unavailable"] == {
+        "sbdb_designation": "not_in_source", "sbdb_fullname": "not_in_source"}
+    for section in ("orbit", "physical"):
+        assert prof[section]["availability"]["status"] == "unavailable"
+        assert set(prof[section]["availability"]["unavailable"].values()) == {"not_in_source"}
+    assert prof["provenance"]["sbdb"] == {"source": "jpl_sbdb", "spkid": "50548689", "snapshot_key": None,
+                                         "run_id": None, "snapshot_time": None}
+    assert prof["sentry"]["status"] == "available"
+    _assert_profile_matches_existing_endpoints(client, _TW54_NEOWS)
+
+
+def test_profile_not_found_returns_404(mock_client: TestClient):
+    resp = mock_client.get("/asteroids/99999999/profile")
+    assert resp.status_code == 404
+    assert ErrorResponse.model_validate(resp.json()).error.code == "TARGET_NOT_FOUND"
+
+
+# --- 14: agreement with existing endpoints ------------------------------------
+
+def test_profile_matches_existing_endpoints_for_every_fixture_object(mock_client: TestClient):
+    for neows_id in sorted(a["id"] for a in _FIXTURE_ASTEROIDS):
+        _assert_profile_matches_existing_endpoints(mock_client, neows_id)
+
+
+def test_profile_agrees_with_world_record(mock_client: TestClient):
+    world = _by_id(_world(mock_client))
+    for neows_id in _PARITY_SAMPLE:
+        prof, rec = _profile(mock_client, neows_id), world[neows_id]
+        assert prof["identity"]["asteroid_key"] == rec["asteroid_key"]
+        assert prof["identity"]["match_state"] == rec["resolution"]["match_state"]
+        assert prof["sentry"]["status"] == rec["sentry"]["status"]
+        assert prof["encounter"]["miss_distance_km"] == rec["encounter"]["miss_distance_km"]
+        assert prof["provenance"]["sbdb"]["run_id"] == rec["sbdb"]["run_id"]
+
+
+# --- Retrieval budget ------------------------------------------------------------
+
+def test_profile_uses_bounded_retrievals_without_per_source_resolution(mock_lakehouse: Path):
+    """A resolved profile costs a fixed number of connections and never re-runs per-object resolution."""
+    executed: list[str] = []
+    opened = 0
+    real_connect = LocalDuckDBDataProvider._get_connection
+
+    def counting_connect(self):
+        nonlocal opened
+        opened += 1
+        return _CountingConnection(real_connect(self), executed)
+
+    def forbidden(*_args, **_kwargs):
+        raise AssertionError("profile must reuse the canonical world query, not the per-object watchlist/resolution")
+
+    with patch.object(LocalDuckDBDataProvider, "_get_connection", counting_connect), \
+         patch.object(LocalDuckDBDataProvider, "get_threat_watchlist", forbidden), \
+         patch.object(LocalDuckDBDataProvider, "get_resolution_state", forbidden), \
+         patch.object(LocalDuckDBDataProvider, "get_sentry_profile", forbidden):
+        _profile(_client_for(mock_lakehouse), _TW54_NEOWS)
+        resolved_cost = (opened, len(executed))
+        opened, executed[:] = 0, []
+        _profile(_client_for(mock_lakehouse), "2138971")
+        unresolved_cost = (opened, len(executed))
+    assert resolved_cost[0] == 3          # world (filtered) + SBDB profile + crosswalk
+    assert unresolved_cost == (1, 1)      # world query only; nothing to enrich
+
+
+# --- 15: real local data --------------------------------------------------------
+
+@pytest.mark.skipif(
+    not (_REAL_LAKEHOUSE / "asteroids.parquet").exists(),
+    reason="Local Parquet lakehouse not present (gitignored; absent in CI).",
+)
+def test_profile_real_local_lakehouse():
+    client = _client_for(_REAL_LAKEHOUSE)
+    world = _by_id(_world(client))
+    for neows_id in (_TW54_NEOWS, _ST_NEOWS):
+        prof = _profile(client, neows_id)
+        assert prof["orbit"]["availability"]["status"] == "available"
+        assert prof["sentry"]["status"] == "available"
+        assert prof["orbit"]["ascending_node_longitude_deg"] is not None
+        _assert_profile_matches_existing_endpoints(client, neows_id)
+    unresolved = sorted(nid for nid, r in world.items() if r["resolution"]["match_state"] != "RESOLVED")
+    assert len(unresolved) == 33
+    for neows_id in unresolved:
+        prof = _profile(client, neows_id)
+        assert prof["orbit"]["availability"]["status"] == "unavailable"
+        assert prof["encounter"]["miss_distance_km"] == world[neows_id]["encounter"]["miss_distance_km"]

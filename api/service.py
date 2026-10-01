@@ -38,6 +38,19 @@ from api.schemas import (
     HistoryResolutionEnvelope,
     CrosswalkRecord,
     CrosswalkResponse,
+    AsteroidProfile,
+    AsteroidProfileResponse,
+    NeowsProvenance,
+    ProfileEncounter,
+    ProfileIdentity,
+    ProfileOrbit,
+    ProfilePhysical,
+    ProfileProvenance,
+    ProfileSentryLinkage,
+    ResolutionProvenance,
+    SbdbProvenance,
+    SectionAvailability,
+    SentryProvenance,
     IllustrativeDirection,
     WorldAsteroid,
     WorldEncounter,
@@ -641,39 +654,45 @@ def _world_sentry(row: dict[str, Any], latest_catalog_key: str | None) -> WorldS
     )
 
 
+def _world_rows(snapshot: dict[str, Any]) -> tuple[list[dict[str, Any]], str | None]:
+    """Normalize provider world rows to plain dicts with genuine None, plus the latest Sentry catalog key."""
+    df = snapshot["records"]
+    rows = [] if df.empty else df.astype(object).where(pd.notnull(df), None).to_dict(orient="records")
+    latest_catalog_key = rows[0]["sentry_latest_catalog_snapshot_key"] if rows else None
+    return rows, latest_catalog_key
+
+
+def _world_record(row: dict[str, Any], latest_catalog_key: str | None) -> WorldAsteroid:
+    """Single transformation of a world row; shared by the world snapshot and the profile."""
+    x, y, z = illustrative_direction(str(row["neows_id"]))
+    return WorldAsteroid(
+        neows_id=row["neows_id"],
+        name=row["name"],
+        asteroid_key=row["asteroid_key"] if row["match_state"] == "RESOLVED" else None,
+        encounter=WorldEncounter(
+            closest_approach_date=row["closest_approach_date"],
+            miss_distance_km=row["miss_distance_km"],
+            is_potentially_hazardous=_nullable_bool(row["hazardous"]),
+        ),
+        resolution=WorldResolution(
+            match_state=row["match_state"],
+            match_rule=row["match_rule"],
+            resolved_at=row["resolved_at"],
+        ),
+        sbdb=_world_sbdb(row),
+        sentry=_world_sentry(row, latest_catalog_key),
+        illustrative_direction=IllustrativeDirection(x=x, y=y, z=z),
+    )
+
+
 def get_world(provider: DashboardDataProvider) -> WorldResponse:
     """Build the world snapshot from ONE set-based provider retrieval.
 
     Pure in-memory transformation per row: no per-object provider calls or queries.
     """
     snapshot = provider.get_world_snapshot()
-    df = snapshot["records"]
-    rows = [] if df.empty else df.astype(object).where(pd.notnull(df), None).to_dict(orient="records")
-    latest_catalog_key = rows[0]["sentry_latest_catalog_snapshot_key"] if rows else None
-
-    records = []
-    for row in rows:
-        x, y, z = illustrative_direction(str(row["neows_id"]))
-        records.append(
-            WorldAsteroid(
-                neows_id=row["neows_id"],
-                name=row["name"],
-                asteroid_key=row["asteroid_key"] if row["match_state"] == "RESOLVED" else None,
-                encounter=WorldEncounter(
-                    closest_approach_date=row["closest_approach_date"],
-                    miss_distance_km=row["miss_distance_km"],
-                    is_potentially_hazardous=_nullable_bool(row["hazardous"]),
-                ),
-                resolution=WorldResolution(
-                    match_state=row["match_state"],
-                    match_rule=row["match_rule"],
-                    resolved_at=row["resolved_at"],
-                ),
-                sbdb=_world_sbdb(row),
-                sentry=_world_sentry(row, latest_catalog_key),
-                illustrative_direction=IllustrativeDirection(x=x, y=y, z=z),
-            )
-        )
+    rows, latest_catalog_key = _world_rows(snapshot)
+    records = [_world_record(row, latest_catalog_key) for row in rows]
 
     meta = MetaEnvelope(
         api_version="1.0.0",
@@ -693,3 +712,131 @@ def get_world(provider: DashboardDataProvider) -> WorldResponse:
         ),
     )
     return WorldResponse(meta=meta, world=world, data=records)
+
+
+_PROFILE_ORBIT_FIELDS = (
+    "orbit_class_code", "orbit_class_name", "is_neo", "is_pha", "orbit_id", "epoch_jd", "equinox",
+    "semi_major_axis_au", "eccentricity", "perihelion_distance_au", "aphelion_distance_au", "inclination_deg",
+    "ascending_node_longitude_deg", "argument_of_perihelion_deg", "mean_anomaly_deg", "mean_motion_deg_per_day",
+    "orbital_period_days", "time_of_perihelion_jd_tdb", "soln_date", "first_obs", "last_obs", "data_arc_days",
+    "n_obs_used", "condition_code", "rms", "earth_moid_au", "jupiter_moid_au", "t_jup",
+)
+_PROFILE_PHYSICAL_FIELDS = ("absolute_magnitude", "estimated_diameter_km", "albedo", "rotational_period_hr")
+
+
+def _section_availability(values: dict[str, Any], missing_reason: str | None) -> SectionAvailability:
+    """Report null fields and why: `missing_reason` if the whole source is unlinked, else not_in_source."""
+    unavailable = {
+        field: (missing_reason or "not_in_source") for field, value in values.items() if value is None
+    }
+    if not unavailable:
+        status = "available"
+    elif len(unavailable) == len(values):
+        status = "unavailable"
+    else:
+        status = "partial"
+    return SectionAvailability(status=status, unavailable=unavailable)
+
+
+def get_asteroid_profile(
+    provider: DashboardDataProvider,
+    neows_id: str,
+) -> AsteroidProfileResponse | None:
+    """Build the cross-source profile for one NeoWs object.
+
+    Reuses, rather than re-implements: the world query (filtered to this ID) for
+    identity, encounter, canonical resolution and SBDB/Sentry availability; the
+    Step 3 coherent-snapshot SBDB profile for orbit + physical; and the crosswalk.
+    At most three provider retrievals, regardless of how many sources are linked.
+    Returns None if neows_id is absent from NeoWs (404).
+    """
+    snapshot = provider.get_world_snapshot(neows_id)
+    rows, latest_catalog_key = _world_rows(snapshot)
+    if not rows:
+        return None
+    world = _world_record(rows[0], latest_catalog_key)
+    resolved = world.resolution.match_state == "RESOLVED"
+    sbdb_reason = None if world.sbdb.status == "available" else ("not_resolved" if not resolved else "not_in_source")
+
+    sbdb: dict[str, Any] = {}
+    if world.sbdb.status == "available":
+        raw = provider.get_sbdb_profile(world.asteroid_key)
+        if raw:
+            sbdb = {k: (None if not isinstance(v, (list, dict)) and pd.isna(v) else v) for k, v in raw.items()}
+        else:
+            sbdb_reason = "not_in_source"
+
+    crosswalk: list[CrosswalkRecord] = []
+    if resolved:
+        cw_df = provider.get_crosswalk(world.asteroid_key)
+        if cw_df is not None and not cw_df.empty:
+            clean = cw_df.astype(object).where(pd.notnull(cw_df), None)
+            crosswalk = [CrosswalkRecord.model_validate(r) for r in clean.to_dict(orient="records")]
+
+    identity_values = {
+        "asteroid_key": world.asteroid_key,
+        "sbdb_spkid": world.sbdb.spkid,
+        "sbdb_designation": sbdb.get("designation"),
+        "sbdb_fullname": sbdb.get("fullname"),
+        "sentry_id": world.sentry.sentry_id,
+    }
+    identity_availability = _section_availability(identity_values, None if resolved else "not_resolved")
+    if world.sbdb.spkid is not None and not sbdb:
+        for field in ("sbdb_designation", "sbdb_fullname"):
+            identity_availability.unavailable[field] = "not_in_source"
+
+    orbit_values = {field: sbdb.get(field) for field in _PROFILE_ORBIT_FIELDS}
+    physical_values = {field: sbdb.get(field) for field in _PROFILE_PHYSICAL_FIELDS}
+    encounter_values = {"is_potentially_hazardous": world.encounter.is_potentially_hazardous}
+
+    linked = world.sentry.status in ("available", "linked_no_record")
+    profile = AsteroidProfile(
+        neows_id=world.neows_id,
+        identity=ProfileIdentity(
+            neows_id=world.neows_id,
+            name=world.name,
+            match_state=world.resolution.match_state,
+            crosswalk=crosswalk,
+            availability=identity_availability,
+            **identity_values,
+        ),
+        orbit=ProfileOrbit(**orbit_values, availability=_section_availability(orbit_values, sbdb_reason)),
+        physical=ProfilePhysical(**physical_values, availability=_section_availability(physical_values, sbdb_reason)),
+        encounter=ProfileEncounter(
+            closest_approach_date=world.encounter.closest_approach_date,
+            miss_distance_km=world.encounter.miss_distance_km,
+            availability=_section_availability(encounter_values, None),
+            **encounter_values,
+        ),
+        sentry=ProfileSentryLinkage(
+            status=world.sentry.status,
+            sentry_id=world.sentry.sentry_id,
+            in_latest_catalog=world.sentry.in_latest_catalog,
+            assessment_endpoint=f"/asteroids/{world.neows_id}/sentry" if linked else None,
+        ),
+        provenance=ProfileProvenance(
+            neows=NeowsProvenance(dataset_run_id=snapshot["neows_run_id"]),
+            resolution=ResolutionProvenance(
+                match_rule=world.resolution.match_rule,
+                resolved_at=world.resolution.resolved_at,
+            ),
+            sbdb=SbdbProvenance(
+                spkid=sbdb.get("spkid") or world.sbdb.spkid,
+                snapshot_key=sbdb.get("snapshot_key"),
+                run_id=sbdb.get("run_id"),
+                snapshot_time=sbdb.get("snapshot_time"),
+            ),
+            sentry=SentryProvenance(
+                sentry_id=world.sentry.sentry_id,
+                latest_snapshot_key=world.sentry.latest_snapshot_key,
+                run_id=world.sentry.run_id,
+            ),
+        ),
+    )
+
+    meta = MetaEnvelope(
+        api_version="1.0.0",
+        execution_mode=provider.get_execution_mode(),
+        timestamp=datetime.now(timezone.utc).isoformat(),
+    )
+    return AsteroidProfileResponse(meta=meta, data=profile)

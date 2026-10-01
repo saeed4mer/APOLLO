@@ -17,6 +17,7 @@ from fastapi.responses import JSONResponse
 
 from api.schemas import (
     AsteroidDetailResponse,
+    AsteroidProfileResponse,
     ErrorDetail,
     ErrorResponse,
     MetaEnvelope,
@@ -30,6 +31,7 @@ from api.schemas import (
 )
 from api.service import (
     get_asteroid_crosswalk,
+    get_asteroid_profile,
     get_asteroid_detail,
     get_asteroid_history,
     get_asteroid_sbdb,
@@ -260,6 +262,42 @@ def get_asteroid_crosswalk_route(
 ) -> CrosswalkResponse | JSONResponse:
     """Return multi-source identifier crosswalk for a specific NeoWs identifier."""
     result = get_asteroid_crosswalk(provider, neows_id)
+    if result is None:
+        error_payload = ErrorResponse(
+            meta=MetaEnvelope(
+                api_version="1.0.0",
+                execution_mode=provider.get_execution_mode(),
+                timestamp=datetime.now(timezone.utc).isoformat(),
+            ),
+            error=ErrorDetail(
+                code="TARGET_NOT_FOUND",
+                message=f"NeoWs asteroid with identifier '{neows_id}' was not found in authoritative lakehouse telemetry.",
+            ),
+        )
+        return JSONResponse(status_code=status.HTTP_404_NOT_FOUND, content=error_payload.model_dump())
+    return result
+
+
+@router.get(
+    "/asteroids/{neows_id}/profile",
+    response_model=AsteroidProfileResponse,
+    status_code=status.HTTP_200_OK,
+    responses={
+        200: {"model": AsteroidProfileResponse, "description": "Cross-source asteroid profile."},
+        404: {"model": ErrorResponse, "description": "Identifier not found in authoritative NeoWs lakehouse telemetry."},
+    },
+    summary="Retrieve the cross-source asteroid profile",
+    description=(
+        "Returns identity, orbit, physical, encounter, Sentry linkage and provenance sections for a NeoWs "
+        "identifier. Every section names its source; unavailable fields are null with a machine-readable reason."
+    ),
+)
+def get_asteroid_profile_route(
+    neows_id: NeowsIdPath,
+    provider: DashboardDataProvider = Depends(get_provider),
+) -> AsteroidProfileResponse | JSONResponse:
+    """Return the cross-source profile for a specific NeoWs identifier."""
+    result = get_asteroid_profile(provider, neows_id)
     if result is None:
         error_payload = ErrorResponse(
             meta=MetaEnvelope(

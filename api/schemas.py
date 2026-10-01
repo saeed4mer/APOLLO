@@ -553,3 +553,191 @@ class WorldResponse(BaseModel):
     meta: MetaEnvelope = Field(..., description="Standard response metadata envelope")
     world: WorldSnapshotInfo = Field(..., description="World snapshot metadata")
     data: list[WorldAsteroid] = Field(..., description="One record per NeoWs object")
+
+
+# ============================================================================
+# ASTEROID PROFILE CONTRACT — GET /asteroids/{neows_id}/profile
+# ============================================================================
+
+UnavailableReason = Literal["not_resolved", "not_in_source", "not_in_current_contract"]
+
+
+class SectionAvailability(BaseModel):
+    """Machine-readable availability of a profile section. Unavailable fields are null, never defaulted."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    status: Literal["available", "partial", "unavailable"] = Field(
+        ..., description="available: every field has a source value; partial: some are null; unavailable: all are null"
+    )
+    unavailable: dict[str, UnavailableReason] = Field(
+        default_factory=dict,
+        description=(
+            "Null fields and why: not_resolved (identity not established, so the source cannot be linked), "
+            "not_in_source (linked source has no value), not_in_current_contract (not ingested by the current pipeline)"
+        ),
+    )
+
+
+class ProfileIdentity(BaseModel):
+    """Who this object is across sources. Resolution follows the canonical serving-layer rules."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    neows_id: str = Field(..., description="NeoWs asteroid identifier")
+    name: str = Field(..., description="NeoWs name / designation")
+    match_state: Literal["RESOLVED", "UNRESOLVED", "AMBIGUOUS", "INVALID"] = Field(..., description="Identity resolution state")
+    asteroid_key: str | None = Field(default=None, description="Canonical UUID5 key; null unless resolved")
+    sbdb_spkid: str | None = Field(default=None, description="JPL SBDB SPK-ID linked through the crosswalk")
+    sbdb_designation: str | None = Field(default=None, description="Designation as published by SBDB")
+    sbdb_fullname: str | None = Field(default=None, description="Full name as published by SBDB")
+    sentry_id: str | None = Field(default=None, description="Sentry object ID when exactly one is linked")
+    crosswalk: list[CrosswalkRecord] = Field(default_factory=list, description="All identifiers mapped to asteroid_key")
+    availability: SectionAvailability
+
+
+class ProfileOrbit(BaseModel):
+    """Osculating orbit from ONE coherent SBDB snapshot (see provenance.sbdb). Source: JPL SBDB."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    source: Literal["jpl_sbdb"] = "jpl_sbdb"
+    orbit_class_code: str | None = Field(default=None, description="SBDB orbit class code (e.g. APO)")
+    orbit_class_name: str | None = Field(default=None, description="SBDB orbit class name")
+    is_neo: bool | None = Field(default=None, description="SBDB NEO flag; null when not reported")
+    is_pha: bool | None = Field(default=None, description="SBDB PHA flag; null when not reported. Distinct from the NeoWs flag")
+    orbit_id: str | None = Field(default=None, description="Orbit solution identifier")
+    epoch_jd: float | None = Field(default=None, description="Osculating epoch, Julian Date (TDB)")
+    equinox: str | None = Field(default=None, description="Reference frame equinox (e.g. J2000)")
+    semi_major_axis_au: float | None = Field(default=None, description="a, au")
+    eccentricity: float | None = Field(default=None, description="e, unitless")
+    perihelion_distance_au: float | None = Field(default=None, description="q, au")
+    aphelion_distance_au: float | None = Field(default=None, description="Q (SBDB 'ad'), au")
+    inclination_deg: float | None = Field(default=None, description="i, deg")
+    ascending_node_longitude_deg: float | None = Field(default=None, description="Ω (SBDB 'om'), deg")
+    argument_of_perihelion_deg: float | None = Field(default=None, description="ω (SBDB 'w'), deg")
+    mean_anomaly_deg: float | None = Field(default=None, description="M (SBDB 'ma'), deg")
+    mean_motion_deg_per_day: float | None = Field(default=None, description="n, deg/d")
+    orbital_period_days: float | None = Field(default=None, description="Sidereal period as published by SBDB ('per'), days")
+    time_of_perihelion_jd_tdb: float | None = Field(default=None, description="tp, Julian Date (TDB)")
+    soln_date: str | None = Field(default=None, description="Orbit solution date")
+    first_obs: str | None = Field(default=None, description="First observation used in the fit")
+    last_obs: str | None = Field(default=None, description="Last observation used in the fit")
+    data_arc_days: int | None = Field(default=None, description="Observation arc, days")
+    n_obs_used: int | None = Field(default=None, description="Observations used in the fit")
+    condition_code: str | None = Field(default=None, description="Orbit condition code (U)")
+    rms: float | None = Field(default=None, description="Normalized RMS residual of the fit")
+    earth_moid_au: float | None = Field(default=None, description="Earth MOID, au")
+    jupiter_moid_au: float | None = Field(default=None, description="Jupiter MOID, au")
+    t_jup: float | None = Field(default=None, description="Tisserand parameter with respect to Jupiter")
+    availability: SectionAvailability
+
+
+class ProfilePhysical(BaseModel):
+    """Physical parameters from the same SBDB snapshot as the orbit. Source: JPL SBDB."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    source: Literal["jpl_sbdb"] = "jpl_sbdb"
+    absolute_magnitude: float | None = Field(default=None, description="H")
+    estimated_diameter_km: float | None = Field(default=None, description="SBDB 'diameter', km")
+    albedo: float | None = Field(default=None, description="SBDB geometric albedo")
+    rotational_period_hr: float | None = Field(default=None, description="SBDB 'rot_per', hours")
+    availability: SectionAvailability
+
+
+class ProfileEncounter(BaseModel):
+    """Close-approach facts for the selected encounter. Source: NASA NeoWs only."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    source: Literal["nasa_neows"] = "nasa_neows"
+    selection_rule: Literal["CLOSEST_OBSERVED_APPROACH"] = "CLOSEST_OBSERVED_APPROACH"
+    closest_approach_date: str = Field(..., description="Date of closest observed approach (YYYY-MM-DD)")
+    miss_distance_km: float = Field(..., description="Miss distance, km (source value)")
+    is_potentially_hazardous: bool | None = Field(
+        default=None, description="NeoWs PHA flag; null when not reported. Independent of Sentry linkage"
+    )
+    availability: SectionAvailability
+
+
+class ProfileSentryLinkage(BaseModel):
+    """Sentry linkage via the crosswalk only. The published assessment lives at assessment_endpoint."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    source: Literal["jpl_sentry"] = "jpl_sentry"
+    status: Literal["available", "not_resolved", "not_present", "ambiguous", "linked_no_record"] = Field(
+        ..., description="Same statuses as the world snapshot's sentry block"
+    )
+    sentry_id: str | None = Field(default=None, description="Sentry object ID when exactly one is linked")
+    in_latest_catalog: bool | None = Field(default=None, description="Latest record is in the latest stored catalog; null when no record")
+    assessment_endpoint: str | None = Field(default=None, description="Route serving the published Sentry assessment, when linked")
+
+
+class NeowsProvenance(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    source: Literal["nasa_neows"] = "nasa_neows"
+    dataset_run_id: str | None = Field(default=None, description="NeoWs ingestion run ID from dataset metadata; null if not recorded")
+
+
+class ResolutionProvenance(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    source: Literal["entity_resolution"] = "entity_resolution"
+    match_rule: str | None = Field(default=None, description="Resolution rule applied")
+    resolved_at: str | None = Field(default=None, description="Timestamp of the resolution run, if recorded")
+
+
+class SbdbProvenance(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    source: Literal["jpl_sbdb"] = "jpl_sbdb"
+    spkid: str | None = Field(default=None, description="SPK-ID the orbit and physical sections were read for")
+    snapshot_key: str | None = Field(default=None, description="The single SBDB snapshot both sections came from")
+    run_id: str | None = Field(default=None, description="Ingestion run of that snapshot")
+    snapshot_time: str | None = Field(default=None, description="UTC timestamp of that snapshot run")
+
+
+class SentryProvenance(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    source: Literal["jpl_sentry"] = "jpl_sentry"
+    sentry_id: str | None = Field(default=None, description="Linked Sentry object ID")
+    latest_snapshot_key: str | None = Field(default=None, description="Snapshot key of the latest stored Sentry record")
+    run_id: str | None = Field(default=None, description="Ingestion run of that record")
+
+
+class ProfileProvenance(BaseModel):
+    """Where every section came from, with snapshot/run metadata where the data records it."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    neows: NeowsProvenance
+    resolution: ResolutionProvenance
+    sbdb: SbdbProvenance
+    sentry: SentryProvenance
+
+
+class AsteroidProfile(BaseModel):
+    """Single coherent cross-source profile for one NeoWs object. Grain: (neows_id)."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    neows_id: str = Field(..., description="NeoWs asteroid identifier")
+    identity: ProfileIdentity
+    orbit: ProfileOrbit
+    physical: ProfilePhysical
+    encounter: ProfileEncounter
+    sentry: ProfileSentryLinkage
+    provenance: ProfileProvenance
+
+
+class AsteroidProfileResponse(BaseModel):
+    """Authoritative response envelope for GET /asteroids/{neows_id}/profile."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    meta: MetaEnvelope = Field(..., description="Standard response metadata envelope")
+    data: AsteroidProfile = Field(..., description="Cross-source asteroid profile")

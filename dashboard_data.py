@@ -355,8 +355,11 @@ class LocalDuckDBDataProvider:
         conn.close()
         return df
 
-    def get_world_snapshot(self) -> dict[str, Any]:
+    def get_world_snapshot(self, neows_id: str | None = None) -> dict[str, Any]:
         """Retrieve the world population: one row per NeoWs object, in ONE set-based query.
+
+        With `neows_id`, the same query is restricted to that object (used by the
+        per-object profile so it shares this exact identity/availability logic).
 
         Grain: (neows_id). Encounter selected via CLOSEST_OBSERVED_APPROACH (min
         miss_distance_km, tie-breaker closest_approach_date ASC), as in the detail route.
@@ -382,6 +385,7 @@ class LocalDuckDBDataProvider:
                     ORDER BY miss_distance_km ASC, closest_approach_date ASC
                 ) AS rn
             FROM {ast}
+            {"WHERE id = ?" if neows_id is not None else ""}
         ),
         resolved AS (
             SELECT
@@ -448,7 +452,7 @@ class LocalDuckDBDataProvider:
 
         conn = self._get_connection()
         try:
-            df = conn.execute(query).df()
+            df = conn.execute(query, [neows_id] if neows_id is not None else []).df()
         finally:
             conn.close()
 
@@ -1210,7 +1214,7 @@ class AthenaDataProvider:
             "Athena cloud queries are not active in this offline execution step. Use LOCAL provider."
         )
 
-    def get_world_snapshot(self) -> dict[str, Any]:
+    def get_world_snapshot(self, neows_id: str | None = None) -> dict[str, Any]:
         raise NotImplementedError("Athena cloud queries are not active in this offline execution step.")
 
     def get_resolution_state(self, neows_id: str | None) -> dict[str, Any]:
@@ -1254,8 +1258,8 @@ class DashboardDataProvider:
     def get_threat_watchlist(self) -> pd.DataFrame:
         return self._provider.get_threat_watchlist()
 
-    def get_world_snapshot(self) -> dict[str, Any]:
-        return self._provider.get_world_snapshot()
+    def get_world_snapshot(self, neows_id: str | None = None) -> dict[str, Any]:
+        return self._provider.get_world_snapshot(neows_id)
 
     def get_resolution_state(self, neows_id: str | None) -> dict[str, Any]:
         return self._provider.get_resolution_state(neows_id)
