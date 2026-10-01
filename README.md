@@ -444,7 +444,7 @@ A renderer can be built entirely on two endpoints, without reading Parquet, know
 
 ## Immersive Renderer (M7)
 
-The new presentation layer lives in [`frontend/`](frontend/): a Three.js + TypeScript renderer that consumes **only** `GET /asteroids/world` (once, at load) and `GET /asteroids/{neows_id}/profile` (on selection). It never reads storage or re-derives backend logic. Architecture, spatial model, state model and lifecycle guarantees are documented in [`frontend/README.md`](frontend/README.md). The Streamlit dashboard remains available as the reference until the renderer is validated.
+The new presentation layer lives in [`frontend/`](frontend/): a Three.js + TypeScript world (Earth's curved horizon below, real asteroids falling into distance-ordered resting heights above, a scroll journey from sky into space, and click-to-focus intelligence callouts) that consumes **only** `GET /asteroids/world` (once, at load) and `GET /asteroids/{neows_id}/profile` (on selection). It never reads storage or re-derives backend logic. Architecture, spatial model, state model and lifecycle guarantees are documented in [`frontend/README.md`](frontend/README.md). The Streamlit dashboard remains available as the reference until the renderer is validated.
 
 ```bash
 uvicorn api.main:app --host 127.0.0.1 --port 8000   # terminal 1: API

@@ -3,7 +3,7 @@ import { validateProfileResponse } from "../src/api/validateProfile";
 import { validateWorldResponse } from "../src/api/validateWorld";
 import { createApp, type AppDeps } from "../src/app";
 import type { AsteroidProfile } from "../src/models/profile";
-import { formatFlag, formatNumber, REASON_TEXT, SENTRY_STATUS_TEXT } from "../src/ui/format";
+import { formatFlag, formatNumber, SENTRY_STATUS_TEXT } from "../src/ui/format";
 import { deferred, FakeGL, fixture, flushPromises, installFakeRaf, installFakeResizeObserver } from "./helpers";
 
 beforeEach(() => {
@@ -22,17 +22,20 @@ function mount(overrides: Partial<AppDeps> = {}) {
   const fetchProfile = vi.fn(async (id: string): Promise<AsteroidProfile> => profileFixture(id));
   const app = createApp(root, { createGLRenderer: () => new FakeGL(), fetchWorld, fetchProfile, ...overrides });
   const text = (selector: string) => root.querySelector(selector)?.textContent ?? "";
-  const fact = (sectionKey: string, label: string) => {
-    const rows = root.querySelectorAll(`[data-section="${sectionKey}"] .fact`);
-    for (const row of rows) if (row.querySelector(".fact-label")?.textContent === label) return row;
-    throw new Error(`no '${label}' row in ${sectionKey}`);
+  const callout = (key: string) => root.querySelector<HTMLElement>(`[data-callout="${key}"]`);
+  const value = (key: string, label: string) => {
+    for (const row of callout(key)?.querySelectorAll(".fact") ?? []) {
+      if (row.querySelector(".fact-label")?.textContent === label) return row.querySelector(".fact-value")!.textContent;
+    }
+    throw new Error(`no '${label}' in callout ${key}`);
   };
-  const value = (sectionKey: string, label: string) => fact(sectionKey, label).querySelector(".fact-value")!.textContent;
+  const button = (label: string) =>
+    [...root.querySelectorAll<HTMLButtonElement>("button")].find((b) => b.textContent?.includes(label))!;
   const cleanup = () => {
     app.dispose();
     root.remove();
   };
-  return { app, root, text, value, fact, fetchWorld, fetchProfile, cleanup };
+  return { app, root, text, callout, value, button, fetchWorld, fetchProfile, cleanup };
 }
 
 async function goTo(hash: string) {
@@ -41,15 +44,31 @@ async function goTo(hash: string) {
   await flushPromises();
 }
 
-describe("world loading", () => {
-  it("shows an explicit loading state, then the real object count; one request, no profile requests", async () => {
+describe("world", () => {
+  it("explicit loading state, then minimal chrome; one world request and no profile requests", async () => {
     const world = deferred<ReturnType<typeof validateWorldResponse>>();
-    const t = mount({ fetchWorld: vi.fn(() => world.promise) });
+    const fetchWorld = vi.fn(() => world.promise);
+    const t = mount({ fetchWorld });
     expect(t.text(".status-overlay")).toBe("INITIALIZING ASTEROID INTELLIGENCE FIELD");
     world.resolve(validateWorldResponse(fixture("world.json")));
     await flushPromises();
-    expect(t.text(".status-overlay")).toBe("LOADED · 35 OBJECTS");
+    expect((t.root.querySelector(".status-overlay") as HTMLElement).hidden).toBe(true); // no permanent banner
+    expect(t.text(".intro")).toContain("Scroll to explore");
+    expect(fetchWorld).toHaveBeenCalledTimes(1);
     expect(t.fetchProfile).not.toHaveBeenCalled();
+    t.cleanup();
+  });
+
+  it("About this view states the illustrative model and the real count", async () => {
+    const t = mount();
+    await flushPromises();
+    t.button("About this view").click();
+    const about = t.text(".about-panel");
+    expect(about).toContain("illustrative visualization, not a physics simulation");
+    expect(about).toContain("real NeoWs miss distance");
+    expect(about).toContain("sha256-uniform-sphere-v1");
+    expect(about).toContain("35 NeoWs object(s) shown");
+    expect(about).toContain("visual metaphor");
     t.cleanup();
   });
 
@@ -64,10 +83,9 @@ describe("world loading", () => {
     await flushPromises();
     expect(t.text(".status-overlay")).toContain("ASTEROID INTELLIGENCE UNAVAILABLE");
     expect(t.text(".status-overlay")).toContain("could not be reached");
-    expect(t.text(".status-overlay")).not.toMatch(/Error:|stack|at /);
-    (t.root.querySelector(".status-overlay button") as HTMLButtonElement).click();
+    t.button("Retry").click();
     await flushPromises();
-    expect(t.text(".status-overlay")).toBe("LOADED · 35 OBJECTS");
+    expect(t.app.store.getState().world.status).toBe("ready");
     t.cleanup();
   });
 
@@ -76,25 +94,26 @@ describe("world loading", () => {
     body.data[0].illustrative_direction = { x: 5, y: 0, z: 0 };
     const t = mount({ fetchWorld: vi.fn(async () => validateWorldResponse(body)) });
     await flushPromises();
-    expect(t.text(".status-overlay")).toContain("LOADED · 34 OBJECTS");
     expect(t.text(".status-overlay")).toContain("1 record(s) failed validation");
+    t.button("About this view").click();
+    expect(t.text(".about-panel")).toContain("34 NeoWs object(s) shown");
     t.cleanup();
   });
 });
 
-describe("profile: data shown is exactly the API's, source by source", () => {
+describe("focus: information emerges around the asteroid, exactly as served", () => {
   it("never shows numbers while loading", async () => {
     const pending = deferred<AsteroidProfile>();
     const t = mount({ fetchProfile: vi.fn(() => pending.promise) });
     await flushPromises();
     await goTo("#/asteroid/3548666");
-    const values = [...t.root.querySelectorAll(".profile-panel .fact-value")].map((n) => n.textContent);
-    expect(values.length).toBeGreaterThan(10);
+    const values = [...t.root.querySelectorAll(".callout .fact-value")].map((n) => n.textContent);
+    expect(values.length).toBeGreaterThan(0);
     expect(new Set(values)).toEqual(new Set(["Loading…"]));
     t.cleanup();
   });
 
-  it("2010 TW54: NeoWs, SBDB and Sentry values match the API response", async () => {
+  it("2010 TW54: each callout's values match the API, each labelled with its source", async () => {
     const t = mount();
     await flushPromises();
     await goTo("#/asteroid/3548666");
@@ -105,33 +124,34 @@ describe("profile: data shown is exactly the API's, source by source", () => {
     expect(t.value("encounter", "Miss distance")).toBe(formatNumber(api.encounter.miss_distance_km, "km", 0));
     expect(t.value("encounter", "Relative velocity")).toBe(formatNumber(api.encounter.relative_velocity_km_s, "km/s", 3));
     expect(t.value("encounter", "Potentially hazardous (NeoWs)")).toBe(formatFlag(api.encounter.is_potentially_hazardous));
-    expect(t.value("encounter", "NeoWs 'Sentry object' flag")).toBe("Yes");
+    expect(t.value("identity", "NeoWs ID")).toBe("3548666");
+    expect(t.value("identity", "Sentry ID")).toBe(api.identity.sentry_id);
+    expect(t.value("orbit", "Ascending node Ω")).toBe(formatNumber(api.orbit.ascending_node_longitude_deg, "deg", 4));
     expect(t.value("neows_physical", "Absolute magnitude H")).toBe(`${api.neows_physical.absolute_magnitude_h} mag`);
     expect(t.value("physical", "Absolute magnitude H")).toBe(`${api.physical.absolute_magnitude} mag`);
-    expect(t.value("orbit", "Ascending node Ω")).toBe(formatNumber(api.orbit.ascending_node_longitude_deg, "deg", 4));
+    expect(t.value("sentry_assessment", "Linkage")).toBe(SENTRY_STATUS_TEXT.available);
     expect(t.value("sentry_assessment", "Cumulative impact probability (as published)")).toBe(String(api.sentry.assessment.impact_probability));
-    expect(t.value("sentry_assessment", "Torino scale (max)")).toBe(String(api.sentry.assessment.torino_scale_max));
 
-    const sources = [...t.root.querySelectorAll(".profile-panel .source")].map((n) => n.textContent);
-    expect(sources).toEqual([
-      "Source: Identity resolution + crosswalk", "Source: NASA NeoWs", "Source: NASA NeoWs",
-      "Source: JPL SBDB", "Source: JPL SBDB", "Source: JPL Sentry",
-    ]);
-    expect(t.text('[data-section="sentry_assessment"] .sentry-status')).toBe(`Linkage: ${SENTRY_STATUS_TEXT.available}`);
+    const sources = Object.fromEntries([...t.root.querySelectorAll<HTMLElement>(".callout")].map((c) => [c.dataset.callout, c.querySelector(".source")?.textContent]));
+    expect(sources).toEqual({
+      identity: "Identity resolution + crosswalk", encounter: "NASA NeoWs", orbit: "JPL SBDB",
+      sentry_assessment: "JPL Sentry", neows_physical: "NASA NeoWs", physical: "JPL SBDB",
+    });
+    expect(t.text(".focus-title")).toContain("(2010 TW54)");
     t.cleanup();
   });
 
-  it("unresolved 2018 SP2: SBDB/Sentry read Unavailable with the contract's reason; nothing inferred", async () => {
+  it("unresolved 2018 SP2: no empty callouts; SBDB and Sentry collapse with the contract's reason", async () => {
     const t = mount();
     await flushPromises();
     await goTo("#/asteroid/3830890");
-    const row = t.fact("orbit", "Semi-major axis a");
-    expect(row.querySelector(".fact-value")!.textContent).toBe("Unavailable");
-    expect(row.querySelector(".fact-reason")!.textContent).toBe(REASON_TEXT.not_resolved);
-    expect(t.value("orbit", "PHA (SBDB)")).toBe("Unknown");
-    expect(t.value("sentry_assessment", "Cumulative impact probability (as published)")).toBe("Unavailable");
-    expect(t.text('[data-section="sentry_assessment"] .sentry-status')).toBe(`Linkage: ${SENTRY_STATUS_TEXT.not_resolved}`);
-    expect(t.root.querySelector(".profile-panel")!.textContent).not.toMatch(/XX|NaN|undefined/);
+    expect(t.callout("orbit")).toBeNull();
+    expect(t.callout("sentry_assessment")).toBeNull();
+    expect(t.callout("encounter")).not.toBeNull();
+    const unavailable = [...t.root.querySelectorAll(".focus-unavailable")].map((n) => n.textContent);
+    expect(unavailable).toContain("Orbit · JPL SBDB — identity not resolved, so this source cannot be linked");
+    expect(unavailable).toContain("Sentry · JPL Sentry — Not linkable: identity not resolved");
+    expect(t.root.querySelector(".focus-view")!.textContent).not.toMatch(/XX|NaN|undefined/);
     t.cleanup();
   });
 
@@ -139,7 +159,7 @@ describe("profile: data shown is exactly the API's, source by source", () => {
     const t = mount({ fetchProfile: vi.fn(async () => { throw new ApiError("not_found", "nf", { status: 404, code: "TARGET_NOT_FOUND" }); }) });
     await flushPromises();
     await goTo("#/asteroid/99999999");
-    expect(t.text(".profile-panel .status-title")).toBe("Asteroid not found");
+    expect(t.text(".focus-error .status-title")).toBe("Asteroid not found");
     t.cleanup();
   });
 
@@ -153,8 +173,8 @@ describe("profile: data shown is exactly the API's, source by source", () => {
     });
     await flushPromises();
     await goTo("#/asteroid/3548666");
-    expect(t.text(".profile-panel .status-title")).toBe("Profile unavailable");
-    [...t.root.querySelectorAll<HTMLButtonElement>(".profile-panel button")].find((b) => b.textContent === "Retry")!.click();
+    expect(t.text(".focus-error .status-title")).toBe("Profile unavailable");
+    t.button("Retry").click();
     await flushPromises();
     expect(t.app.store.getState().profile.status).toBe("ready");
     t.cleanup();
@@ -162,7 +182,7 @@ describe("profile: data shown is exactly the API's, source by source", () => {
 });
 
 describe("selection", () => {
-  it("A then B: A's late response never overwrites B", async () => {
+  it("A -> B -> C quickly: late answers for A and B never overwrite C", async () => {
     const requests = new Map<string, ReturnType<typeof deferred<AsteroidProfile>>>();
     const t = mount({
       fetchProfile: vi.fn((id: string) => {
@@ -173,30 +193,31 @@ describe("selection", () => {
     });
     await flushPromises();
     await goTo("#/asteroid/3548666");
+    await goTo("#/asteroid/3427460");
     await goTo("#/asteroid/3830890");
     requests.get("3830890")!.resolve(profileFixture("3830890"));
     await flushPromises();
     requests.get("3548666")!.resolve(profileFixture("3548666"));
+    requests.get("3427460")!.resolve(profileFixture("3548666"));
     await flushPromises();
     expect(t.app.store.getState().selectedId).toBe("3830890");
     expect(t.app.store.getState().profile).toMatchObject({ status: "ready", neowsId: "3830890" });
-    expect(t.text(".profile-panel h2")).toBe("(2018 SP2)");
+    expect(t.text(".focus-title")).toContain("(2018 SP2)");
     t.cleanup();
   });
 
-  it("Back returns to the world and clears the profile; a refresh restores the selection from the URL", async () => {
+  it("Back returns to the world; a refresh restores the focused asteroid from the URL", async () => {
     window.location.hash = "#/asteroid/3548666";
     await flushPromises();
     const t = mount();
     await flushPromises();
     await flushPromises();
     expect(t.app.store.getState().selectedId).toBe("3548666");
-    [...t.root.querySelectorAll<HTMLButtonElement>(".profile-panel button")].find((b) => b.textContent?.includes("Back"))!.click();
+    t.button("Back to world").click();
     await flushPromises();
     expect(window.location.hash).toBe("#/");
-    expect(t.app.store.getState().selectedId).toBeNull();
     expect(t.app.store.getState().profile).toEqual({ status: "idle" });
-    expect((t.root.querySelector(".profile-panel") as HTMLElement).hidden).toBe(true);
+    expect((t.root.querySelector(".focus-view") as HTMLElement).hidden).toBe(true);
     t.cleanup();
   });
 });

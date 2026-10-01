@@ -27,6 +27,7 @@ export class FakeGL implements GLRendererLike {
   }
   setPixelRatio(): void {}
   setSize(): void {}
+  setClearColor(): void {}
   render(): void {
     this.renders++;
   }
@@ -66,8 +67,11 @@ export function installFakeRaf() {
 /** ResizeObserver stand-in that counts observers that are still connected. */
 export class FakeResizeObserver {
   static active = 0;
+  static instances: FakeResizeObserver[] = [];
   private connected = false;
-  constructor(private readonly callback: ResizeObserverCallback) {}
+  constructor(private readonly callback: ResizeObserverCallback) {
+    FakeResizeObserver.instances.push(this);
+  }
   observe(): void {
     if (!this.connected) FakeResizeObserver.active++;
     this.connected = true;
@@ -84,6 +88,7 @@ export class FakeResizeObserver {
 
 export function installFakeResizeObserver(): void {
   FakeResizeObserver.active = 0;
+  FakeResizeObserver.instances = [];
   globalThis.ResizeObserver = FakeResizeObserver as unknown as typeof ResizeObserver;
 }
 

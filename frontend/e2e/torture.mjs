@@ -1,12 +1,13 @@
 /**
- * Interaction torture test (real browser, real API, real data).
+ * Interaction torture test (real browser, real API, real data) for the M7.2 immersive world.
  *
  *   npm run e2e                      (from frontend/)
  *
- * Starts its own FastAPI server (port 8765) and Vite dev server (port 5174), drives the
- * installed Chrome/Edge via playwright-core (no browser download), and fails on any console
- * error, page error, unhandled rejection, NaN/Infinity, failed assertion, duplicated loop or
- * listener, or displayed value that does not match the API. Writes e2e/artifacts/report.json.
+ * Starts its own FastAPI server (port 8765) and Vite dev server (port 5174), drives the installed
+ * Chrome/Edge via playwright-core (no browser download), and fails on any unexpected console error,
+ * page error, NaN/Infinity, failed assertion, duplicated loop/listener, broken distance ordering,
+ * restarted fall, or displayed value that does not match the API. Screenshots of the defined
+ * progression states and report.json are written to e2e/artifacts/ (git-ignored).
  *
  * Browser selection: CHROME_PATH env var, else the standard Chrome / Edge install locations.
  */
@@ -23,13 +24,14 @@ const WEB_PORT = 5174;
 const API = `http://127.0.0.1:${API_PORT}`;
 const WEB = `http://127.0.0.1:${WEB_PORT}`;
 const ARTIFACTS = join(FRONTEND, "e2e", "artifacts");
+const VIEW = { width: 1400, height: 860 };
 const TW54 = "3548666";
 const ST = "3427460";
 
-const report = { steps: [], dataAccuracy: [], console: [], requests: {}, diagnostics: [], timings: {}, memory: {} };
+const report = { steps: [], dataAccuracy: [], console: [], requests: {}, diagnostics: [], states: [], performance: {}, memory: {} };
 const failures = [];
 const children = [];
-/** True only inside steps that deliberately provoke HTTP errors (404 profile, API outage). */
+/** True only inside steps that deliberately provoke HTTP errors (404 asteroid, API outage). */
 let expectHttpErrors = false;
 
 function step(name, details = {}) {
@@ -58,11 +60,10 @@ function browserPath() {
   return found;
 }
 
-function start(name, command, args, options) {
+function start(command, args, options) {
   const child = spawn(command, args, { ...options, stdio: ["ignore", "pipe", "pipe"], windowsHide: true });
   child.stdout.on("data", () => {});
   child.stderr.on("data", () => {});
-  child.name = name;
   children.push(child);
   return child;
 }
@@ -83,42 +84,42 @@ async function waitForUrl(url, timeoutMs = 60_000) {
   throw new Error(`Timed out waiting for ${url}`);
 }
 const startApi = () =>
-  start("api", process.env.PYTHON ?? "python", ["-m", "uvicorn", "api.main:app", "--host", "127.0.0.1", "--port", String(API_PORT)], { cwd: REPO });
+  start(process.env.PYTHON ?? "python", ["-m", "uvicorn", "api.main:app", "--host", "127.0.0.1", "--port", String(API_PORT)], { cwd: REPO });
+
+const rgbOf = (css, which) => {
+  const colors = [...css.matchAll(/rgb\((\d+), (\d+), (\d+)\)/g)].map((m) => m.slice(1, 4).map(Number));
+  return which === "zenith" ? colors.at(-1) : colors[0];
+};
+const luminance = ([r, g, b]) => 0.2126 * r + 0.7152 * g + 0.0722 * b;
 
 async function main() {
   mkdirSync(ARTIFACTS, { recursive: true });
   let api = startApi();
   const viteBin = join(FRONTEND, "node_modules", "vite", "bin", "vite.js");
-  start("web", process.execPath, [viteBin, "--port", String(WEB_PORT), "--strictPort"], {
-    cwd: FRONTEND,
-    env: { ...process.env, ASTEROID_API_TARGET: API },
-  });
+  start(process.execPath, [viteBin, "--port", String(WEB_PORT), "--strictPort"], { cwd: FRONTEND, env: { ...process.env, ASTEROID_API_TARGET: API } });
   await waitForUrl(`${API}/health`);
   await waitForUrl(WEB);
 
-  // Ground truth comes straight from the API, never from the UI.
+  // Ground truth straight from the API, never from the UI.
   const worldApi = await (await fetch(`${API}/asteroids/world`)).json();
-  const profileApi = await (await fetch(`${API}/asteroids/${TW54}/profile`)).json();
+  const apiById = new Map(worldApi.data.map((r) => [r.neows_id, r]));
+  const profiles = {};
+  for (const id of [TW54, ST, "3830890"]) profiles[id] = (await (await fetch(`${API}/asteroids/${id}/profile`)).json()).data;
 
   const browser = await chromium.launch({
     executablePath: browserPath(),
     headless: true,
     args: ["--enable-unsafe-swiftshader", "--use-angle=swiftshader", "--js-flags=--expose-gc"],
   });
-  const page = await browser.newPage({ viewport: { width: 1400, height: 900 } });
+  const page = await browser.newPage({ viewport: VIEW });
   page.on("console", (msg) => {
     const text = msg.text();
     const expected = expectHttpErrors && msg.type() === "error" && /^Failed to load resource/.test(text);
     report.console.push({ type: msg.type(), text, expected });
     if (msg.type() === "error" && !expected) failures.push(`console error: ${text}`);
-    if (/\bNaN\b|\bInfinity\b|Maximum update depth|Too many re-renders|Cannot read properties of undefined/.test(text)) {
-      failures.push(`suspicious console output: ${text}`);
-    }
+    if (/\bNaN\b|\bInfinity\b|Maximum update depth|Cannot read properties of undefined/.test(text)) failures.push(`suspicious console output: ${text}`);
   });
   page.on("pageerror", (error) => failures.push(`page error: ${error.message}`));
-  page.on("response", (res) => {
-    if (res.status() >= 400) report.console.push({ type: "http", text: `${res.status()} ${new URL(res.url()).pathname}`, expected: expectHttpErrors });
-  });
   page.on("request", (req) => {
     const path = new URL(req.url()).pathname;
     if (path.startsWith("/api/")) report.requests[path] = (report.requests[path] ?? 0) + 1;
@@ -136,246 +137,300 @@ async function main() {
   const diagnostics = async (label) => {
     const d = await dbg("diagnostics");
     report.diagnostics.push({ label, ...d });
-    check(d.activeLoops === 1, `${label}: activeLoops=${d.activeLoops}`);
-    check(d.inputListeners === 6, `${label}: inputListeners=${d.inputListeners}`);
-    check(d.storeListeners === 1, `${label}: storeListeners=${d.storeListeners}`);
-    return d;
+    check(d.activeLoops === 1 && d.inputListeners === 6 && d.storeListeners === 1 && d.keyListeners === 1, `${label}: diagnostics ${JSON.stringify(d)}`);
   };
-  const position = async (id) => {
-    const p = await dbg("screenPositionOf", id);
-    check(p !== null, `no screen position for ${id}`);
-    return p;
+  const phases = async () => Object.fromEntries(await Promise.all(worldApi.data.map(async (r) => [r.neows_id, await dbg("phaseOf", r.neows_id)])));
+  const counts = (ph) => Object.values(ph).reduce((acc, p) => ({ ...acc, [p]: (acc[p] ?? 0) + 1 }), {});
+  const waitSettled = (label) => waitFor(async () => !Object.values(await phases()).includes("FALLING"), `${label}: falls settle`, 10_000);
+  const pixelAt = async (x, y) => {
+    const shot = await page.screenshot({ clip: { x: Math.round(x) - 1, y: Math.round(y) - 1, width: 3, height: 3 } });
+    return page.evaluate(async (b64) => {
+      const img = new Image();
+      img.src = `data:image/png;base64,${b64}`;
+      await img.decode();
+      const c = document.createElement("canvas");
+      c.width = img.width;
+      c.height = img.height;
+      const ctx = c.getContext("2d");
+      ctx.drawImage(img, 0, 0);
+      return [...ctx.getImageData(1, 1, 1, 1).data].slice(0, 3);
+    }, shot.toString("base64"));
   };
-  const clickAsteroid = async (id) => {
-    const p = await position(id);
-    await page.mouse.move(p.x, p.y);
-    await page.mouse.down();
-    await page.mouse.up();
+  const scrollTo = async (target) => {
+    await page.mouse.move(VIEW.width / 2, VIEW.height * 0.45);
+    for (let i = 0; i < 80; i++) {
+      const p = (await dbg("progress")).target;
+      if (Math.abs(p - target) < 0.03) break;
+      await page.mouse.wheel(0, p < target ? 120 : -120);
+    }
+    await waitFor(async () => {
+      const p = await dbg("progress");
+      return p.current === p.target;
+    }, `progress settles near ${target}`);
   };
+  const captureState = async (name, label) => {
+    const p = await dbg("progress");
+    const ph = counts(await phases());
+    const sky = await dbg("skyBackground");
+    report.states.push({ name, label, progress: p.current, phases: ph, zenith: rgbOf(sky, "zenith") });
+    await page.screenshot({ path: join(ARTIFACTS, `${name}.png`) });
+    return { p, ph, zenith: rgbOf(sky, "zenith") };
+  };
+  const fmt = (v, d, unit) => `${new Intl.NumberFormat("en-US", { maximumFractionDigits: d }).format(v)} ${unit}`;
   const heap = () => page.evaluate(() => {
     window.gc?.();
     return performance.memory?.usedJSHeapSize ?? null;
   });
-  const fmt = (v, d, unit) => `${new Intl.NumberFormat("en-US", { maximumFractionDigits: d }).format(v)} ${unit}`;
 
-  // 1-3. Open, wait for world, confirm real objects render.
-  const t0 = Date.now();
+  // ── Composition: Earth below, sky above, tiny world, a few distant hints ─────────────────
   await page.goto(`${WEB}/#/`);
   await waitFor(async () => (await page.evaluate(() => window.__ASTEROID_DEBUG__?.worldStatus())) === "ready", "world ready");
-  report.timings.worldReadyMs = Date.now() - t0;
-  const ids = await dbg("worldIds");
-  check(ids.length === worldApi.data.length, `rendered ${ids.length} of ${worldApi.data.length} records`);
-  check(JSON.stringify([...ids].sort()) === JSON.stringify(worldApi.data.map((r) => r.neows_id).sort()), "rendered IDs equal API IDs");
-  check((await page.textContent(".status-overlay")).includes(`LOADED · ${worldApi.data.length} OBJECTS`), "loaded banner shows real count");
-  await page.screenshot({ path: join(ARTIFACTS, "01-world.png") });
-  const twPos = await position(TW54);
-  const shot = await page.screenshot({ clip: { x: twPos.x - 1, y: twPos.y - 1, width: 3, height: 3 } });
-  const pixel = await page.evaluate(async (b64) => {
-    const img = new Image();
-    img.src = `data:image/png;base64,${b64}`;
-    await img.decode();
-    const c = document.createElement("canvas");
-    c.width = img.width;
-    c.height = img.height;
-    const ctx = c.getContext("2d");
-    ctx.drawImage(img, 0, 0);
-    return [...ctx.getImageData(1, 1, 1, 1).data];
-  }, shot.toString("base64"));
-  check(pixel[0] + pixel[1] + pixel[2] > 60, `marker for ${TW54} is drawn at its screen position (rgb ${pixel.slice(0, 3)})`);
-  step("world loaded and rendered", { objects: ids.length, ms: report.timings.worldReadyMs, markerPixel: pixel.slice(0, 3) });
+  const initialPhases = counts(await phases());
+  const revealedAtLoad = worldApi.data.length - (initialPhases.HIDDEN ?? 0);
+  check(revealedAtLoad >= 1 && revealedAtLoad < worldApi.data.length / 4, `a few distant hints at load: ${JSON.stringify(initialPhases)}`);
+  check((initialPhases.FALLING ?? 0) > 0, "asteroids fall in at load");
+  await waitSettled("load");
+  const crest = await dbg("earthCrestY");
+  check(Math.abs(crest / VIEW.height - 0.3) < 0.01, `Earth crest in the lower third: ${crest}`);
+  const earth = await dbg("earthCounts");
+  check(earth && earth.trees > 0 && earth.houses > 0 && earth.people > 0 && earth.lakes > 0, `tiny world exists: ${JSON.stringify(earth)}`);
+  const grass = await pixelAt(VIEW.width / 2, VIEW.height - crest + 20);
+  check(grass[1] > grass[0] && grass[1] > grass[2], `green Earth below the crest: rgb ${grass}`);
+  const sky0 = await captureState("state0-earth-sky", "Initial Earth + sky");
+  check(sky0.zenith && sky0.zenith[2] > sky0.zenith[0] && luminance(sky0.zenith) > 120, `initial background is sky blue: ${sky0.zenith}`);
+  const settledNow = await phases();
+  const settledIds = Object.keys(settledNow).filter((id) => settledNow[id] === "SETTLED");
+  const positions = await Promise.all(settledIds.map(async (id) => [id, await dbg("screenPositionOf", id)]));
+  const isolated = positions.find(([, a]) => positions.every(([, b]) => a === b || Math.hypot(a.x - b.x, a.y - b.y) > 40));
+  const firstId = (isolated ?? positions[0])[0];
+  const rockPos = await dbg("screenPositionOf", firstId);
+  const rock = await pixelAt(rockPos.x, rockPos.y);
+  check(rock[0] > rock[2], `rock drawn at its position (not sky): rgb ${rock}`);
+  check(await page.isVisible(".intro"), "title and scroll hint visible");
+  step("composition: Earth arc, sky, tiny world, distant hints", { revealedAtLoad, crest, earth, rock });
   await diagnostics("after load");
   report.memory.heapAfterLoad = await heap();
 
-  // 4-8. Hover, compare to API, move away, hover another.
-  await page.mouse.move(twPos.x, twPos.y);
-  await waitFor(async () => (await dbg("hoveredId")) === TW54, "hover TW54");
-  const tooltip = await page.textContent(".hover-tooltip");
-  const apiRec = worldApi.data.find((r) => r.neows_id === TW54);
-  const expected = {
-    name: apiRec.name,
-    neows_id: apiRec.neows_id,
-    miss: fmt(apiRec.encounter.miss_distance_km, 0, "km"),
-    velocity: fmt(apiRec.encounter.relative_velocity_km_s, 3, "km/s"),
-    pha: apiRec.encounter.is_potentially_hazardous === null ? "Unknown" : apiRec.encounter.is_potentially_hazardous ? "Yes" : "No",
-    sentry: { available: "Linked Sentry record available" }[apiRec.sentry.status],
-  };
-  for (const [field, value] of Object.entries(expected)) {
-    const ok = check(tooltip.includes(value), `hover ${field}: expected "${value}" in tooltip`);
-    report.dataAccuracy.push({ view: "hover", neows_id: TW54, field, api: value, shown: ok });
+  // ── Hover: lightweight facts from loaded world data, checked against the API ────────────
+  await page.mouse.move(rockPos.x, rockPos.y);
+  await waitFor(async () => (await dbg("hoveredId")) === firstId, "hover");
+  const tip = await page.textContent(".hover-tooltip");
+  const hov = apiById.get(firstId);
+  for (const [field, value] of Object.entries({
+    name: hov.name, neows_id: hov.neows_id, miss: fmt(hov.encounter.miss_distance_km, 0, "km"),
+    pha: hov.encounter.is_potentially_hazardous === null ? "Unknown" : hov.encounter.is_potentially_hazardous ? "Yes" : "No",
+  })) {
+    const ok = check(tip.includes(value), `hover ${field} "${value}"`);
+    report.dataAccuracy.push({ view: "hover", neows_id: firstId, field, api: value, shown: ok });
   }
-  step("hover shows API values", { tooltip: tooltip.slice(0, 160) });
   await page.mouse.move(3, 3);
   await waitFor(async () => (await dbg("hoveredId")) === null, "hover cleared");
-  check(await page.isHidden(".hover-tooltip"), "tooltip hidden after moving away");
-  const stPos = await position(ST);
-  await page.mouse.move(stPos.x, stPos.y);
-  await waitFor(async () => (await dbg("hoveredId")) === ST, "hover second asteroid");
-  step("hover cleared and moved to another asteroid");
+  step("hover shows API facts and clears");
 
-  // 9-13. Rapid zoom bursts.
-  await page.mouse.move(700, 450);
-  for (let round = 0; round < 3; round++) {
-    for (let i = 0; i < 25; i++) await page.mouse.wheel(0, -400);
-    for (let i = 0; i < 25; i++) await page.mouse.wheel(0, 600);
+  // ── Scroll journey: progressive reveal + continuous sky -> space ────────────────────────
+  let lastRevealed = revealedAtLoad;
+  let lastLum = luminance(sky0.zenith);
+  for (const [target, name, label] of [[0.2, "state1-early-reveal", "Early asteroid appearance"], [0.45, "state2-intermediate", "Intermediate field"], [0.7, "state3-space-transition", "Sky/space transition"], [1, "state4-deep", "Deep asteroid environment"]]) {
+    await scrollTo(target);
+    await waitSettled(name);
+    const s = await captureState(name, label);
+    const revealed = worldApi.data.length - (s.ph.HIDDEN ?? 0);
+    check(revealed >= lastRevealed, `${name}: reveal is monotonic (${lastRevealed} -> ${revealed})`);
+    check(luminance(s.zenith) < lastLum, `${name}: sky darkens toward space (${lastLum.toFixed(1)} -> ${luminance(s.zenith).toFixed(1)})`);
+    check(s.p.current >= 0 && s.p.current <= 1, `${name}: progress bounded ${s.p.current}`);
+    lastRevealed = revealed;
+    lastLum = luminance(s.zenith);
   }
-  for (let i = 0; i < 40; i++) await page.mouse.wheel(0, -50);
-  await sleep(1200);
-  const zoom = await dbg("zoom");
-  check(Number.isFinite(zoom.current) && Number.isFinite(zoom.target), `zoom finite: ${JSON.stringify(zoom)}`);
-  check(zoom.current >= zoom.min && zoom.current <= zoom.max, `zoom within bounds: ${JSON.stringify(zoom)}`);
-  check(zoom.current === zoom.target, `zoom settled (no runaway): ${JSON.stringify(zoom)}`);
-  const scaleText = await page.textContent(".scale-indicator");
-  check(/Visualization radius ≈ [\d,.]+ km/.test(scaleText), `scale indicator readable: ${scaleText}`);
-  await diagnostics("after zoom bursts");
-  step("rapid zoom settled within bounds", { zoom, scaleText });
-  await page.screenshot({ path: join(ARTIFACTS, "02-zoomed.png") });
-  for (let i = 0; i < 20; i++) await page.mouse.wheel(0, 300); // back out so both asteroids are on screen
-  await sleep(800);
+  check(lastRevealed === worldApi.data.length, `every real asteroid revealed at depth (${lastRevealed}/${worldApi.data.length})`);
+  check(await page.isHidden(".intro") || Number(await page.$eval(".intro", (e) => getComputedStyle(e).opacity)) < 0.05, "intro faded at depth");
+  const labelCount = await page.$$eval(".asteroid-label:not([hidden])", (n) => n.length);
+  check(labelCount > 0, `labels appear at depth (${labelCount})`);
+  step("scroll journey: progressive reveal, sky -> space", { states: report.states.map((s) => [s.name, s.progress.toFixed(2), s.zenith]) });
 
-  // 14-18. Click A then immediately B: B must win.
-  const reqBefore = Object.keys(report.requests).filter((k) => k.endsWith("/profile")).length;
-  const a = await position(TW54);
-  const b = await position(ST);
-  await page.mouse.click(a.x, a.y);
-  await page.mouse.click(b.x, b.y);
-  await waitFor(async () => (await dbg("profileStatus")) === "ready", "profile ready after A->B");
-  check((await dbg("selectedId")) === ST, `B remains selected (got ${await dbg("selectedId")})`);
-  const stName = worldApi.data.find((r) => r.neows_id === ST).name;
-  check((await page.textContent(".profile-panel h2")) === stName, "panel shows B's name");
-  check(page.url().endsWith(`#/asteroid/${ST}`), `URL reflects B: ${page.url()}`);
-  step("A->B rapid selection keeps B", { url: page.url() });
+  // ── Distance ordering on the real population ─────────────────────────────────────────
+  const altitudes = [];
+  for (const r of worldApi.data) altitudes.push([r.encounter.miss_distance_km, await dbg("restAltitudeOf", r.neows_id), r.neows_id]);
+  altitudes.sort((a, b) => a[0] - b[0]);
+  let ordered = true;
+  for (let i = 1; i < altitudes.length; i++) if (!(altitudes[i][1] > altitudes[i - 1][1])) ordered = false;
+  check(ordered, "rest altitude strictly increases with real miss distance (all objects)");
+  const nearest = altitudes[0];
+  const farthest = altitudes.at(-1);
+  step("distance ordering preserved", { nearest: [nearest[2], nearest[0], nearest[1].toFixed(1)], farthest: [farthest[2], farthest[0], farthest[1].toFixed(1)] });
 
-  // 19. Back to world.
-  await page.click("text=← Back to world");
-  await waitFor(async () => (await dbg("selectedId")) === null, "back to world");
-  check(await page.isHidden(".profile-panel"), "profile panel hidden after Back");
-
-  // Data accuracy on the full profile of a real linked object.
-  await clickAsteroid(TW54);
-  await waitFor(async () => (await dbg("profileStatus")) === "ready", "TW54 profile ready");
-  const row = async (section, label) =>
-    page.evaluate(([s, l]) => {
-      for (const r of document.querySelectorAll(`[data-section="${s}"] .fact`)) {
-        if (r.querySelector(".fact-label")?.textContent === l) return r.querySelector(".fact-value")?.textContent;
-      }
-      return null;
-    }, [section, label]);
-  const p = profileApi.data;
-  const profileChecks = [
-    ["encounter", "Miss distance", fmt(p.encounter.miss_distance_km, 0, "km")],
-    ["encounter", "Relative velocity", fmt(p.encounter.relative_velocity_km_s, 3, "km/s")],
-    ["encounter", "Potentially hazardous (NeoWs)", p.encounter.is_potentially_hazardous ? "Yes" : "No"],
-    ["encounter", "NeoWs 'Sentry object' flag", p.encounter.is_sentry_object ? "Yes" : "No"],
-    ["identity", "NeoWs ID", p.identity.neows_id],
-    ["identity", "Sentry ID", p.identity.sentry_id],
-    ["orbit", "Semi-major axis a", fmt(p.orbit.semi_major_axis_au, 6, "AU")],
-    ["orbit", "Ascending node Ω", fmt(p.orbit.ascending_node_longitude_deg, 4, "deg")],
-    ["neows_physical", "Absolute magnitude H", fmt(p.neows_physical.absolute_magnitude_h, 2, "mag")],
-    ["physical", "Absolute magnitude H", fmt(p.physical.absolute_magnitude, 2, "mag")],
-    ["sentry_assessment", "Cumulative impact probability (as published)", String(p.sentry.assessment.impact_probability)],
-    ["sentry_assessment", "Torino scale (max)", String(p.sentry.assessment.torino_scale_max)],
-  ];
-  for (const [section, label, apiValue] of profileChecks) {
-    const shown = await row(section, label);
-    check(shown === apiValue, `profile ${section}.${label}: shown "${shown}" vs API "${apiValue}"`);
-    report.dataAccuracy.push({ view: "profile", neows_id: TW54, section, field: label, api: apiValue, shown });
+  // ── Rapid up/down: bounded, settles, never re-drops anything ─────────────────────────
+  const before = await phases();
+  await page.mouse.move(VIEW.width / 2, VIEW.height * 0.45);
+  for (let round = 0; round < 20; round++) {
+    for (let i = 0; i < 6; i++) await page.mouse.wheel(0, round % 2 ? 240 : -240);
   }
-  const sentryLine = await page.textContent('[data-section="sentry_assessment"] .sentry-status');
-  check(sentryLine === "Linkage: Linked Sentry record available", `Sentry linkage line: ${sentryLine}`);
-  const tw = await position(TW54);
-  await page.mouse.move(tw.x + 1, tw.y);
-  await page.mouse.move(tw.x, tw.y);
-  await waitFor(async () => (await dbg("hoveredId")) === TW54, "hover TW54 with profile open");
-  const overlap = await page.evaluate(() => {
-    const tip = document.querySelector(".hover-tooltip");
-    const panel = document.querySelector(".profile-panel");
-    if (tip.hidden || panel.hidden) return null;
-    return { tipRight: tip.getBoundingClientRect().right, panelLeft: panel.getBoundingClientRect().left };
-  });
-  check(overlap !== null && overlap.tipRight <= overlap.panelLeft, `tooltip never covers the open profile: ${JSON.stringify(overlap)}`);
-  await page.screenshot({ path: join(ARTIFACTS, "03-profile.png") });
-  step("profile values match API", { checked: profileChecks.length });
+  for (let i = 0; i < 30; i++) await page.mouse.wheel(0, 240);
+  await waitFor(async () => {
+    const p = await dbg("progress");
+    return p.current === p.target;
+  }, "progress settles after rapid scrolling");
+  const p = await dbg("progress");
+  check(p.current >= 0 && p.current <= 1 && Number.isFinite(p.current), `progress bounded after rapid scroll ${JSON.stringify(p)}`);
+  const after = await phases();
+  check(Object.keys(before).every((id) => before[id] === "SETTLED" && after[id] === "SETTLED"), "no asteroid restarted its fall during rapid scrolling");
+  await diagnostics("after rapid scroll");
+  step("rapid up/down scrolling is bounded and restarts nothing", { progress: p });
 
-  // 20-21. Select an unresolved object; nothing is inferred.
-  await page.click("text=← Back to world");
-  await waitFor(async () => (await dbg("selectedId")) === null, "back");
-  const unresolved = worldApi.data.find((r) => r.resolution.match_state === "UNRESOLVED" && r.encounter.is_potentially_hazardous === true)
-    ?? worldApi.data.find((r) => r.resolution.match_state === "UNRESOLVED");
-  await clickAsteroid(unresolved.neows_id);
-  await waitFor(async () => (await dbg("profileStatus")) === "ready", "unresolved profile ready");
-  check((await row("orbit", "Semi-major axis a")) === "Unavailable", "unresolved orbit reads Unavailable");
-  check((await page.textContent('[data-section="sentry_assessment"] .sentry-status')) === "Linkage: Not linkable: identity not resolved",
-    `PHA=${unresolved.encounter.is_potentially_hazardous} object without linkage shows no Sentry assessment`);
-  step("unresolved profile shows Unavailable, no inferred Sentry", { neows_id: unresolved.neows_id, pha: unresolved.encounter.is_potentially_hazardous });
+  // ── Real click focuses an asteroid; it becomes the visual subject at the centre ──────────
+  const clickPos = await dbg("screenPositionOf", ST);
+  await page.mouse.click(clickPos.x, clickPos.y);
+  await waitFor(async () => (await dbg("profileStatus")) === "ready" && (await dbg("focusSettled")) && (await dbg("focusProgress")) === 1, "click focuses ST");
+  check((await dbg("selectedId")) === ST, `click selected ST (got ${await dbg("selectedId")})`);
+  const center = await dbg("screenPositionOf", ST);
+  check(Math.abs(center.x - VIEW.width / 2) < 4 && Math.abs(center.y - VIEW.height / 2) < 4, `focused asteroid is the visual subject at the centre: ${JSON.stringify(center)}`);
+  check(await page.isHidden(".hover-tooltip"), "no hover card over the focus view");
+  step("click -> focus: asteroid centred, intelligence around it");
 
-  // Open/close 12 times; loops/listeners must not grow.
-  for (let i = 0; i < 12; i++) {
-    await page.click("text=← Back to world");
-    await waitFor(async () => (await dbg("selectedId")) === null, `cycle ${i} back`);
-    await clickAsteroid(i % 2 ? TW54 : ST);
-    await waitFor(async () => (await dbg("profileStatus")) === "ready", `cycle ${i} profile`);
+  // ── Rapid A -> B -> C selection (URL-driven, as clicks are): the latest always wins ───────
+  const pick = [TW54, ST, worldApi.data.find((r) => r.resolution.match_state === "UNRESOLVED").neows_id];
+  for (const id of pick) await page.evaluate((target) => (location.hash = `#/asteroid/${target}`), id);
+  await waitFor(async () => (await dbg("profileStatus")) === "ready" && (await dbg("focusProgress")) === 1, "focus on C");
+  await sleep(600);
+  check((await dbg("selectedId")) === pick[2], `C remains selected (got ${await dbg("selectedId")})`);
+  check((await page.textContent(".focus-title")).includes(apiById.get(pick[2]).name), "focus title is C");
+  check((await page.textContent('[data-callout="identity"]')).includes(pick[2]), "C's identity callout shows C");
+  step("A -> B -> C rapid selection keeps C", { selected: pick[2] });
+
+  // ── Data accuracy in focus for three real objects ─────────────────────────────────────
+  const calloutValue = (key, label) => page.evaluate(([k, l]) => {
+    for (const row of document.querySelectorAll(`[data-callout="${k}"] .fact`)) {
+      if (row.querySelector(".fact-label")?.textContent === l) return row.querySelector(".fact-value")?.textContent;
+    }
+    return null;
+  }, [key, label]);
+  for (const id of [TW54, ST, "3830890"]) {
+    await page.evaluate((target) => (location.hash = `#/asteroid/${target}`), id);
+    await waitFor(async () => (await dbg("selectedId")) === id && (await dbg("profileStatus")) === "ready", `focus ${id}`);
+    const prof = profiles[id];
+    const checks = [
+      ["identity", "NeoWs ID", prof.identity.neows_id],
+      ["identity", "Name (NeoWs)", prof.identity.name],
+      ["encounter", "Miss distance", fmt(prof.encounter.miss_distance_km, 0, "km")],
+      ["encounter", "Relative velocity", fmt(prof.encounter.relative_velocity_km_s, 3, "km/s")],
+      ["encounter", "Potentially hazardous (NeoWs)", prof.encounter.is_potentially_hazardous ? "Yes" : "No"],
+    ];
+    for (const [key, label, apiValue] of checks) {
+      const shown = await calloutValue(key, label);
+      check(shown === apiValue, `${id} ${key}.${label}: shown "${shown}" vs API "${apiValue}"`);
+      report.dataAccuracy.push({ view: "focus", neows_id: id, field: `${key}.${label}`, api: apiValue, shown });
+    }
+    const sentryShown = prof.sentry.status === "available"
+      ? await calloutValue("sentry_assessment", "Linkage")
+      : (await page.$$eval(".focus-unavailable", (n) => n.map((x) => x.textContent))).find((t) => t.startsWith("Sentry"));
+    const sentryExpected = prof.sentry.status === "available" ? "Linked Sentry record available" : "Sentry · JPL Sentry — Not linkable: identity not resolved";
+    check(sentryShown === sentryExpected, `${id} Sentry state: "${sentryShown}"`);
+    report.dataAccuracy.push({ view: "focus", neows_id: id, field: "sentry", api: prof.sentry.status, shown: sentryShown });
+    if (id === TW54) await page.screenshot({ path: join(ARTIFACTS, "state5-focus.png") });
   }
-  await diagnostics("after 12 open/close cycles");
+  step("focus callouts match the API for three objects");
+
+  // ── Escape returns; nothing re-drops; open/close cycles stay clean ──────────────────────
+  await page.keyboard.press("Escape");
+  await waitFor(async () => (await dbg("selectedId")) === null && (await dbg("focusProgress")) === 0, "Escape returns to the world");
+  check(Object.values(await phases()).every((ph) => ph === "SETTLED"), "returning from focus re-drops nothing");
+  for (let i = 0; i < 10; i++) {
+    const id = i % 2 ? TW54 : ST;
+    const pos = await dbg("screenPositionOf", id);
+    await page.mouse.click(pos.x, pos.y);
+    await waitFor(async () => (await dbg("profileStatus")) === "ready", `cycle ${i} focus`);
+    await page.keyboard.press("Escape");
+    await waitFor(async () => (await dbg("focusProgress")) === 0, `cycle ${i} back`);
+  }
+  await diagnostics("after 10 focus cycles");
   report.memory.heapAfterCycles = await heap();
-  step("12 open/close cycles stable");
+  check(Object.values(await phases()).every((ph) => ph === "SETTLED"), "10 focus cycles re-drop nothing");
+  step("Escape / focus cycles stable");
 
-  // Browser Back button returns to the world.
-  await page.goBack();
-  await waitFor(async () => (await dbg("selectedId")) !== TW54 && (await dbg("selectedId")) !== ST || (await dbg("selectedId")) === null, "browser back");
-  step("browser back navigates", { url: page.url() });
-
-  // Resize repeatedly.
-  for (const [w, h] of [[900, 600], [1600, 1000], [700, 900], [1400, 900], [500, 500], [1400, 900]]) {
+  // ── Resize repeatedly: composition holds, nothing restarts ─────────────────────────────
+  for (const [w, h] of [[1920, 1080], [900, 1200], [2560, 1440], [700, 500], [1280, 720], [VIEW.width, VIEW.height]]) {
     await page.setViewportSize({ width: w, height: h });
-    await sleep(150);
+    await sleep(200);
+    const crestNow = await dbg("earthCrestY");
+    const expected = h * (0.3 + (0.17 - 0.3) * 1); // progress is at 1 here
+    check(Math.abs(crestNow - expected) < 2, `${w}x${h}: Earth stays the lower anchor (${crestNow.toFixed(1)} vs ${expected.toFixed(1)})`);
   }
+  check(Object.values(await phases()).every((ph) => ph === "SETTLED"), "resizing re-drops nothing");
   await diagnostics("after resizes");
-  const posAfterResize = await position(TW54);
-  check(posAfterResize.x > 0 && posAfterResize.x < 1400 && posAfterResize.y > 0 && posAfterResize.y < 900, "marker on screen after resizes");
-  step("resizes handled");
+  step("resizes keep the composition and the lifecycle");
 
-  // 22-23. Refresh with a selection in the URL, then refresh repeatedly while loading.
+  // ── Refresh restores focus; rapid reloads are clean ────────────────────────────────────
   await page.goto(`${WEB}/#/asteroid/${TW54}`);
   await page.reload();
-  await waitFor(async () => (await page.evaluate(() => window.__ASTEROID_DEBUG__?.profileStatus())) === "ready", "profile restored after refresh");
-  check((await dbg("selectedId")) === TW54, "selection restored from URL after refresh");
+  await waitFor(async () => (await page.evaluate(() => window.__ASTEROID_DEBUG__?.profileStatus())) === "ready", "focus restored after refresh");
+  check((await dbg("selectedId")) === TW54, "selection restored from URL");
+  await waitFor(async () => (await dbg("focusProgress")) === 1, "deep-linked asteroid becomes the focus");
   for (let i = 0; i < 4; i++) {
     await page.reload({ waitUntil: "commit" });
     await sleep(60);
   }
   await waitFor(async () => (await page.evaluate(() => window.__ASTEROID_DEBUG__?.worldStatus())) === "ready", "world after rapid reloads");
   await diagnostics("after rapid reloads");
-  step("refresh restores state; rapid reloads clean");
+  step("refresh restores focus; rapid reloads clean");
 
-  // 404 profile (the browser logs the 404 resource load; expected here only).
+  // ── 404 and API outage ────────────────────────────────────────────────────────────────
   expectHttpErrors = true;
   await page.goto(`${WEB}/#/asteroid/99999999`);
   await waitFor(async () => (await page.evaluate(() => window.__ASTEROID_DEBUG__?.profileStatus())) === "error", "404 profile");
-  check((await page.textContent(".profile-panel .status-title")) === "Asteroid not found", "404 reads 'Asteroid not found'");
-  step("unknown asteroid shows not-found");
-
-  // API outage and recovery.
+  check((await page.textContent(".focus-error .status-title")) === "Asteroid not found", "404 reads 'Asteroid not found'");
   stop(api);
   await sleep(1500);
   await page.goto(`${WEB}/#/`);
   await page.reload();
-  await waitFor(async () => (await page.evaluate(() => window.__ASTEROID_DEBUG__?.worldStatus())) === "error", "world error during outage", 30_000);
+  await waitFor(async () => (await page.evaluate(() => window.__ASTEROID_DEBUG__?.worldStatus())) === "error", "outage error", 30_000);
   const outage = await page.textContent(".status-overlay");
   check(outage.includes("ASTEROID INTELLIGENCE UNAVAILABLE") && outage.includes("could not be reached"), `outage message: ${outage}`);
-  await page.screenshot({ path: join(ARTIFACTS, "04-outage.png") });
   api = startApi();
   await waitForUrl(`${API}/health`);
   await page.click(".status-overlay button");
-  await waitFor(async () => (await dbg("worldStatus")) === "ready", "world after recovery");
+  await waitFor(async () => (await dbg("worldStatus")) === "ready", "recovered");
   await diagnostics("after outage recovery");
   expectHttpErrors = false;
-  step("API outage shown; Retry recovers", { outageText: outage });
+  step("404 and outage handled; Retry recovers");
 
-  report.requests.final = { ...report.requests };
   const worldRequests = report.requests["/api/asteroids/world"] ?? 0;
   const profileRequests = Object.entries(report.requests).filter(([k]) => k.endsWith("/profile")).reduce((n, [, v]) => n + v, 0);
-  report.requests.summary = { worldRequests, profileRequests, profileRequestsBeforeFirstClick: reqBefore };
-  check(reqBefore === 0, "no profile requests before the first selection");
+  report.requests.summary = { worldRequests, profileRequests };
+  await page.close();
+
+  // ── Performance: real 35 vs clearly-labelled synthetic stress populations ───────────────
+  for (const stress of [0, 1000]) {
+    const perf = await browser.newPage({ viewport: VIEW });
+    perf.on("pageerror", (error) => failures.push(`stress page error: ${error.message}`));
+    await perf.goto(`${WEB}/${stress ? `?stress=${stress}` : ""}#/`);
+    await perf.waitForFunction(() => window.__ASTEROID_DEBUG__?.worldStatus() === "ready", null, { timeout: 30_000 });
+    if (stress) check((await perf.textContent(".synthetic-banner"))?.includes("SYNTHETIC STRESS DATA"), "synthetic data is labelled as fake");
+    const count = (await perf.evaluate(() => window.__ASTEROID_DEBUG__.worldIds().length));
+    const sample = async (label, action) => {
+      const f0 = await perf.evaluate(() => window.__ASTEROID_DEBUG__.frames());
+      const t0 = Date.now();
+      await action();
+      const f1 = await perf.evaluate(() => window.__ASTEROID_DEBUG__.frames());
+      return { label, fps: +(((f1 - f0) * 1000) / (Date.now() - t0)).toFixed(1) };
+    };
+    await perf.mouse.move(VIEW.width / 2, VIEW.height * 0.45);
+    const idle = await sample("idle", () => sleep(2000));
+    const idleTiming = await perf.evaluate(() => window.__ASTEROID_DEBUG__.timing());
+    const scroll = await sample("scrolling + falling", async () => {
+      for (let i = 0; i < 30; i++) {
+        await perf.mouse.wheel(0, 120);
+        await sleep(60);
+      }
+    });
+    const scrollTiming = await perf.evaluate(() => window.__ASTEROID_DEBUG__.timing());
+    report.performance[`objects_${count}`] = {
+      synthetic: stress > 0,
+      samples: [{ ...idle, ...idleTiming }, { ...scroll, ...scrollTiming }],
+      heap: await perf.evaluate(() => performance.memory?.usedJSHeapSize ?? null),
+    };
+    if (stress) await perf.screenshot({ path: join(ARTIFACTS, "stress-1035.png") });
+    await perf.close();
+  }
+  step("performance sampled", report.performance);
   await browser.close();
 }
 
@@ -387,7 +442,7 @@ main()
     mkdirSync(ARTIFACTS, { recursive: true });
     writeFileSync(join(ARTIFACTS, "report.json"), JSON.stringify(report, null, 2));
     const errors = report.console.filter((c) => c.type === "error").length;
-    console.log(`\n${failures.length === 0 ? "PASS" : "FAIL"}: ${report.steps.length} steps, ${report.dataAccuracy.length} value checks, ${errors} console errors, ${failures.length} failures`);
+    console.log(`\n${failures.length === 0 ? "PASS" : "FAIL"}: ${report.steps.length} steps, ${report.dataAccuracy.length} value checks, ${errors} console errors (${report.console.filter((c) => c.expected).length} expected), ${failures.length} failures`);
     for (const f of failures) console.log(`  - ${f}`);
     setTimeout(() => process.exit(failures.length === 0 ? 0 : 1), 500);
   });

@@ -1,55 +1,100 @@
 :root {
   color-scheme: dark;
-  --bg: #04070d;
-  --panel: rgba(9, 18, 33, 0.92);
-  --line: rgba(150, 200, 255, 0.18);
-  --text: #dbe8f6;
-  --muted: #8ea4bd;
-  --accent: #7fe7ff;
+  --glass: rgba(8, 16, 32, 0.78);
+  --line: rgba(190, 220, 255, 0.22);
+  --text: #e7f0fb;
+  --muted: #a6b8cc;
+  --accent: #9fe3ff;
+  --warm: #ffb36b;
   font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
   font-size: 14px;
 }
 * { box-sizing: border-box; }
-html, body, #app { margin: 0; height: 100%; background: var(--bg); color: var(--text); overflow: hidden; }
+[hidden] { display: none !important; }
+html, body, #app { margin: 0; height: 100%; background: #5aa2e6; color: var(--text); overflow: hidden; }
 
 .app-shell { position: relative; width: 100%; height: 100%; }
-.canvas-host { position: absolute; inset: 0; }
-.world-canvas { display: block; width: 100%; height: 100%; cursor: crosshair; }
+.canvas-host { position: absolute; inset: 0; } /* background: sky gradient set by the renderer */
+.world-canvas { display: block; width: 100%; height: 100%; cursor: pointer; }
 
-.status-overlay, .legend, .profile-panel, .hover-tooltip {
-  position: absolute; background: var(--panel); border: 1px solid var(--line); border-radius: 8px;
+/* Overlays never block the world; only their interactive parts take pointer events. */
+.world-hud, .label-layer, .focus-view { position: absolute; inset: 0; pointer-events: none; }
+.button, .about-panel, .callout, .focus-extras, .focus-error, .status-overlay { pointer-events: auto; }
+
+.intro { position: absolute; top: 11%; width: 100%; text-align: center; text-shadow: 0 1px 12px rgba(0, 30, 70, 0.35); }
+.intro h1 { margin: 0; font-weight: 600; font-size: clamp(20px, 2.4vw, 34px); letter-spacing: 0.32em; color: #ffffff; }
+.intro p { margin: 10px 0 0; letter-spacing: 0.2em; text-transform: uppercase; font-size: 12px; color: rgba(255, 255, 255, 0.85); }
+
+.status-overlay {
+  position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%); text-align: center;
+  background: var(--glass); border: 1px solid var(--line); border-radius: 10px; padding: 14px 20px; max-width: 420px;
 }
-.status-overlay { top: 16px; left: 16px; padding: 10px 14px; max-width: 360px; }
-.status-overlay[data-state="error"] { border-color: rgba(255, 180, 120, 0.5); }
-.status-title { margin: 0 0 4px; font-family: ui-monospace, Consolas, monospace; letter-spacing: 0.08em; font-size: 12px; }
-.status-warning { margin: 4px 0 0; color: #f2c46d; }
+.status-overlay[data-state="ready"] { top: auto; bottom: 16px; transform: translateX(-50%); padding: 6px 12px; }
+.status-title { margin: 0 0 6px; font-family: ui-monospace, Consolas, monospace; letter-spacing: 0.1em; font-size: 12px; }
+.status-warning { margin: 0; color: #f6cf7c; font-size: 12px; }
 
-.legend { left: 16px; bottom: 16px; padding: 10px 14px; max-width: 380px; font-size: 12px; }
-.legend-title { margin: 0 0 6px; }
-.swatches { list-style: none; margin: 0 0 6px; padding: 0; display: flex; gap: 12px; flex-wrap: wrap; }
-.swatches li { display: flex; align-items: center; gap: 6px; }
-.swatch { width: 10px; height: 10px; border-radius: 50%; display: inline-block; }
-.note { margin: 4px 0; color: var(--muted); }
-.scale-indicator { margin: 6px 0 0; font-family: ui-monospace, Consolas, monospace; color: var(--accent); }
+.about-button { position: absolute; left: 16px; bottom: 16px; background: var(--glass); font-size: 12px; }
+.about-panel {
+  position: absolute; left: 16px; bottom: 60px; width: min(440px, calc(100% - 32px)); max-height: 70%; overflow-y: auto;
+  background: var(--glass); border: 1px solid var(--line); border-radius: 10px; padding: 12px 16px; font-size: 12.5px; line-height: 1.45;
+}
+.about-panel h2 { margin: 0 0 8px; font-size: 14px; }
+.about-panel p { margin: 0 0 8px; color: var(--muted); }
 
-.hover-tooltip { pointer-events: none; padding: 8px 12px; max-width: 320px; font-size: 12px; z-index: 5; }
+.hover-tooltip {
+  position: absolute; pointer-events: none; z-index: 5; padding: 8px 12px; max-width: 320px; font-size: 12px;
+  background: var(--glass); border: 1px solid var(--line); border-radius: 8px;
+}
 .tooltip-title { margin: 0 0 6px; font-weight: 600; }
 
-.profile-panel { top: 16px; right: 16px; bottom: 16px; width: min(420px, calc(100% - 32px)); overflow-y: auto; padding: 12px 16px; z-index: 4; }
-.profile-header { display: flex; flex-direction: column; gap: 8px; }
-.profile-header h2 { margin: 0; font-size: 18px; }
-.profile-section { border-top: 1px solid var(--line); margin-top: 12px; padding-top: 8px; }
-.profile-section h3 { margin: 0 0 2px; font-size: 13px; text-transform: uppercase; letter-spacing: 0.06em; }
-.source { margin: 0 0 6px; color: var(--accent); font-size: 12px; }
-.sentry-status { margin: 0 0 4px; }
+.asteroid-label, .reference-label { position: absolute; left: 0; top: 0; white-space: nowrap; will-change: transform; }
+.asteroid-label { display: flex; flex-direction: column; font-size: 11px; text-shadow: 0 1px 4px rgba(0, 0, 0, 0.6); }
+.label-name { color: #ffffff; }
+.label-detail { color: var(--accent); font-family: ui-monospace, Consolas, monospace; font-size: 10px; }
+.reference-label { font-size: 10px; color: rgba(255, 255, 255, 0.85); font-family: ui-monospace, Consolas, monospace; }
 
-.fact { display: grid; grid-template-columns: 1fr auto; gap: 2px 12px; padding: 3px 0; }
+.focus-lines { position: absolute; inset: 0; overflow: visible; }
+.focus-lines path { fill: none; stroke: rgba(255, 255, 255, 0.7); stroke-width: 1.2; }
+.focus-back { position: absolute; top: 16px; left: 16px; background: var(--glass); }
+.focus-title { position: absolute; top: 18px; width: 100%; text-align: center; margin: 0; font-size: 20px; font-weight: 600; text-shadow: 0 1px 10px rgba(0, 0, 0, 0.6); }
+.focus-subtitle { display: block; margin-top: 4px; font-size: 12px; font-weight: 400; color: var(--muted); }
+.callout {
+  position: absolute; width: 270px; background: var(--glass); border: 1px solid var(--line); border-radius: 10px;
+  padding: 10px 12px; font-size: 12px; backdrop-filter: blur(6px);
+}
+.callout header { display: flex; justify-content: space-between; align-items: baseline; gap: 8px; margin-bottom: 4px; }
+.callout h3 { margin: 0; font-size: 11px; letter-spacing: 0.12em; text-transform: uppercase; }
+.source { margin: 0; color: var(--accent); font-size: 11px; }
+.note { margin: 6px 0 0; color: var(--muted); font-size: 11px; }
+.focus-extras, .focus-error {
+  position: absolute; left: 50%; transform: translateX(-50%); width: min(520px, calc(100% - 32px)); background: var(--glass); border: 1px solid var(--line);
+  border-radius: 10px; padding: 8px 12px; font-size: 11.5px;
+}
+.focus-extras { bottom: 16px; }
+.focus-error { top: 96px; text-align: center; }
+.focus-unavailable-title { margin: 0 0 4px; font-size: 11px; letter-spacing: 0.12em; text-transform: uppercase; }
+.focus-unavailable { margin: 0 0 3px; color: var(--muted); }
+.focus-provenance summary { cursor: pointer; color: var(--accent); margin-top: 4px; }
+.focus-provenance p { margin: 4px 0 0; color: var(--muted); word-break: break-word; }
+
+.fact { display: grid; grid-template-columns: 1fr auto; gap: 2px 12px; padding: 2px 0; }
 .fact-label { color: var(--muted); }
 .fact-value { text-align: right; font-variant-numeric: tabular-nums; }
-.fact-reason { grid-column: 1 / -1; color: var(--muted); font-size: 11px; font-style: italic; }
 
 .button {
   background: transparent; color: var(--text); border: 1px solid var(--line); border-radius: 6px;
-  padding: 6px 10px; cursor: pointer; align-self: flex-start; font: inherit;
+  padding: 6px 10px; cursor: pointer; font: inherit;
 }
 .button:hover, .button:focus-visible { border-color: var(--accent); outline: none; }
+
+.synthetic-banner {
+  position: fixed; top: 0; left: 0; right: 0; z-index: 20; padding: 6px; text-align: center;
+  background: #b3261e; color: #fff; font-size: 12px; font-weight: 600; letter-spacing: 0.04em;
+}
+
+@media (max-width: 760px) {
+  .callout { position: static; width: auto; margin: 8px 12px; }
+  .focus-body { position: absolute; top: 90px; bottom: 0; left: 0; right: 0; overflow-y: auto; pointer-events: auto; }
+  .focus-lines { display: none; }
+  .focus-extras, .focus-error { position: static; transform: none; width: auto; margin: 8px 12px; }
+}
