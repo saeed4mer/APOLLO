@@ -1,19 +1,32 @@
 import type { WorldSnapshotInfo } from "../models/world";
-import { introOpacity } from "../scene/atmosphere";
+import { brandOpacity, introOpacity } from "../scene/atmosphere";
 import { SKY_PROJECTION } from "../scene/skyLayout";
 import type { WorldState } from "../state/store";
 import { el } from "./dom";
 
+/** Product identity. The subtitle is fixed text: shown exactly as written, on one line. */
+export const PRODUCT_NAME = "APOLLO";
+export const PRODUCT_SUBTITLE = "Asteroid Proximity & Orbital Logistics Lookout Operation";
+
+const titleBlock = (className: string): HTMLElement =>
+  el("div", { className }, [
+    el("h1", { className: "brand-name", text: PRODUCT_NAME }),
+    el("p", { className: "brand-subtitle", text: PRODUCT_SUBTITLE }),
+  ]);
+
 /**
- * Minimal world chrome: an opening title + scroll hint (fades as the user goes deeper), loading
- * and error states, and an "About this view" panel holding every disclaimer about the visual model.
+ * Minimal world chrome: the APOLLO title (a centred opening title + scroll hint that cross-fades,
+ * as the journey starts, into a small wordmark docked top-left for the rest of the journey),
+ * loading and error states, and an "About this view" panel holding every disclaimer about the
+ * visual model.
  */
 export class WorldHud {
   readonly element = el("div", { className: "world-hud" });
   private readonly intro = el("div", { className: "intro" }, [
-    el("h1", { text: "ASTEROID INTELLIGENCE" }),
-    el("p", { text: "Scroll to explore" }),
+    titleBlock("brand brand-hero"),
+    el("p", { className: "intro-hint", text: "Scroll to explore" }),
   ]);
+  private readonly brand = titleBlock("brand brand-docked");
   private readonly status = el("section", { className: "status-overlay", attrs: { role: "status", "aria-live": "polite" } });
   private readonly retryButton = el("button", { className: "button", text: "Retry", attrs: { type: "button" } });
   private readonly aboutButton = el("button", { className: "button about-button", text: "About this view", attrs: { type: "button", "aria-expanded": "false" } });
@@ -27,7 +40,9 @@ export class WorldHud {
   constructor(private readonly onRetry: () => void) {
     this.about.hidden = true;
     this.about.append(el("h2", { text: "About this view" }), this.aboutBody, this.closeAbout);
-    this.element.append(this.intro, this.status, this.aboutButton, this.about);
+    this.brand.setAttribute("aria-hidden", "true"); // the hero title is the accessible heading
+    this.brand.style.opacity = "0";
+    this.element.append(this.intro, this.brand, this.status, this.aboutButton, this.about);
     this.retryButton.addEventListener("click", this.handleRetry);
     this.aboutButton.addEventListener("click", this.toggleAbout);
     this.closeAbout.addEventListener("click", this.hideAbout);
@@ -38,7 +53,7 @@ export class WorldHud {
     this.status.dataset.state = world.status;
     if (world.status === "loading") {
       this.status.hidden = false;
-      this.status.replaceChildren(el("p", { className: "status-title", text: "INITIALIZING ASTEROID INTELLIGENCE FIELD" }));
+      this.status.replaceChildren(el("p", { className: "status-title", text: "INITIALIZING APOLLO ASTEROID FIELD" }));
     } else if (world.status === "error") {
       this.status.hidden = false;
       const detail = world.error.kind === "timeout"
@@ -49,7 +64,7 @@ export class WorldHud {
             ? "The intelligence service returned data this renderer cannot trust."
             : "The intelligence service returned an error.";
       this.status.replaceChildren(
-        el("p", { className: "status-title", text: "ASTEROID INTELLIGENCE UNAVAILABLE" }),
+        el("p", { className: "status-title", text: "APOLLO UNAVAILABLE" }),
         el("p", { text: detail }),
         this.retryButton,
       );
@@ -63,6 +78,8 @@ export class WorldHud {
 
   setProgress(progress: number, focus: number): void {
     this.intro.style.opacity = String(introOpacity(progress) * (1 - focus));
+    // The docked wordmark gives way during focus (the Back button and profile title own the top).
+    this.brand.style.opacity = String(brandOpacity(progress) * (1 - focus));
   }
 
   private setAboutOpen(open: boolean): void {
@@ -85,7 +102,7 @@ export class WorldHud {
       "The warning badge marks asteroids whose NASA NeoWs 'potentially hazardous' flag is true. It is not an impact prediction, a Sentry result or a risk score.",
       `Horizontal placement is the longitude of the backend's deterministic illustrative direction (${snapshot?.spatial_model.direction_algorithm ?? "..."}; renderer projection ${SKY_PROJECTION}). It is not an observed approach direction.`,
       "The falling motion and fiery trail are a visual metaphor for approach, identical for every asteroid. They are not trajectories.",
-      "Every asteroid is drawn the same size and colour: neither encodes diameter, hazard or Sentry status.",
+      "Every asteroid is drawn the same size. Gold marks an asteroid with an actual JPL Sentry link, as reported by the serving layer's identity crosswalk; it is not the potentially-hazardous flag, a risk score or an impact prediction. All other asteroids share one plain colour.",
       "Stars, terrain and the Moon are context, not data.",
       snapshot ? `${shown} NeoWs object(s) shown from GET /asteroids/world${rejected ? `; ${rejected} rejected by validation` : ""}.` : "Loading the asteroid population...",
     ];

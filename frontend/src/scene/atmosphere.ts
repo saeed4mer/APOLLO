@@ -65,6 +65,8 @@ export const labelOpacity = (p: number): number => smoothstep(0.215, 0.23, p);
 export const labelDetailOpacity = (p: number): number => smoothstep(0.22, 0.235, p);
 /** Opening title and "scroll to explore" hint. */
 export const introOpacity = (p: number): number => 1 - smoothstep(0.01, 0.05, p);
+/** The docked APOLLO wordmark cross-fades in as the opening title leaves, and stays for the journey. */
+export const brandOpacity = (p: number): number => smoothstep(0.03, 0.07, p);
 /** Most labels shown at once (nearest first), so large populations never become a dashboard. */
 export const MAX_LABELS = 24;
 

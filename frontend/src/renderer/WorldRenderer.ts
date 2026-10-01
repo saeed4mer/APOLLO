@@ -1,6 +1,6 @@
 import * as THREE from "three";
 import { InputController } from "../interaction/InputController";
-import type { WorldRecord } from "../models/world";
+import { isSentryLinked, type WorldRecord } from "../models/world";
 import { fieldOpacity, frontierOpacity, guideOpacity, hazeOpacity, moonOpacity, skyColors, smoothstep, starOpacity } from "../scene/atmosphere";
 import { ExplorationController } from "../scene/exploration";
 import { fallEase, RevealAnimator, type AsteroidPhase } from "../scene/reveal";
@@ -42,7 +42,10 @@ export interface WorldRendererOptions {
 
 /**
  * Visual encoding (stated in "About this view"):
- * - Every asteroid uses the same rock, on-screen size and colour: these encode NOTHING.
+ * - Every asteroid uses the same rock and on-screen size: size encodes NOTHING.
+ * - GOLD (a muted gold rock with a faint gold rim and halo) marks an asteroid with an actual JPL
+ *   Sentry link, as served by the API (isSentryLinked: sentry.status). It is not the PHA flag, a
+ *   risk score or an impact prediction. Every other asteroid keeps the same plain rock colour.
  * - A ⚠ badge is attached only where NASA NeoWs is_potentially_hazardous === true (never for false
  *   or unknown). It states that flag; it is not an impact prediction, a Sentry result or a score.
  * - The fiery trail appears only while an asteroid approaches its resting place. It is a visual
@@ -61,6 +64,25 @@ const TRAIL_LENGTH_PX = 58;
 const TRAIL_WIDTH_PX = 8;
 const SPAWN_MARGIN_PX = 70;
 const ROCK_COLOR = new THREE.Color(0xa08470);
+/** Sentry-linked asteroids: a restrained gold body, rim and halo (same size, same position). */
+const SENTRY_ROCK_COLOR = new THREE.Color(0xd2a84e);
+const SENTRY_RIM_COLOR = 0xffd27a;
+const SENTRY_RIM_OPACITY = 0.55;
+const SENTRY_HALO_OPACITY = 0.3;
+
+/** Soft radial halo (unit radius): opaque-ish gold at the centre fading to nothing at the edge. */
+function haloGeometry(): THREE.BufferGeometry {
+  const geometry = new THREE.CircleGeometry(1, 40);
+  const position = geometry.attributes.position as THREE.BufferAttribute;
+  const color = new Float32Array(position.count * 4);
+  const gold = new THREE.Color(SENTRY_RIM_COLOR);
+  for (let i = 0; i < position.count; i++) {
+    const r = Math.hypot(position.getX(i), position.getY(i)); // 0 at the centre vertex, 1 on the rim
+    color.set([gold.r, gold.g, gold.b, SENTRY_HALO_OPACITY * (1 - r) ** 2], i * 4);
+  }
+  geometry.setAttribute("color", new THREE.BufferAttribute(color, 4));
+  return geometry;
+}
 const TRAIL_COLOR = new THREE.Color(0xff9a3c);
 const DIMMED = 0.3;
 const OFFSCREEN = -1e6;
@@ -152,6 +174,14 @@ export class WorldRenderer {
   private readonly rockGeo = this.own(rockGeometry());
   private readonly trailGeo = this.own(trailGeometry());
   private readonly hazardGeo = hazardGeometries();
+  private readonly sentryRimGeo = this.own(new THREE.RingGeometry(1.32, 1.5, 40));
+  private readonly sentryHaloGeo = this.own(haloGeometry());
+  private readonly sentryRimMaterial = this.own(new THREE.MeshBasicMaterial({
+    color: SENTRY_RIM_COLOR, transparent: true, opacity: SENTRY_RIM_OPACITY, depthWrite: false,
+  }));
+  private readonly sentryHaloMaterial = this.own(new THREE.MeshBasicMaterial({
+    vertexColors: true, transparent: true, blending: THREE.AdditiveBlending, depthWrite: false,
+  }));
   private readonly hoverRing: THREE.Mesh;
   private readonly focusGlow = new THREE.Group();
   private readonly moon = new THREE.Group();
@@ -181,6 +211,8 @@ export class WorldRenderer {
   private trails: THREE.InstancedMesh | null = null;
   private hazards: THREE.InstancedMesh | null = null;
   private hazardMarks: THREE.InstancedMesh | null = null;
+  private sentryRims: THREE.InstancedMesh | null = null;
+  private sentryHalos: THREE.InstancedMesh | null = null;
   private earth: EarthArt | null = null;
   private stars: THREE.Points<THREE.BufferGeometry, THREE.PointsMaterial> | null = null;
   private background = "";
@@ -293,11 +325,11 @@ export class WorldRenderer {
 
   /** Replace the population. Asteroids still present keep their animation state (no restart, no copies). */
   setRecords(records: readonly WorldRecord[]): void {
-    for (const mesh of [this.rocks, this.trails, this.hazards, this.hazardMarks]) if (mesh) {
+    for (const mesh of this.instancedLayers()) {
       this.scene.remove(mesh);
       mesh.dispose();
     }
-    this.rocks = this.trails = this.hazards = this.hazardMarks = null;
+    this.rocks = this.trails = this.hazards = this.hazardMarks = this.sentryRims = this.sentryHalos = null;
     this.records = [...records];
     this.index.clear();
     this.records.forEach((r, i) => this.index.set(r.neows_id, i));
@@ -317,18 +349,22 @@ export class WorldRenderer {
       this.trails = new THREE.InstancedMesh(this.trailGeo, this.trailMaterial, n);
       this.hazards = new THREE.InstancedMesh(this.hazardGeo.triangle, this.hazardMaterial, n);
       this.hazardMarks = new THREE.InstancedMesh(this.hazardGeo.mark, this.hazardMarkMaterial, n);
+      this.sentryRims = new THREE.InstancedMesh(this.sentryRimGeo, this.sentryRimMaterial, n);
+      this.sentryHalos = new THREE.InstancedMesh(this.sentryHaloGeo, this.sentryHaloMaterial, n);
+      this.sentryHalos.position.z = 4; // behind the rock
+      this.sentryRims.position.z = 30; // in front of the rock's silhouette
       this.rocks.position.z = 6;
       this.trails.position.z = 5;
       // Above any rock depth (a focused rock spans z ≈ 6 ± ROCK_PX × FOCUS_ROCK_SCALE).
       this.hazards.position.z = 70;
       this.hazardMarks.position.z = 70.1;
-      for (const mesh of [this.rocks, this.trails, this.hazards, this.hazardMarks]) {
+      for (const mesh of this.instancedLayers()) {
         mesh.frustumCulled = false;
         mesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
         this.scene.add(mesh);
       }
       for (let i = 0; i < n; i++) {
-        this.rocks.setColorAt(i, ROCK_COLOR);
+        this.rocks.setColorAt(i, this.baseColor(i));
         this.trails.setColorAt(i, TRAIL_COLOR);
       }
     }
@@ -394,6 +430,12 @@ export class WorldRenderer {
   restAltitudeOf(neowsId: string): number | null {
     const i = this.index.get(neowsId);
     return i === undefined ? null : this.rest[i]?.altitude ?? null;
+  }
+
+  /** True when the gold Sentry designation is currently drawn on this asteroid. */
+  sentryGoldShownOf(neowsId: string): boolean {
+    const i = this.index.get(neowsId);
+    return i !== undefined && isSentryLinked(this.records[i]!) && this.current[i] !== null;
   }
 
   /** True when the NeoWs PHA badge is currently drawn on this asteroid. */
@@ -683,7 +725,7 @@ export class WorldRenderer {
   }
 
   private updateInstances(focus: number): void {
-    if (!this.rocks || !this.trails || !this.hazards || !this.hazardMarks) return;
+    if (!this.rocks || !this.trails || !this.hazards || !this.hazardMarks || !this.sentryRims || !this.sentryHalos) return;
     const matrix = new THREE.Matrix4();
     const position = new THREE.Vector3();
     const scale = new THREE.Vector3();
@@ -700,7 +742,7 @@ export class WorldRenderer {
       if (f <= 0) {
         this.current[i] = null;
         this.hitRadius[i] = 0;
-        for (const mesh of [this.rocks, this.trails, this.hazards, this.hazardMarks]) mesh.setMatrixAt(i, hidden);
+        for (const mesh of this.instancedLayers()) mesh.setMatrixAt(i, hidden);
         continue;
       }
       const rest = this.rest[i]!;
@@ -714,7 +756,20 @@ export class WorldRenderer {
       const radius = ROCK_PX * appear * (isFocus ? 1 + (FOCUS_ROCK_SCALE - 1) * focus : 1);
       matrix.compose(position.set(x, y, 0), this.rotations[i]!, scale.setScalar(Math.max(radius, 1e-3)));
       this.rocks.setMatrixAt(i, matrix);
-      this.rocks.setColorAt(i, color.copy(ROCK_COLOR).multiplyScalar(isFocus ? 1 : 1 - (1 - DIMMED) * focus));
+      this.rocks.setColorAt(i, color.copy(this.baseColor(i)).multiplyScalar(isFocus ? 1 : 1 - (1 - DIMMED) * focus));
+
+      // Gold designation for an actual Sentry link: a thin rim and a soft halo at world-view size.
+      // They give way during focus (the focused rock's gold body carries the designation there).
+      if (isSentryLinked(record)) {
+        const glow = Math.max(ROCK_PX * appear * (1 - focus), 1e-3);
+        matrix.compose(position.set(x, y, 0), identity, scale.set(glow, glow, 1));
+        this.sentryRims.setMatrixAt(i, matrix);
+        matrix.compose(position.set(x, y, 0), identity, scale.set(glow * 2.6, glow * 2.6, 1));
+        this.sentryHalos.setMatrixAt(i, matrix);
+      } else {
+        this.sentryRims.setMatrixAt(i, hidden);
+        this.sentryHalos.setMatrixAt(i, hidden);
+      }
 
       // Trail only while approaching (visual metaphor); none while settled or retreating.
       const approaching = this.animator.isApproaching(id);
@@ -738,7 +793,7 @@ export class WorldRenderer {
         this.hazardMarks.setMatrixAt(i, hidden);
       }
     }
-    for (const mesh of [this.rocks, this.trails, this.hazards, this.hazardMarks]) {
+    for (const mesh of this.instancedLayers()) {
       mesh.instanceMatrix.needsUpdate = true;
       if (mesh.instanceColor) mesh.instanceColor.needsUpdate = true;
     }
@@ -841,6 +896,18 @@ export class WorldRenderer {
     this.stars = new THREE.Points(geometry, new THREE.PointsMaterial({ color: 0xffffff, size: 1.6, sizeAttenuation: false, transparent: true, opacity: 0 }));
     this.scene.add(this.stars);
     this.viewDirty = true;
+  }
+
+  /** Every per-asteroid instanced layer that exists (one instance per record in each). */
+  private instancedLayers(): THREE.InstancedMesh[] {
+    return [this.rocks, this.trails, this.hazards, this.hazardMarks, this.sentryRims, this.sentryHalos].filter(
+      (mesh): mesh is THREE.InstancedMesh => mesh !== null,
+    );
+  }
+
+  /** Plain rock colour, or gold for an actual Sentry link (served status only). */
+  private baseColor(i: number): THREE.Color {
+    return isSentryLinked(this.records[i]!) ? SENTRY_ROCK_COLOR : ROCK_COLOR;
   }
 
   private own<T extends { dispose(): void }>(resource: T): T {

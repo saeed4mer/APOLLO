@@ -292,6 +292,27 @@ async function main() {
   const sky0 = await captureState("state0-earth-sky", "Initial Earth + sky, nothing falling");
   check(sky0.zenith && sky0.zenith[2] > sky0.zenith[0] && luminance(sky0.zenith) > 120, `initial background is sky blue: ${sky0.zenith}`);
   check(await page.isVisible(".intro"), "title and scroll hint visible");
+  // APOLLO identity: exact texts, subtitle on ONE line, wordmark docked only once the journey starts.
+  const SUBTITLE = "Asteroid Proximity & Orbital Logistics Lookout Operation";
+  const hero = await page.$eval(".brand-hero", (n) => {
+    const sub = n.querySelector(".brand-subtitle");
+    const range = document.createRange();
+    range.selectNodeContents(sub);
+    const lineHeight = parseFloat(getComputedStyle(sub).lineHeight) || parseFloat(getComputedStyle(sub).fontSize) * 1.3;
+    return {
+      name: n.querySelector(".brand-name").textContent, subtitle: sub.textContent,
+      lines: range.getClientRects().length, height: sub.getBoundingClientRect().height, lineHeight,
+      nameSize: parseFloat(getComputedStyle(n.querySelector(".brand-name")).fontSize), subSize: parseFloat(getComputedStyle(sub).fontSize),
+      right: sub.getBoundingClientRect().right, left: sub.getBoundingClientRect().left,
+    };
+  });
+  check(hero.name === "APOLLO" && hero.subtitle === SUBTITLE, `title texts exact: ${JSON.stringify([hero.name, hero.subtitle])}`);
+  check(hero.lines === 1 && hero.height < hero.lineHeight * 1.5, `subtitle on one line (${hero.lines} line box(es), ${hero.height}px)`);
+  check(hero.left >= 0 && hero.right <= VIEW.width, "subtitle fits the viewport");
+  check(hero.nameSize >= hero.subSize * 3, `APOLLO dominates the subtitle (${hero.nameSize}px vs ${hero.subSize}px)`);
+  check(Number(await page.$eval(".brand-docked", (n) => getComputedStyle(n).opacity)) === 0, "docked wordmark hidden at load");
+  check((await page.title()).startsWith("APOLLO"), `document title: ${await page.title()}`);
+  report.brand = hero;
   check((await dbg("frontierLabel")) === null, "no frontier label before scrolling");
   check((await dbg("moonOpacity")) === 0 && !(await dbg("moonLabelVisible")), "no Moon at load");
   check((await dbg("visibleGuides")).length === 0, "no distance guides at load");
@@ -320,6 +341,11 @@ async function main() {
   const night = await captureState("state2-night-moon", "Night transition: Moon distance reached");
   check(luminance(night.zenith) < 45, `night sky when the Moon appears (${night.zenith})`);
   check(await earthOnScreen(), "Earth still visible when the Moon appears");
+  const docked = await page.$eval(".brand-docked", (n) => ({
+    opacity: Number(getComputedStyle(n).opacity), name: n.querySelector(".brand-name").textContent,
+    subtitle: n.querySelector(".brand-subtitle").textContent, lines: (() => { const r = document.createRange(); r.selectNodeContents(n.querySelector(".brand-subtitle")); return r.getClientRects().length; })(),
+  }));
+  check(docked.opacity > 0.99 && docked.name === "APOLLO" && docked.subtitle === SUBTITLE && docked.lines === 1, `docked APOLLO wordmark once travelling (Moon stage) ${JSON.stringify(docked)}`);
   const moonPos = await dbg("moonScreenPosition");
   check(moonPos.y > 0 && moonPos.y < VIEW.height, `Moon on screen ${JSON.stringify(moonPos)}`);
   check((await page.textContent(".moon-title")) === "MOON DISTANCE" && (await page.textContent(".moon-km")) === "384,400 km", "Moon labelled MOON DISTANCE / 384,400 km");
@@ -567,6 +593,45 @@ async function main() {
   await scrollToKm(18.5e6);
   await waitStill("local window with ST and TW54 before focus");
 
+  // Gold = actual Sentry link (served sentry.status), never PHA.
+  const linkedIds = worldApi.data.filter((r) => r.sentry.status === "available" || r.sentry.status === "linked_no_record").map((r) => r.neows_id);
+  check(JSON.stringify(linkedIds.sort()) === JSON.stringify([ST, TW54].sort()), `the API reports exactly two Sentry-linked objects: ${linkedIds}`);
+  for (const r of worldApi.data) {
+    const gold = await dbg("sentryGoldShownOf", r.neows_id);
+    const expected = linkedIds.includes(r.neows_id) && (await dbg("phaseOf", r.neows_id)) !== "HIDDEN";
+    check(gold === expected, `${r.neows_id}: gold ${gold} (sentry ${r.sentry.status}, PHA ${r.encounter.is_potentially_hazardous})`);
+  }
+  const goldPixels = async (id) => {
+    const at = await dbg("screenPositionOf", id);
+    const shot = await page.screenshot({ clip: { x: Math.round(at.x) - 14, y: Math.round(at.y) - 14, width: 28, height: 28 } });
+    return page.evaluate(async (b64) => {
+      const img = new Image();
+      img.src = `data:image/png;base64,${b64}`;
+      await img.decode();
+      const c = document.createElement("canvas");
+      c.width = img.width;
+      c.height = img.height;
+      const ctx = c.getContext("2d");
+      ctx.drawImage(img, 0, 0);
+      const d = ctx.getImageData(0, 0, c.width, c.height).data;
+      let n = 0;
+      for (let i = 0; i < d.length; i += 4) if (d[i] > 170 && d[i + 1] > 120 && d[i] - d[i + 2] > 90) n++;
+      return n;
+    }, shot.toString("base64"));
+  };
+  const plainInView = (await allPhases());
+  const plainId = realIds.find((id) => !linkedIds.includes(id) && plainInView[id] === "SETTLED" && missKm(id) > 12e6);
+  const goldCounts = { [ST]: await goldPixels(ST), [TW54]: await goldPixels(TW54), plain: await goldPixels(plainId) };
+  writeFileSync(join(ARTIFACTS, "sentry-gold.png"), await page.screenshot({ clip: { x: 0, y: 0, width: VIEW.width, height: VIEW.height } }));
+  check(goldCounts[ST] > 25 && goldCounts[TW54] > 25 && goldCounts.plain < 5, `gold drawn on the two Sentry-linked asteroids only ${JSON.stringify(goldCounts)}`);
+  const stPos = await dbg("screenPositionOf", ST);
+  await page.mouse.move(stPos.x, stPos.y);
+  await waitFor(async () => (await dbg("hoveredId")) === ST, "hover ST");
+  check((await page.textContent(".hover-tooltip .sentry-tag")) === "SENTRY LINKED", "hover tags a Sentry-linked asteroid");
+  await page.mouse.move(3, 3);
+  await waitFor(async () => (await dbg("hoveredId")) === null, "hover cleared");
+  step("gold Sentry designation on the two linked objects only", { linked: linkedIds, goldCounts, plainId });
+
   // ── 15-16. Select a real asteroid by clicking it; callouts match the API ─────────────────
   const preFocus = { progress: await dbg("progress"), phases: await allPhases() };
   const clickPos = await dbg("screenPositionOf", ST);
@@ -703,7 +768,7 @@ async function main() {
   await page.reload();
   await waitFor(async () => (await page.evaluate(() => window.__ASTEROID_DEBUG__?.worldStatus())) === "error", "outage error", 30_000);
   const outage = await page.textContent(".status-overlay");
-  check(outage.includes("ASTEROID INTELLIGENCE UNAVAILABLE") && outage.includes("could not be reached"), `outage message: ${outage}`);
+  check(outage.includes("APOLLO UNAVAILABLE") && outage.includes("could not be reached"), `outage message: ${outage}`);
   api = startApi();
   await waitForUrl(`${API}/health`);
   await page.click(".status-overlay button");

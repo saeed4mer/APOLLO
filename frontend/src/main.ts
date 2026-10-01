@@ -49,6 +49,7 @@ if (import.meta.env.DEV) {
     progressForKm: (km: number) => progressForDistance(km, app.renderer.distanceDomain),
     restAltitudeOf: (id: string) => app.renderer.restAltitudeOf(id),
     hazardShownOf: (id: string) => app.renderer.hazardShownOf(id),
+    sentryGoldShownOf: (id: string) => app.renderer.sentryGoldShownOf(id),
     moonScreenPosition: () => app.renderer.moonScreenPosition(),
     distanceDomain: () => app.renderer.distanceDomain,
     progress: () => ({

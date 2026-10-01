@@ -1,4 +1,4 @@
-# Asteroid Intelligence Renderer (M7)
+# APOLLO renderer — Asteroid Proximity & Orbital Logistics Lookout Operation (M7)
 
 An immersive, source-grounded view of the platform's asteroid intelligence: Earth's curved horizon
 below, the asteroid field in the sky above, and a scroll-driven journey from sky into space. The
@@ -70,7 +70,9 @@ trees/houses/people) · fall trails · asteroid rocks · PHA badges · focus glo
 | Camera travel | `travelPx(F) = max(0, crestY + altitudePx(F) − 0.68 × viewportHeight)`: the camera stays on the Earth until the frontier would rise above 68% of the screen, then follows it, holding the frontier there. A pure function of the revealed distance, so it is deterministic and fully reversible | `scene/skyLayout.ts`, `renderer/WorldRenderer.ts` |
 | Earth | World geometry at the base of the world (crest 30% up the first screen; sag 10% of height; rebuilt only on resize). It **recedes** as the camera travels (still in view at the Moon), **leaves the viewport by ~2.5M km**, and returns exactly when scrolling back. The sky's horizon band leaves with it | `scene/skyLayout.ts`, `renderer/earthArt.ts` |
 | Horizontal (illustrative) | Longitude of the served `illustrative_direction`: `atan2(y, x) / π` (projection `longitude-fan-v1`). The served vector is used as-is, never regenerated; latitude (z) is unused | `scene/skyLayout.ts` |
-| Appearance | Every asteroid: same low-poly rock, same on-screen size, same colour. Size and colour encode nothing; facts are text | `renderer/WorldRenderer.ts` |
+| Appearance | Every asteroid: same low-poly rock and on-screen size (size encodes nothing); facts are text | `renderer/WorldRenderer.ts` |
+| Sentry gold | **Gold** (muted gold rock, thin gold rim, soft radial halo) marks an **actual JPL Sentry link**, read only from the served `sentry.status` (`available` or `linked_no_record`, the API's own definition of linked; `isSentryLinked`). Never derived from PHA or any other field. Same size and position as any other asteroid; the rim/halo give way in focus; hover shows a small SENTRY LINKED tag. In the current data: 2008 ST and 2010 TW54 | `models/world.ts`, `renderer/WorldRenderer.ts`, `ui/HoverTooltip.ts` |
+| Title | **APOLLO** — *Asteroid Proximity & Orbital Logistics Lookout Operation* (one line): a centred opening title that cross-fades into a docked top-left wordmark for the journey (hidden during focus) | `ui/WorldHud.ts` |
 | Hazard badge | A small ⚠ beside the rock **only** when NeoWs `is_potentially_hazardous === true` (not for `false`, not for `null`). It is the NeoWs PHA flag, not an impact prediction, Sentry result or risk score; nothing else encodes hazard | `renderer/WorldRenderer.ts` |
 | Trail | Only while falling; identical for every asteroid; a visual metaphor for approach, not a trajectory | `renderer/WorldRenderer.ts` |
 | Moon landmark | A visual Moon on a dashed arc at the world height of 384,400 km, labelled "MOON DISTANCE / 384,400 km" (to its left). **Hidden until the frontier reaches 384,400 km** (progress 0.16, the night transition), fading in over 0.015 progress; it is then passed and leaves the viewport (~6M km), and returns when scrolling back. Context, not data: not a record, no direction semantics, never uses `illustrative_direction` | `scene/atmosphere.ts`, `renderer/WorldRenderer.ts` |

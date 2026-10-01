@@ -47,6 +47,17 @@ export interface WorldRecord {
   illustrative_direction: UnitVector;
 }
 
+/**
+ * True when the serving layer reports an actual JPL Sentry link for this asteroid: exactly one
+ * Sentry ID linked through the identity crosswalk ("available", or "linked_no_record" when no
+ * Sentry snapshot is stored). This mirrors the API's own definition of "linked" (api/service.py)
+ * and reads ONLY the served sentry.status: never the NeoWs PHA flag, the NeoWs is_sentry_object
+ * flag, or any other field.
+ */
+export function isSentryLinked(record: Pick<WorldRecord, "sentry">): boolean {
+  return record.sentry.status === "available" || record.sentry.status === "linked_no_record";
+}
+
 export interface WorldSnapshotInfo {
   object_count: number;
   encounter_selection_rule: string;

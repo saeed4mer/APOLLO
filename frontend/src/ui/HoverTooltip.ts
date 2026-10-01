@@ -1,4 +1,4 @@
-import type { WorldRecord } from "../models/world";
+import { isSentryLinked, type WorldRecord } from "../models/world";
 import { el } from "./dom";
 import { formatFlag, formatNumber, MATCH_STATE_TEXT, SENTRY_STATUS_TEXT, UNAVAILABLE } from "./format";
 
@@ -51,7 +51,9 @@ export class HoverTooltip {
     const rows = hoverFacts(record).map(([label, value]) =>
       el("div", { className: "fact" }, [el("span", { className: "fact-label", text: label }), el("span", { className: "fact-value", text: value })]),
     );
-    this.element.replaceChildren(el("p", { className: "tooltip-title", text: record.name }), ...rows);
+    // The gold designation's meaning, stated where the user is already reading about this object.
+    const tag = isSentryLinked(record) ? [el("p", { className: "sentry-tag", text: "SENTRY LINKED" })] : [];
+    this.element.replaceChildren(el("p", { className: "tooltip-title", text: record.name }), ...tag, ...rows);
     this.element.hidden = false;
     this.anchor = { x: clientX, y: clientY };
     this.place();

@@ -49,7 +49,7 @@ describe("world", () => {
     const world = deferred<ReturnType<typeof validateWorldResponse>>();
     const fetchWorld = vi.fn(() => world.promise);
     const t = mount({ fetchWorld });
-    expect(t.text(".status-overlay")).toBe("INITIALIZING ASTEROID INTELLIGENCE FIELD");
+    expect(t.text(".status-overlay")).toBe("INITIALIZING APOLLO ASTEROID FIELD");
     world.resolve(validateWorldResponse(fixture("world.json")));
     await flushPromises();
     expect((t.root.querySelector(".status-overlay") as HTMLElement).hidden).toBe(true); // no permanent banner
@@ -83,7 +83,7 @@ describe("world", () => {
       }),
     });
     await flushPromises();
-    expect(t.text(".status-overlay")).toContain("ASTEROID INTELLIGENCE UNAVAILABLE");
+    expect(t.text(".status-overlay")).toContain("APOLLO UNAVAILABLE");
     expect(t.text(".status-overlay")).toContain("could not be reached");
     t.button("Retry").click();
     await flushPromises();
