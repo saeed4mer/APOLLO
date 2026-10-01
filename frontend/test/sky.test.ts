@@ -1,9 +1,10 @@
 import { validateProfileResponse } from "../src/api/validateProfile";
 import type { WorldRecord } from "../src/models/world";
-import { labelOpacity, rulerOpacity, SKY_STOPS, skyColors, starOpacity } from "../src/scene/atmosphere";
+import { fieldOpacity, labelOpacity, SKY_STOPS, skyColors, starOpacity } from "../src/scene/atmosphere";
 import { ExplorationController, MAX_WHEEL_DELTA, PROGRESS_PER_100PX } from "../src/scene/exploration";
 import {
-  altitudeFraction, altitudePx, computeLayout, DEFAULT_DOMAIN, MIN_ALTITUDE_PX, restPosition, skyHorizontal, surfaceY,
+  altitudePx, computeLayout, DEFAULT_DOMAIN, distanceFraction, FRONTIER_FRACTION, MIN_ALTITUDE_PX, restPosition,
+  skyHorizontal, surfaceY, type DistanceView,
 } from "../src/scene/skyLayout";
 import { buildCallouts } from "../src/ui/callouts";
 import { labelBox, overlaps } from "../src/ui/LabelLayer";
@@ -14,57 +15,70 @@ const withDistance = (base: WorldRecord, id: string, km: number): WorldRecord =>
   ...structuredClone(base), neows_id: id, encounter: { ...base.encounter, miss_distance_km: km },
 });
 const VIEWPORTS: [number, number][] = [[1280, 720], [1920, 1080], [2560, 1440], [3840, 2160], [900, 1200]];
+/** Frontiers spanning the whole journey: before the Moon, the Moon, the early field, deep space. */
+const FRONTIERS = [0, 5e4, 384_400, 1e6, 5e6, 23_417_892, 5e7, 1e8];
+const view = (frontierKm: number): DistanceView => ({ domain: DEFAULT_DOMAIN, frontierKm });
 
 describe("distance ordering is preserved in the sky (non-negotiable)", () => {
-  it("controlled example: 50,000 < 500,000 < 5,000,000 km rest lower-to-higher above the arc", () => {
+  it("controlled example: 5M < 15M < 50M km rest lower-to-higher above the arc, for every frontier", () => {
     const base = records()[0]!;
-    const [a, b, c] = [5e4, 5e5, 5e6].map((km, i) => withDistance(base, `1${i}`, km));
+    const [a, b, c] = [5e6, 15e6, 50e6].map((km, i) => withDistance(base, `1${i}`, km));
     for (const [w, h] of VIEWPORTS) {
       for (const p of [0, 0.5, 1]) {
-        const layout = computeLayout(w, h, p);
-        const [ra, rb, rc] = [a, b, c].map((r) => restPosition(layout, r!));
-        expect(ra!.altitude).toBeLessThan(rb!.altitude);
-        expect(rb!.altitude).toBeLessThan(rc!.altitude);
+        for (const f of FRONTIERS) {
+          const layout = computeLayout(w, h, p);
+          const [ra, rb, rc] = [a, b, c].map((r) => restPosition(layout, r!, view(f)));
+          expect(ra!.altitude).toBeLessThan(rb!.altitude);
+          expect(rb!.altitude).toBeLessThan(rc!.altitude);
+        }
       }
     }
   });
 
-  it("every real asteroid: altitude above the arc is strictly ordered by real miss distance, at every progress and aspect", () => {
+  it("every real asteroid: altitude is strictly ordered by real miss distance, at every frontier, progress and aspect", () => {
     const sorted = [...records()].sort((x, y) => x.encounter.miss_distance_km - y.encounter.miss_distance_km);
     for (const [w, h] of VIEWPORTS) {
       for (const p of [0, 0.25, 0.75, 1]) {
-        const layout = computeLayout(w, h, p);
-        const alts = sorted.map((r) => restPosition(layout, r).altitude);
-        for (let i = 1; i < alts.length; i++) expect(alts[i]!).toBeGreaterThan(alts[i - 1]!);
+        for (const f of FRONTIERS) {
+          const layout = computeLayout(w, h, p);
+          const alts = sorted.map((r) => restPosition(layout, r, view(f)).altitude);
+          for (let i = 1; i < alts.length; i++) expect(alts[i]!).toBeGreaterThan(alts[i - 1]!);
+        }
       }
     }
+  });
+
+  it("the mapping is strictly monotonic across the frontier and bounded in [0, 1)", () => {
+    for (const f of FRONTIERS) {
+      let last = -Infinity;
+      for (let km = 1000; km < 3e8; km *= 1.07) {
+        const frac = distanceFraction(km, view(f));
+        expect(frac).toBeGreaterThan(last);
+        expect(frac).toBeGreaterThanOrEqual(0);
+        expect(frac).toBeLessThan(1);
+        last = frac;
+      }
+    }
+    expect(distanceFraction(23_417_892, view(23_417_892))).toBeCloseTo(FRONTIER_FRACTION, 12); // frontier height is fixed
+    expect(() => distanceFraction(0, view(1e6))).toThrow(RangeError);
+    expect(() => distanceFraction(NaN, view(1e6))).toThrow(RangeError);
+    expect(altitudePx(computeLayout(1000, 800, 0), 1, view(1e6))).toBeCloseTo(MIN_ALTITUDE_PX, 3);
   });
 
   it("altitude is measured from the surface directly below, with the same range at every x", () => {
     const layout = computeLayout(1600, 900, 0.3);
     for (const record of records()) {
-      const rest = restPosition(layout, record);
-      expect(rest.y - surfaceY(layout, rest.x)).toBeCloseTo(altitudePx(layout, record.encounter.miss_distance_km), 9);
+      const rest = restPosition(layout, record, view(5e7));
+      expect(rest.y - surfaceY(layout, rest.x)).toBeCloseTo(altitudePx(layout, record.encounter.miss_distance_km, view(5e7)), 9);
     }
-  });
-
-  it("log scale over the distance domain: domain ends map to 0 and 1, values outside clamp", () => {
-    expect(altitudeFraction(DEFAULT_DOMAIN.minKm)).toBe(0);
-    expect(altitudeFraction(DEFAULT_DOMAIN.maxKm)).toBe(1);
-    expect(altitudeFraction(1)).toBe(0);
-    expect(altitudeFraction(1e12)).toBe(1);
-    expect(() => altitudeFraction(0)).toThrow(RangeError);
-    expect(() => altitudeFraction(NaN)).toThrow(RangeError);
-    const layout = computeLayout(1000, 800, 0);
-    expect(altitudePx(layout, DEFAULT_DOMAIN.minKm)).toBe(MIN_ALTITUDE_PX);
   });
 
   it("positions do not depend on the rest of the population (adding asteroids moves nobody)", () => {
     const layout = computeLayout(1400, 860, 0.4);
     const one = records()[3]!;
-    const alone = restPosition(layout, one);
+    const alone = restPosition(layout, one, view(3e7));
     const extra = [...records(), withDistance(one, "999999999", 1e4)];
-    expect(restPosition(layout, extra[3]!)).toEqual(alone);
+    expect(restPosition(layout, extra[3]!, view(3e7))).toEqual(alone);
   });
 });
 
@@ -74,8 +88,8 @@ describe("direction is consumed, never regenerated", () => {
     for (const record of records()) {
       const d = record.illustrative_direction;
       expect(skyHorizontal(d)).toBe(Math.atan2(d.y, d.x) / Math.PI);
-      expect(restPosition(layout, { ...record, asteroid_key: "ast_changed" })).toEqual(restPosition(layout, record));
-      expect(restPosition(layout, structuredClone(record))).toEqual(restPosition(layout, record));
+      expect(restPosition(layout, { ...record, asteroid_key: "ast_changed" }, view(1e8))).toEqual(restPosition(layout, record, view(1e8)));
+      expect(restPosition(layout, structuredClone(record), view(1e8))).toEqual(restPosition(layout, record, view(1e8)));
     }
   });
 
@@ -83,7 +97,7 @@ describe("direction is consumed, never regenerated", () => {
     for (const [w, h] of VIEWPORTS) {
       const layout = computeLayout(w, h, 0);
       for (const record of records()) {
-        const { x } = restPosition(layout, record);
+        const { x } = restPosition(layout, record, view(1e8));
         expect(x).toBeGreaterThan(0);
         expect(x).toBeLessThan(w);
       }
@@ -176,7 +190,7 @@ describe("sky -> space transition is continuous", () => {
     }
     expect(starOpacity(0)).toBe(0);
     expect(starOpacity(1)).toBe(1);
-    expect(rulerOpacity(0)).toBe(0);
+    expect(fieldOpacity(0)).toBe(0);
     expect(labelOpacity(0.3)).toBe(0);
     expect(skyColors(NaN)).toEqual(skyColors(0));
   });

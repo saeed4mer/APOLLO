@@ -238,15 +238,17 @@ async function main() {
     for (let i = 0; i < Math.abs(notches); i++) await page.mouse.wheel(0, Math.sign(notches) * delta);
   };
   /** Wheel toward the progress whose revealed distance is `km` (real user input, so approximate). */
-  const scrollToKm = async (km) => {
-    const domain = await dbg("distanceDomain");
-    const target = km <= 0 ? 0 : Math.log(km / domain.minKm) / Math.log(domain.maxKm / domain.minKm);
-    for (let i = 0; i < 80; i++) {
+  /** Optionally records every phase seen per asteroid while scrolling (falls can finish mid-scroll). */
+  const scrollToKm = async (km, seen = null) => {
+    const target = await dbg("progressForKm", km);
+    for (let i = 0; i < 400; i++) {
       const p = (await dbg("progress")).target;
-      if (Math.abs(p - target) < 0.02) break;
-      await wheel(1 * Math.sign(target - p), 60);
+      if (Math.abs(p - target) < 0.008) break;
+      await wheel(1 * Math.sign(target - p), Math.abs(p - target) > 0.05 ? 120 : 40);
+      if (seen) for (const [id, ph] of Object.entries(await allPhases())) (seen[id] ??= new Set()).add(ph);
     }
   };
+  const visibleGuideKms = async () => (await dbg("visibleGuides")).map((g) => g.km);
   const parseKm = (text) => Number(text.replace(/[^0-9]/g, ""));
   const positionsOf = async (ids) => Object.fromEntries(await Promise.all(ids.map(async (id) => [id, await dbg("screenPositionOf", id)])));
 
@@ -271,7 +273,9 @@ async function main() {
   check(sky0.zenith && sky0.zenith[2] > sky0.zenith[0] && luminance(sky0.zenith) > 120, `initial background is sky blue: ${sky0.zenith}`);
   check(await page.isVisible(".intro"), "title and scroll hint visible");
   check((await dbg("frontierLabel")) === null, "no frontier label before scrolling");
-  step("3. no asteroid falls before scroll (3 s observed)");
+  check((await dbg("moonOpacity")) === 0 && !(await dbg("moonLabelVisible")), "no Moon at load");
+  check((await dbg("visibleGuides")).length === 0, "no distance guides at load");
+  step("3. no asteroid falls, no Moon, no distance field before scroll (3 s observed)");
   await diagnostics("after load");
   report.memory.heapAfterLoad = await heap();
 
@@ -281,22 +285,51 @@ async function main() {
   await waitStill("small scroll");
   const small = await checkEligibility("small scroll");
   check(small.shown.length === 0, `small scroll (${small.revealedKm.toFixed(0)} km) is short of the nearest asteroid (${Math.min(...realIds.map(missKm)).toFixed(0)} km): nothing shown`);
-  step("4. scroll a small amount", { revealedKm: Math.round(small.revealedKm) });
+  const skySmall = await captureState("state1-small-scroll", "Small scroll: sky darkening, no Moon yet");
+  check(luminance(skySmall.zenith) < luminance(sky0.zenith), `small scroll darkens the sky (${luminance(sky0.zenith).toFixed(1)} -> ${luminance(skySmall.zenith).toFixed(1)})`);
+  check((await dbg("moonOpacity")) === 0 && !(await dbg("moonLabelVisible")), "Moon still hidden after a small scroll");
+  step("4. small scroll: sky darkens, Moon still hidden", { revealedKm: Math.round(small.revealedKm), zenith: skySmall.zenith });
+
+  await scrollToKm(250_000);
+  await waitStill("approaching the Moon");
+  check((await dbg("moonOpacity")) === 0, `Moon hidden before its distance (${Math.round((await dbg("progress")).revealedKm)} km)`);
+  await scrollToKm(700_000);
+  await waitStill("past the Moon");
+  await waitFor(async () => (await dbg("moonOpacity")) === 1, "Moon fully revealed");
+  check(await dbg("moonLabelVisible"), "Moon label shown with the Moon");
+  const night = await captureState("state2-night-moon", "Night transition: Moon distance reached");
+  check(luminance(night.zenith) < 45, `night sky when the Moon appears (${night.zenith})`);
+  step("Moon appears when the frontier reaches 384,400 km", { revealedKm: Math.round((await dbg("progress")).revealedKm), zenith: night.zenith });
+
+  await scrollToKm(1.6e6);
+  await waitStill("first million");
+  const firstGuides = await visibleGuideKms();
+  check(firstGuides.includes(1e6), `the first distance guide (1M km) appears: ${firstGuides.map((k) => k / 1e6).join(",")}`);
+  await captureState("state3-first-guides", "Early distance field: first guides");
+  step("first distance guides appear", { guides: firstGuides.map((k) => `${k / 1e6}M`) });
+
   await scrollToKm(9e6);
   await watchTransition("to ~9M km");
   await waitStill("to ~9M km");
   const near = await checkEligibility("~9M km");
   check(near.shown.length > 0 && near.shown.length < realIds.length / 4, `only the nearest few are shown at ${near.revealedKm.toFixed(0)} km: ${near.shown.join(",")}`);
-  const s1 = await captureState("state1-first-reveal", "First distance-eligible asteroids");
-  step("5. only distance-eligible asteroids appear", { revealedKm: Math.round(near.revealedKm), shown: near.shown.map((id) => [id, Math.round(missKm(id))]) });
+  const early = await visibleGuideKms();
+  const everyMillion = Array.from({ length: Math.floor(near.revealedKm / 1e6) }, (_, i) => (i + 1) * 1e6);
+  check(everyMillion.every((km) => early.includes(km)), `every 1M guide up to ${near.revealedKm.toFixed(0)} km is drawn: ${early.map((k) => k / 1e6).sort((a, b) => a - b).join(",")}`);
+  const earlyLabels = await dbg("guideLabels");
+  check(["1M km", "2M km", "3M km", "4M km", "5M km"].every((t) => earlyLabels.includes(t)), `early field labels each million: ${JSON.stringify(earlyLabels)}`);
+  check(near.shown[0] === realIds.slice().sort((a, b) => missKm(a) - missKm(b))[0], "the closest asteroid appears first");
+  const s1 = await captureState("state4-early-field", "Early field: 1M increments, closest asteroid");
+  step("5. only distance-eligible asteroids appear; 1M increments visible", { revealedKm: Math.round(near.revealedKm), shown: near.shown.map((id) => [id, Math.round(missKm(id))]) });
 
   // ── 6-8. Farther: more appear; the frontier label counts up in 1M steps ──────────────────
   const frontierSeen = [];
   let lastShown = near.shown.length;
   let lastLum = luminance(s1.zenith);
-  for (const [km, name, label] of [[25e6, "state2-intermediate", "Intermediate field (~25M km)"], [50e6, "state3-space-transition", "Sky/space transition (~50M km)"], [1.2e8, "state4-deep", "Deep field: every asteroid"]]) {
-    await scrollToKm(km);
-    const seen = await watchTransition(name);
+  for (const [km, name, label] of [[23.5e6, "state5-field-23M", "Field around 23M km"], [50e6, "state6-field-50M", "Deeper field (~50M km)"], [1.2e8, "state7-deep", "Deep space: every asteroid"]]) {
+    const seen = {};
+    await scrollToKm(km, seen);
+    for (const [id, set] of Object.entries(await watchTransition(name))) for (const ph of set) (seen[id] ??= new Set()).add(ph);
     await waitStill(name);
     const e = await checkEligibility(name);
     check(e.shown.length >= lastShown, `${name}: more asteroids as the frontier moves out (${lastShown} -> ${e.shown.length})`);
@@ -306,8 +339,14 @@ async function main() {
     check(/^REVEALED TO [\d,]+ km$/.test(text ?? ""), `${name}: frontier label "${text}"`);
     const shownKm = parseKm(text ?? "");
     check(shownKm % 1e6 === 0 && shownKm <= e.revealedKm && e.revealedKm - shownKm < 1e6, `${name}: frontier label floors to whole millions (${shownKm} vs ${e.revealedKm.toFixed(0)})`);
-    const ruler = await dbg("rulerLabels");
-    check(ruler.length > 0 && ruler.every((t) => /^\d+M km$/.test(t)), `${name}: ruler labels in 1M units ${JSON.stringify(ruler)}`);
+    const guideLabels = await dbg("guideLabels");
+    check(guideLabels.length > 0 && guideLabels.every((t) => /^\d+M km$/.test(t)), `${name}: guide labels in 1M units ${JSON.stringify(guideLabels)}`);
+    const guides = await dbg("visibleGuides");
+    const strongest = guides.reduce((m, g) => (g.alpha > m.alpha ? g : m), guides[0]);
+    check(strongest && strongest.km <= e.revealedKm && e.revealedKm - strongest.km < 1.5e6,
+      `${name}: the explored distance is the strongest guide (${strongest?.km / 1e6}M at frontier ${(e.revealedKm / 1e6).toFixed(2)}M)`);
+    check(guides.every((g) => g.km <= e.revealedKm + 2e6), `${name}: no unreached guides far ahead`);
+    for (let m = 10; m * 1e6 <= e.revealedKm; m += 10) check(guides.some((g) => g.km === m * 1e6), `${name}: major ${m}M guide drawn`);
     const s = await captureState(name, label);
     check(luminance(s.zenith) < lastLum, `${name}: sky darkens toward space (${lastLum.toFixed(1)} -> ${luminance(s.zenith).toFixed(1)})`);
     lastLum = luminance(s.zenith);
@@ -326,6 +365,22 @@ async function main() {
   check(labelSteps.every((v) => v % 1e6 === 0) && new Set(labelSteps).size >= 5, `frontier label moves through 1M steps: ${labelSteps.join(" ")}`);
   step("6-7. farther objects appear as the frontier moves out", { frontier: frontierSeen });
   step("8. distance label progression", { labels: labelSteps.map((v) => `${v / 1e6}M`) });
+
+  // Asteroid labels carry the ACTUAL miss distance (never the rounded grid value).
+  await scrollToKm(1.2e8);
+  await waitStill("deep for labels");
+  const asteroidLabels = await page.$$eval(".asteroid-label:not([hidden])", (n) => n.map((x) => [x.querySelector(".label-name")?.textContent, x.querySelector(".label-detail")?.textContent]));
+  const byName = new Map(worldApi.data.map((r) => [r.name, r]));
+  let labelChecks = 0;
+  for (const [name, detail] of asteroidLabels) {
+    const r = byName.get(name);
+    const expected = fmt(r.encounter.miss_distance_km, 0, "km");
+    check(detail === expected, `label ${name}: "${detail}" vs API "${expected}"`);
+    report.dataAccuracy.push({ view: "label", neows_id: r.neows_id, field: "miss_distance", api: expected, shown: detail });
+    labelChecks++;
+  }
+  check(labelChecks >= 10, `asteroid labels checked against the API (${labelChecks})`);
+  step("12. asteroid labels show the actual miss distance", { checked: labelChecks });
 
   // ── 9. Moon distance reference ─────────────────────────────────────────────────────────
   const moonPos = await dbg("moonScreenPosition");
@@ -414,10 +469,9 @@ async function main() {
   // ── Exact threshold on a real non-round distance (exact target, then real phases) ────────
   const demoId = pha.neows_id;
   const demoKm = missKm(demoId);
-  const progressFor = (km) => Math.log(km / domain.minKm) / Math.log(domain.maxKm / domain.minKm);
   const threshold = {};
   for (const [label, km] of [["below", demoKm - 1], ["at", demoKm * (1 + 1e-12)]]) {
-    await dbg("exploreTo", progressFor(km));
+    await dbg("exploreTo", await dbg("progressForKm", km));
     await waitStill(`threshold ${label}`);
     const { revealedKm } = await dbg("progress");
     threshold[label] = { revealedKm, phase: await dbg("phaseOf", demoId), labelText: await dbg("frontierLabel") };

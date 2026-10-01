@@ -1,9 +1,8 @@
 import type { WorldSnapshotInfo } from "../models/world";
 import { introOpacity } from "../scene/atmosphere";
-import { DISTANCE_MIN_KM, SKY_PROJECTION } from "../scene/skyLayout";
+import { SKY_PROJECTION } from "../scene/skyLayout";
 import type { WorldState } from "../state/store";
 import { el } from "./dom";
-import { formatKmCompact } from "./format";
 
 /**
  * Minimal world chrome: an opening title + scroll hint (fades as the user goes deeper), loading
@@ -77,9 +76,11 @@ export class WorldHud {
       "Scrolling travels outward from Earth: it reveals real distance, from 0 km to beyond the farthest asteroid. " +
         "An asteroid appears only once the revealed distance reaches its exact NeoWs miss distance (closest first), " +
         "and retreats again if you scroll back below it.",
-      "Height above the Earth arc follows each asteroid's exact miss distance on a logarithmic scale starting at " +
-        `Earth's radius (${formatKmCompact(DISTANCE_MIN_KM)}): nearer objects always rest lower. The ruler on the right marks every 1,000,000 km; labels are rounded, positions never are.`,
-      "The Moon marks the Earth-Moon distance (384,400 km) for scale. It is not part of the asteroid data.",
+      "Height above the Earth arc follows each asteroid's exact miss distance. The mapping is focused on the distance being explored: " +
+        "the revealed frontier sits near the top, nearer distances are compressed toward Earth, and nearer objects always rest lower.",
+      "Dashed arcs every 1,000,000 km are visual distance guides (distance from Earth), not orbits or trajectories. " +
+        "Guide labels are rounded to whole millions; asteroid positions and labels use the exact distance.",
+      "The Moon marks the Earth-Moon distance (384,400 km) for scale. It appears when the journey reaches that distance and is not part of the asteroid data.",
       "The warning badge marks asteroids whose NASA NeoWs 'potentially hazardous' flag is true. It is not an impact prediction, a Sentry result or a risk score.",
       `Horizontal placement is the longitude of the backend's deterministic illustrative direction (${snapshot?.spatial_model.direction_algorithm ?? "..."}; renderer projection ${SKY_PROJECTION}). It is not an observed approach direction.`,
       "The falling motion and fiery trail are a visual metaphor for approach, identical for every asteroid. They are not trajectories.",

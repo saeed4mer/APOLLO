@@ -5,17 +5,19 @@ import { createApp } from "../src/app";
 import type { AsteroidProfile } from "../src/models/profile";
 import type { WorldRecord } from "../src/models/world";
 import { ROCK_PX, WorldRenderer } from "../src/renderer/WorldRenderer";
-import { skyColors, starOpacity } from "../src/scene/atmosphere";
+import { GUIDE_BASE, guideOpacity, moonOpacity, skyColors, starOpacity } from "../src/scene/atmosphere";
+import { MAX_WHEEL_DELTA, PROGRESS_PER_100PX } from "../src/scene/exploration";
 import { FALL_MS, RETREAT_MS, RevealAnimator, revealOrder, type AsteroidPhase } from "../src/scene/reveal";
 import {
-  altitudePx, DEFAULT_MAX_KM, DISTANCE_MIN_KM, distanceDomain, frontierLabelKm, isRevealed, MOON_DISTANCE_KM,
-  progressForDistance, restPosition, revealedDistanceKm, SCALE_STEP_KM, scaleTicks,
+  altitudePx, DEFAULT_MAX_KM, DISTANCE_MIN_KM, distanceDomain, FIELD_PROGRESS, frontierLabelKm, guideDistances, guideTier,
+  isRevealed, MOON_DISTANCE_KM, MOON_PROGRESS, progressForDistance, restPosition, revealedDistanceKm, SCALE_STEP_KM,
 } from "../src/scene/skyLayout";
-import { chooseRulerLabels, formatScaleKm, MAX_RULER_LABELS } from "../src/ui/LabelLayer";
+import { chooseGuideLabels, formatScaleKm, guideLabelCandidates, MAX_GUIDE_LABELS } from "../src/ui/LabelLayer";
 import { FakeGL, fixture, flushPromises, installFakeRaf, installFakeResizeObserver } from "./helpers";
 
 /**
- * M7.2 correction pass: the distance-driven, reversible asteroid reveal (spec items A-M).
+ * M7.2 correction passes: the distance-driven, reversible asteroid reveal, and the staged journey
+ * (daytime sky -> night + Moon -> million-km distance field -> deep space).
  * Controlled populations use the real fixture record shape with only distance / id / PHA changed.
  */
 let raf: ReturnType<typeof installFakeRaf>;
@@ -205,8 +207,8 @@ describe("E. resting position follows the actual miss distance", () => {
     travelTo(1e8);
     const layout = renderer.viewLayout;
     for (const r of records) {
-      const rest = restPosition(layout, r, renderer.distanceDomain);
-      expect(renderer.restAltitudeOf(r.neows_id)).toBe(altitudePx(layout, r.encounter.miss_distance_km, renderer.distanceDomain));
+      const rest = restPosition(layout, r, renderer.distanceView);
+      expect(renderer.restAltitudeOf(r.neows_id)).toBe(altitudePx(layout, r.encounter.miss_distance_km, renderer.distanceView));
       const p = renderer.screenPositionOf(r.neows_id)!;
       expect(p.x).toBeCloseTo(rest.x, 6);
       expect(p.y).toBeCloseTo(layout.height - rest.y, 6); // screen y grows downward
@@ -310,7 +312,8 @@ describe("I. Moon landmark", () => {
     const moon = renderer.moonScreenPosition();
     const x = moon.x;
     const surface = layout.cy + Math.sqrt(layout.radius ** 2 - Math.min(Math.abs(x - layout.cx), layout.radius) ** 2);
-    expect(layout.height - moon.y - surface).toBeCloseTo(altitudePx(layout, MOON_DISTANCE_KM, renderer.distanceDomain), 6);
+    expect(renderer.moonOpacity).toBe(1);
+    expect(layout.height - moon.y - surface).toBeCloseTo(altitudePx(layout, MOON_DISTANCE_KM, renderer.distanceView), 6);
     expect(records.some((r) => r.neows_id === "moon")).toBe(false);
     renderer.dispose();
 
@@ -323,6 +326,11 @@ describe("I. Moon landmark", () => {
     });
     await flushPromises();
     frames(5);
+    const label = root.querySelector<HTMLElement>(".moon-label")!;
+    expect(label.hidden).toBe(true); // not at load
+    app.renderer.exploration.setTarget(progressForDistance(2e6, app.renderer.distanceDomain));
+    frames(SETTLE);
+    expect(label.hidden).toBe(false);
     expect(root.querySelector(".moon-title")?.textContent).toBe("MOON DISTANCE");
     expect(root.querySelector(".moon-km")?.textContent).toBe("384,400 km");
     app.dispose();
@@ -354,17 +362,96 @@ describe("J. hazard badge = NeoWs PHA flag true only", () => {
   });
 });
 
-describe("K. 1M-km distance scale", () => {
-  it("ticks every 1,000,000 km; from 10M to 100M every step is present and labelled in whole millions", () => {
-    const ticks = scaleTicks(100e6, { minKm: DISTANCE_MIN_KM, maxKm: 1e8 });
-    expect(ticks.length).toBe(100);
-    const from10 = ticks.filter((km) => km >= 10e6);
-    expect(from10[0]).toBe(10e6);
-    expect(from10.at(-1)).toBe(100e6);
-    for (let i = 1; i < from10.length; i++) expect(from10[i]! - from10[i - 1]!).toBe(SCALE_STEP_KM);
-    expect(from10.map(formatScaleKm).slice(0, 3)).toEqual(["10M km", "11M km", "12M km"]);
-    expect(formatScaleKm(100e6)).toBe("100M km");
-    expect(scaleTicks(23_417_892, { minKm: DISTANCE_MIN_KM, maxKm: 1e8 }).at(-1)).toBe(23e6); // up to the frontier only
+describe("K. million-km distance guides", () => {
+  const domain = { minKm: DISTANCE_MIN_KM, maxKm: 1e8 };
+
+  it("a guide exists for every 1,000,000 km: 1M, 2M, ... 100M, with 10M majors and 5M mids", () => {
+    const kms = guideDistances(domain);
+    expect(kms.length).toBe(100);
+    expect(kms[0]).toBe(1e6);
+    expect(kms.at(-1)).toBe(100e6);
+    for (let i = 1; i < kms.length; i++) expect(kms[i]! - kms[i - 1]!).toBe(SCALE_STEP_KM);
+    expect(kms.filter((km) => guideTier(km) === "major")).toEqual([10, 20, 30, 40, 50, 60, 70, 80, 90, 100].map((m) => m * 1e6));
+    expect([5e6, 15e6, 95e6].map(guideTier)).toEqual(["mid", "mid", "mid"]);
+    expect([1e6, 11e6, 23e6].map(guideTier)).toEqual(["minor", "minor", "minor"]);
+    expect(formatScaleKm(23e6)).toBe("23M km");
+  });
+
+  it("the guides use the asteroids' own mapping: 12.4M km rests between the 12M and 13M guides, 47,382,615 km between 47M and 48M", () => {
+    const records = [record("a", 12_400_000), record("b", 47_382_615)];
+    const { renderer, travelTo } = newRenderer(records);
+    for (const km of [13e6, 5e7, 1e8]) {
+      travelTo(km);
+      const layout = renderer.viewLayout;
+      const alt = (d: number) => altitudePx(layout, d, renderer.distanceView);
+      if (renderer.phaseOf("a") === "SETTLED") {
+        expect(renderer.restAltitudeOf("a")!).toBeGreaterThan(alt(12e6));
+        expect(renderer.restAltitudeOf("a")!).toBeLessThan(alt(13e6));
+      }
+      if (renderer.phaseOf("b") === "SETTLED") {
+        expect(renderer.restAltitudeOf("b")!).toBeGreaterThan(alt(47e6));
+        expect(renderer.restAltitudeOf("b")!).toBeLessThan(alt(48e6));
+      }
+    }
+    expect(renderer.phaseOf("b")).toBe("SETTLED");
+    renderer.dispose();
+  });
+
+  it("the distance being explored is emphasised: at ~23.4M km, 23M > 22M > 21M; unreached guides far ahead are hidden", () => {
+    const { renderer, travelTo } = newRenderer(fixtureRecords());
+    travelTo(23_417_892);
+    const alpha = new Map(renderer.visibleGuides.map((g) => [g.km, g.alpha]));
+    expect(alpha.get(23e6)!).toBeGreaterThan(alpha.get(22e6)!);
+    expect(alpha.get(22e6)!).toBeGreaterThan(alpha.get(21e6)!);
+    expect(alpha.get(20e6)!).toBeGreaterThan(alpha.get(19e6) ?? 0); // a major stays stronger than its minor neighbour
+    expect(alpha.get(23e6)!).toBeGreaterThan(alpha.get(24e6) ?? 0);
+    for (const km of [26e6, 30e6, 50e6, 1e8]) expect(alpha.has(km)).toBe(false);
+    expect(Math.max(...alpha.values())).toBeLessThanOrEqual(0.75); // never louder than the scene
+    renderer.dispose();
+  });
+
+  it("for every frontier from 1.5M to 100M km, the strongest guide is within 1M km of the frontier (never a major further back)", () => {
+    for (let f = 1.5e6; f <= 1e8; f += 0.137e6) {
+      const kms = guideDistances({ minKm: DISTANCE_MIN_KM, maxKm: 1e8 });
+      const alphas = kms.map((km) => guideOpacity(km, guideTier(km), f, 50));
+      const strongest = kms[alphas.indexOf(Math.max(...alphas))]!;
+      expect(Math.abs(strongest - f)).toBeLessThan(1e6); // the guide being explored, never a major 2M+ back
+      expect(guideOpacity(Math.ceil((f + 2e6) / 1e6) * 1e6, "major", f, 50)).toBeLessThan(0.005); // 2M+ ahead: hidden
+    }
+  });
+
+  it("the field grows with depth: more guides at 50M than at 10M; every major up to the frontier is drawn", () => {
+    const { renderer, travelTo } = newRenderer(fixtureRecords());
+    travelTo(10.5e6);
+    const at10 = renderer.visibleGuides.length;
+    travelTo(1e8);
+    const deep = renderer.visibleGuides;
+    expect(deep.length).toBeGreaterThan(at10);
+    for (let m = 10; m <= 100; m += 10) expect(deep.some((g) => g.km === m * 1e6)).toBe(true);
+    // LOD: minors fade where the field is dense, majors never do.
+    const major = deep.find((g) => g.km === 50e6)!;
+    expect(major.alpha).toBeGreaterThanOrEqual(GUIDE_BASE.major * 0.99);
+    renderer.dispose();
+  });
+
+  it("labels are progressive: early field labels each million; later, the frontier neighbourhood plus 10M/5M markers", () => {
+    const g = (km: number, alpha = 0.2) => ({ km, tier: guideTier(km), alpha, altitude: 0 });
+    const early = guideLabelCandidates([1, 2, 3, 4, 5, 6, 7, 8, 9].map((m) => g(m * 1e6)), 8.4e6).map((x) => x.km);
+    expect(early).toEqual(expect.arrayContaining([1e6, 2e6, 3e6, 4e6, 7e6, 8e6]));
+    expect(early).not.toContain(9e6); // not yet reached
+    const later = guideLabelCandidates(Array.from({ length: 30 }, (_, i) => g((i + 1) * 1e6)), 23.4e6).map((x) => x.km);
+    expect(later.slice(0, 4)).toEqual([23e6, 22e6, 21e6, 10e6]); // nearest the frontier first, then majors
+    expect(later).toEqual(expect.arrayContaining([5e6, 15e6, 20e6]));
+    expect(later).not.toContain(13e6); // a far minor is not labelled
+    expect(later.some((km) => km > 23.4e6)).toBe(false);
+  });
+
+  it("label placement never overlaps and is bounded", () => {
+    const ordered = Array.from({ length: 100 }, (_, i) => ({ km: (i + 1) * 1e6, y: 800 - i * 4 }));
+    const chosen = chooseGuideLabels(ordered, 400);
+    expect(chosen.length).toBeLessThanOrEqual(MAX_GUIDE_LABELS);
+    for (let i = 1; i < chosen.length; i++) expect(Math.abs(chosen[i]!.y - chosen[i - 1]!.y)).toBeGreaterThanOrEqual(15);
+    for (const c of chosen) expect(Math.abs(c.y - 400)).toBeGreaterThanOrEqual(15);
   });
 
   it("the frontier indicator counts up in whole millions (presentation only)", () => {
@@ -372,13 +459,85 @@ describe("K. 1M-km distance scale", () => {
     expect(frontierLabelKm(384_400)).toBe(380_000);
   });
 
-  it("ruler labels never overlap, prefer round values, and are bounded", () => {
-    const ticks = Array.from({ length: 100 }, (_, i) => ({ km: (i + 1) * 1e6, x: 0, y: 800 - i * 4 }));
-    const chosen = chooseRulerLabels(ticks, 400);
-    expect(chosen.length).toBeLessThanOrEqual(MAX_RULER_LABELS);
-    for (let i = 1; i < chosen.length; i++) expect(Math.abs(chosen[i]!.y - chosen[i - 1]!.y)).toBeGreaterThanOrEqual(15);
-    for (const c of chosen) expect(Math.abs(c.y - 400)).toBeGreaterThanOrEqual(15);
-    expect(chosen.filter((c) => c.km % 10e6 === 0).length).toBeGreaterThan(5);
+  it("the maximum is not clipped at 100M: a 330M km asteroid gets guides beyond 100M and is revealed", () => {
+    const far = record("far", 330_123_456);
+    const { renderer, travelTo } = newRenderer([far, record("near", 2e6)]);
+    expect(renderer.distanceDomain.maxKm).toBeGreaterThanOrEqual(330_123_456 * 1.05);
+    expect(guideDistances(renderer.distanceDomain).at(-1)!).toBeGreaterThan(330e6);
+    travelTo(renderer.distanceDomain.maxKm);
+    expect(renderer.phaseOf("far")).toBe("SETTLED");
+    const alt = (d: number) => altitudePx(renderer.viewLayout, d, renderer.distanceView);
+    expect(renderer.restAltitudeOf("far")!).toBeGreaterThan(alt(330e6));
+    expect(renderer.restAltitudeOf("far")!).toBeLessThan(alt(331e6));
+    renderer.dispose();
+  });
+});
+
+describe("journey: daytime sky -> night + Moon -> distance field -> deep space", () => {
+  const luminance = (hex: string) => [1, 3, 5].reduce((sum, i, k) => sum + parseInt(hex.slice(i, i + 2), 16) * [0.2126, 0.7152, 0.0722][k]!, 0);
+
+  it("A. initial state: bright sky, no Moon, no guides, no asteroid falling", () => {
+    const { renderer, phases } = newRenderer(fixtureRecords());
+    frames(120);
+    expect(luminance(skyColors(renderer.exploration.currentProgress).zenith)).toBeGreaterThan(130);
+    expect(renderer.moonOpacity).toBe(0);
+    expect(renderer.visibleGuides.length).toBe(0);
+    expect([...phases().values()].every((p) => p === "HIDDEN")).toBe(true);
+    expect(starOpacity(0)).toBe(0);
+    renderer.dispose();
+  });
+
+  it("B. a small scroll darkens the sky but the Moon stays hidden", () => {
+    const { renderer } = newRenderer(fixtureRecords());
+    for (let i = 0; i < 8; i++) renderer.exploration.applyWheel(100);
+    frames(SETTLE);
+    const p = renderer.exploration.currentProgress;
+    expect(p).toBeGreaterThan(0);
+    expect(luminance(skyColors(p).zenith)).toBeLessThan(luminance(skyColors(0).zenith));
+    expect(renderer.revealedKm).toBeLessThan(MOON_DISTANCE_KM);
+    expect(renderer.moonOpacity).toBe(0);
+    expect(renderer.visibleGuides.length).toBe(0);
+    renderer.dispose();
+  });
+
+  it("C. the Moon appears when the frontier reaches 384,400 km, during the night transition", () => {
+    const { renderer } = newRenderer(fixtureRecords());
+    const domain = renderer.distanceDomain;
+    expect(progressForDistance(MOON_DISTANCE_KM, domain)).toBeCloseTo(MOON_PROGRESS, 12);
+    renderer.exploration.setTarget(progressForDistance(MOON_DISTANCE_KM * 0.98, domain));
+    frames(SETTLE);
+    expect(renderer.revealedKm).toBeLessThan(MOON_DISTANCE_KM);
+    expect(renderer.moonOpacity).toBe(0);
+    renderer.exploration.setTarget(MOON_PROGRESS + 0.03);
+    frames(SETTLE);
+    expect(renderer.moonOpacity).toBe(1);
+    expect(moonOpacity(MOON_PROGRESS)).toBe(0);
+    expect(luminance(skyColors(MOON_PROGRESS).zenith)).toBeLessThan(45); // night, not day
+    expect(starOpacity(MOON_PROGRESS)).toBeGreaterThan(0.35); // stars are appearing
+    renderer.dispose();
+  });
+
+  it("M. the sky goes bright day -> twilight -> night -> deep space, monotonically darker", () => {
+    const stages = [0, 0.12, 0.21, MOON_PROGRESS, FIELD_PROGRESS, 0.5, 1].map((p) => luminance(skyColors(p).zenith));
+    for (let i = 1; i < stages.length; i++) expect(stages[i]!).toBeLessThan(stages[i - 1]!);
+  });
+
+  it("the journey is staged and long: Moon at 26%, 1M at 32%, then at most ~3M km per notch to the maximum", () => {
+    const domain = { minKm: DISTANCE_MIN_KM, maxKm: 1e8 };
+    expect(revealedDistanceKm(MOON_PROGRESS, domain)).toBeCloseTo(MOON_DISTANCE_KM, 3);
+    expect(revealedDistanceKm(FIELD_PROGRESS, domain)).toBeCloseTo(1e6, 3);
+    expect(revealedDistanceKm(1, domain)).toBe(1e8);
+    const notches = 1 / PROGRESS_PER_100PX;
+    expect(notches).toBeGreaterThanOrEqual(60); // full journey: >= 60 wheel notches of 100 px
+    const fieldNotches = (1 - FIELD_PROGRESS) * notches;
+    expect(fieldNotches).toBeGreaterThanOrEqual(40);
+    // In the field no single notch jumps more than ~3M km (2.9M at the very end), and a burst event is bounded.
+    for (let p = FIELD_PROGRESS; p < 1; p += PROGRESS_PER_100PX) {
+      const step = revealedDistanceKm(Math.min(1, p + PROGRESS_PER_100PX), domain) - revealedDistanceKm(p, domain);
+      expect(step).toBeLessThan(3e6);
+    }
+    expect((MAX_WHEEL_DELTA / 100) * PROGRESS_PER_100PX).toBeLessThanOrEqual(0.03);
+    for (const km of [5e5, 2e6, 23_417_892, 7.4e7]) expect(revealedDistanceKm(progressForDistance(km, domain), domain)).toBeCloseTo(km, 0);
   });
 });
 
@@ -476,7 +635,7 @@ describe("picking (screen-space discs)", () => {
     expect(onClick).toHaveBeenLastCalledWith(null);
     // "far" is hidden (beyond the frontier): its would-be rest position is not clickable.
     const layout = renderer.viewLayout;
-    const farRest = restPosition(layout, records[1]!, renderer.distanceDomain);
+    const farRest = restPosition(layout, records[1]!, renderer.distanceView);
     click(farRest.x, layout.height - farRest.y);
     expect(onClick).toHaveBeenLastCalledWith(null);
     renderer.dispose();

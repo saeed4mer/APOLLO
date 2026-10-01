@@ -1,12 +1,13 @@
 import * as THREE from "three";
 import { InputController } from "../interaction/InputController";
 import type { WorldRecord } from "../models/world";
-import { rulerOpacity, skyColors, smoothstep, starOpacity } from "../scene/atmosphere";
+import { fieldOpacity, frontierOpacity, guideOpacity, hazeOpacity, moonOpacity, skyColors, starOpacity } from "../scene/atmosphere";
 import { ExplorationController } from "../scene/exploration";
 import { fallEase, RevealAnimator, type AsteroidPhase } from "../scene/reveal";
 import {
-  altitudePx, computeLayout, DEFAULT_DOMAIN, distanceDomain, MOON_DISTANCE_KM, MOON_X_FRACTION, restPosition,
-  revealedDistanceKm, scaleTicks, SCALE_STEP_KM, surfaceY, type DistanceDomain, type RestPosition, type SkyLayout,
+  altitudePx, computeLayout, DEFAULT_DOMAIN, distanceDomain, guideDistances, guideTier, MOON_DISTANCE_KM, MOON_X_FRACTION,
+  restPosition, revealedDistanceKm, surfaceY, type DistanceDomain, type DistanceView, type GuideTier, type RestPosition,
+  type SkyLayout,
 } from "../scene/skyLayout";
 import { buildEarth, type EarthArt } from "./earthArt";
 
@@ -45,6 +46,8 @@ export interface WorldRendererOptions {
  * - The fiery trail appears only while an asteroid approaches its resting place. It is a visual
  *   metaphor, identical for every asteroid, not an observed trajectory.
  * - The Moon is a distance landmark at 384,400 km; it is not data and has no direction semantics.
+ * - Dashed arcs every 1,000,000 km are VISUAL DISTANCE GUIDES (distance from Earth under the same
+ *   mapping as the asteroids), not orbits or trajectories.
  */
 export const ROCK_PX = 9;
 export const HIT_PX = 16;
@@ -61,7 +64,18 @@ const DIMMED = 0.3;
 const OFFSCREEN = -1e6;
 const CAMERA_TAU_MS = 110;
 const ARC_POINTS = 97;
-const RULER_X_INSET_PX = 26;
+const LABEL_X_INSET_PX = 26;
+/** Dashes of the distance guides (px): drawn as individual segments so each guide has its own opacity. */
+const GUIDE_DASH_PX = 6;
+const GUIDE_GAP_PX = 8;
+
+/** One distance guide as currently drawn. */
+export interface GuideState {
+  km: number;
+  tier: GuideTier;
+  alpha: number;
+  altitude: number;
+}
 
 let activeLoopCount = 0;
 
@@ -141,7 +155,10 @@ export class WorldRenderer {
   private readonly moon = new THREE.Group();
   private readonly moonArc: THREE.Line<THREE.BufferGeometry, THREE.LineDashedMaterial>;
   private readonly frontierArc: THREE.Line<THREE.BufferGeometry, THREE.LineDashedMaterial>;
-  private readonly ruler: THREE.LineSegments<THREE.BufferGeometry, THREE.LineBasicMaterial>;
+  private readonly moonMaterials: THREE.MeshBasicMaterial[] = [];
+  private readonly guides: THREE.LineSegments<THREE.BufferGeometry, THREE.LineBasicMaterial>;
+  private guideStates: GuideState[] = [];
+  private moonAlpha = 0;
 
   private width = 1;
   private height = 1;
@@ -212,15 +229,18 @@ export class WorldRenderer {
     this.scene.add(this.hoverRing, this.focusGlow);
 
     // Moon landmark: a small cratered disc. Decorative scale reference, never an asteroid record.
-    const moonBody = new THREE.Mesh(this.own(new THREE.CircleGeometry(1, 40)), this.own(new THREE.MeshBasicMaterial({ color: 0xdfe3ea })));
+    const moonBodyMaterial = this.own(new THREE.MeshBasicMaterial({ color: 0xdfe3ea, transparent: true, opacity: 0 }));
+    const moonBody = new THREE.Mesh(this.own(new THREE.CircleGeometry(1, 40)), moonBodyMaterial);
     this.moon.add(moonBody);
-    const crater = this.own(new THREE.MeshBasicMaterial({ color: 0xb9bfc9 }));
+    const crater = this.own(new THREE.MeshBasicMaterial({ color: 0xb9bfc9, transparent: true, opacity: 0 }));
+    this.moonMaterials.push(moonBodyMaterial, crater);
     for (const [x, y, r] of [[-0.35, 0.25, 0.22], [0.3, -0.2, 0.28], [0.15, 0.45, 0.12], [-0.25, -0.45, 0.14]] as const) {
       const c = new THREE.Mesh(this.own(new THREE.CircleGeometry(r, 20)), crater);
       c.position.set(x, y, 0.01);
       this.moon.add(c);
     }
     this.moon.position.z = -2;
+    this.moon.visible = false;
     this.scene.add(this.moon);
 
     const dashedArc = (opacity: number): THREE.Line<THREE.BufferGeometry, THREE.LineDashedMaterial> => {
@@ -234,10 +254,14 @@ export class WorldRenderer {
     this.moonArc = dashedArc(0.35);
     this.frontierArc = dashedArc(0.55);
 
-    this.ruler = new THREE.LineSegments(new THREE.BufferGeometry(), this.own(new THREE.LineBasicMaterial({ color: 0xffffff, transparent: true, opacity: 0 })));
-    this.ruler.position.z = -3;
-    this.ruler.frustumCulled = false;
-    this.scene.add(this.ruler);
+    // Million-km distance guides: ONE LineSegments draw, dashes as segments with per-vertex RGBA so each
+    // guide has its own opacity. Buffer capacity grows with domain/viewport only (no per-frame allocation).
+    this.guides = new THREE.LineSegments(new THREE.BufferGeometry(), this.own(new THREE.LineBasicMaterial({
+      color: 0xffffff, vertexColors: true, transparent: true, depthWrite: false,
+    })));
+    this.guides.position.z = -4;
+    this.guides.frustumCulled = false;
+    this.scene.add(this.guides);
 
     this.input = new InputController(this.gl.domElement, {
       onWheel: (deltaY, deltaMode) => {
@@ -330,6 +354,21 @@ export class WorldRenderer {
     return this.index.has(neowsId) ? this.animator.phase(neowsId) : null;
   }
 
+  /** The mapping currently used for every distance (asteroids, Moon, guides, frontier). */
+  get distanceView(): DistanceView {
+    return { domain: this.domain, frontierKm: this.revealed };
+  }
+
+  /** Distance guides currently drawn (alpha > 0), nearest to the frontier first. */
+  get visibleGuides(): readonly GuideState[] {
+    return this.guideStates;
+  }
+
+  /** Current opacity of the Moon landmark (0 = hidden). */
+  get moonOpacity(): number {
+    return this.moonAlpha;
+  }
+
   restAltitudeOf(neowsId: string): number | null {
     const i = this.index.get(neowsId);
     return i === undefined ? null : this.rest[i]?.altitude ?? null;
@@ -393,14 +432,14 @@ export class WorldRenderer {
   /** Client-pixel point at the right end of the revealed-distance frontier (null at 0 km). */
   frontierScreenPosition(): { x: number; y: number } | null {
     if (this.revealed <= 0) return null;
-    const x = this.layout.width - RULER_X_INSET_PX;
-    return this.toScreen(x, surfaceY(this.layout, x) + altitudePx(this.layout, Math.max(this.revealed, this.domain.minKm), this.domain));
+    return this.distanceScreenPositions([Math.max(this.revealed, this.domain.minKm)])[0]!;
   }
 
-  /** Client-pixel y of each distance on the ruler at the right edge. */
-  rulerScreenPositions(kms: readonly number[]): { km: number; x: number; y: number }[] {
-    const x = this.layout.width - RULER_X_INSET_PX;
-    return kms.map((km) => ({ km, ...this.toScreen(x, surfaceY(this.layout, x) + altitudePx(this.layout, km, this.domain)) }));
+  /** Client-pixel point of each distance on its guide, near the right edge (where guide labels sit). */
+  distanceScreenPositions(kms: readonly number[]): { km: number; x: number; y: number }[] {
+    const x = this.layout.width - LABEL_X_INSET_PX;
+    const view = this.distanceView;
+    return kms.map((km) => ({ km, ...this.toScreen(x, surfaceY(this.layout, x) + altitudePx(this.layout, km, view)) }));
   }
 
   get inputListenerCount(): number {
@@ -419,7 +458,7 @@ export class WorldRenderer {
     this.input.dispose();
     this.setRecords([]);
     this.earth?.dispose();
-    this.ruler.geometry.dispose();
+    this.guides.geometry.dispose();
     this.stars?.geometry.dispose();
     this.stars?.material.dispose();
     for (const resource of this.owned) resource.dispose();
@@ -480,7 +519,8 @@ export class WorldRenderer {
     this.viewDirty = false;
     const progress = this.exploration.currentProgress;
     this.layout = computeLayout(this.width, this.height, progress);
-    this.rest = this.records.map((r) => restPosition(this.layout, r, this.domain));
+    const view = this.distanceView;
+    this.rest = this.records.map((r) => restPosition(this.layout, r, view));
 
     const focus = easeInOut(this.focusT);
     this.camera.position.set(this.camX, this.camY, 10);
@@ -491,7 +531,7 @@ export class WorldRenderer {
     this.updateBackground(progress);
     if (this.earth) {
       this.earth.group.position.set(this.layout.cx, this.layout.earthTopY, 0);
-      this.earth.haze.material.opacity = 0.3 * (1 - smoothstep(0.45, 0.9, progress));
+      this.earth.haze.material.opacity = hazeOpacity(progress);
       this.earth.haze.material.color.set(skyColors(progress).horizon);
     }
     if (this.stars) this.stars.material.opacity = starOpacity(progress) * (1 - 0.5 * focus);
@@ -513,7 +553,7 @@ export class WorldRenderer {
 
   private placeArc(line: THREE.Line<THREE.BufferGeometry, THREE.LineDashedMaterial>, km: number): void {
     const position = line.geometry.attributes.position as THREE.BufferAttribute;
-    const alt = altitudePx(this.layout, km, this.domain);
+    const alt = altitudePx(this.layout, km, this.distanceView);
     for (let k = 0; k < position.count; k++) {
       const x = -20 + ((this.width + 40) * k) / (position.count - 1);
       position.setXYZ(k, x, surfaceY(this.layout, x) + alt, 0);
@@ -523,44 +563,80 @@ export class WorldRenderer {
     line.computeLineDistances();
   }
 
-  /** Moon landmark + arc, revealed-distance frontier arc, and the 1M-km tick ruler (up to the frontier). */
+  /** Moon landmark + arc, revealed-distance frontier arc, and the million-km distance guides. */
   private updateScale(progress: number, focus: number): void {
     const fade = 1 - focus;
+    const view = this.distanceView;
     const moonX = this.layout.width * MOON_X_FRACTION;
-    this.moon.position.set(moonX, surfaceY(this.layout, moonX) + altitudePx(this.layout, MOON_DISTANCE_KM, this.domain), -2);
-    this.moon.scale.setScalar(MOON_PX);
-    this.placeArc(this.moonArc, MOON_DISTANCE_KM);
-    this.moonArc.material.opacity = 0.35 * fade;
+    this.moonAlpha = moonOpacity(progress);
+    this.moon.visible = this.moonAlpha > 0.001;
+    this.moonArc.visible = this.moon.visible && fade > 0.001;
+    if (this.moon.visible) {
+      this.moon.position.set(moonX, surfaceY(this.layout, moonX) + altitudePx(this.layout, MOON_DISTANCE_KM, view), -2);
+      this.moon.scale.setScalar(MOON_PX);
+      for (const material of this.moonMaterials) material.opacity = this.moonAlpha;
+      this.placeArc(this.moonArc, MOON_DISTANCE_KM);
+      this.moonArc.material.opacity = 0.32 * this.moonAlpha * fade;
+    }
 
-    this.frontierArc.visible = this.revealed > 0 && fade > 0.001;
+    const frontierAlpha = frontierOpacity(progress) * fade;
+    this.frontierArc.visible = this.revealed > 0 && frontierAlpha > 0.001;
     if (this.frontierArc.visible) {
       this.placeArc(this.frontierArc, Math.max(this.revealed, this.domain.minKm));
-      this.frontierArc.material.opacity = 0.55 * fade;
+      this.frontierArc.material.opacity = 0.5 * frontierAlpha;
     }
+    this.updateGuides(fieldOpacity(progress) * fade, view);
+  }
 
-    const ticks = scaleTicks(this.revealed, this.domain);
-    // Fixed-capacity buffer sized to the domain (one tick per 1M km), updated in place each frame;
-    // reallocated only if the domain grows, so no GPU buffers accumulate.
-    const capacity = Math.ceil(this.domain.maxKm / SCALE_STEP_KM) + 1;
-    let attribute = this.ruler.geometry.getAttribute("position") as THREE.BufferAttribute | undefined;
-    if (!attribute || attribute.count < capacity * 2) {
-      this.ruler.geometry.dispose();
-      this.ruler.geometry = new THREE.BufferGeometry();
-      attribute = new THREE.BufferAttribute(new Float32Array(capacity * 6), 3);
-      attribute.setUsage(THREE.DynamicDrawUsage);
-      this.ruler.geometry.setAttribute("position", attribute);
+  /** Rebuilds the visible guide dashes in place (fixed-capacity buffer, one draw call). */
+  private updateGuides(globalAlpha: number, view: DistanceView): void {
+    const distances = guideDistances(this.domain);
+    const dashes = Math.ceil((this.width + 40) / (GUIDE_DASH_PX + GUIDE_GAP_PX));
+    const capacity = distances.length * dashes * 2;
+    let position = this.guides.geometry.getAttribute("position") as THREE.BufferAttribute | undefined;
+    let color = this.guides.geometry.getAttribute("color") as THREE.BufferAttribute | undefined;
+    if (!position || !color || position.count < capacity) {
+      this.guides.geometry.dispose();
+      this.guides.geometry = new THREE.BufferGeometry();
+      position = new THREE.BufferAttribute(new Float32Array(capacity * 3), 3).setUsage(THREE.DynamicDrawUsage);
+      color = new THREE.BufferAttribute(new Float32Array(capacity * 4), 4).setUsage(THREE.DynamicDrawUsage);
+      this.guides.geometry.setAttribute("position", position);
+      this.guides.geometry.setAttribute("color", color);
     }
-    const x = this.layout.width - RULER_X_INSET_PX;
-    ticks.forEach((km, i) => {
-      const y = surfaceY(this.layout, x) + altitudePx(this.layout, km, this.domain);
-      const half = km % (10 * SCALE_STEP_KM) === 0 ? 8 : 4; // longer tick every 10M km
-      attribute!.setXYZ(i * 2, x - half, y, 0);
-      attribute!.setXYZ(i * 2 + 1, x + half, y, 0);
-    });
-    attribute.needsUpdate = true;
-    this.ruler.geometry.setDrawRange(0, ticks.length * 2);
-    this.ruler.material.opacity = rulerOpacity(progress) * fade;
-    this.ruler.visible = ticks.length > 0 && this.ruler.material.opacity > 0.001;
+    this.guideStates = [];
+    if (globalAlpha <= 0.001) {
+      this.guides.visible = false;
+      return;
+    }
+    const altitudes = distances.map((km) => altitudePx(this.layout, km, view));
+    // Surface height under each dash end, computed once for all guides (they run parallel to the arc).
+    const xs: number[] = [];
+    const surface: number[] = [];
+    for (let k = 0; k < dashes; k++) {
+      const x0 = -20 + k * (GUIDE_DASH_PX + GUIDE_GAP_PX);
+      xs.push(x0, x0 + GUIDE_DASH_PX);
+      surface.push(surfaceY(this.layout, x0), surfaceY(this.layout, x0 + GUIDE_DASH_PX));
+    }
+    let v = 0;
+    for (let i = 0; i < distances.length; i++) {
+      const km = distances[i]!;
+      const tier = guideTier(km);
+      const below = i > 0 ? altitudes[i]! - altitudes[i - 1]! : Infinity;
+      const above = i + 1 < distances.length ? altitudes[i + 1]! - altitudes[i]! : Infinity;
+      const alpha = guideOpacity(km, tier, this.revealed, Math.min(below, above)) * globalAlpha;
+      if (alpha < 0.005) continue;
+      this.guideStates.push({ km, tier, alpha, altitude: altitudes[i]! });
+      for (let k = 0; k < xs.length; k++) {
+        position.setXYZ(v, xs[k]!, surface[k]! + altitudes[i]!, 0);
+        color.setXYZW(v, 1, 1, 1, alpha);
+        v++;
+      }
+    }
+    this.guideStates.sort((a, b) => Math.abs(a.km - this.revealed) - Math.abs(b.km - this.revealed) || a.km - b.km);
+    position.needsUpdate = true;
+    color.needsUpdate = true;
+    this.guides.geometry.setDrawRange(0, v);
+    this.guides.visible = v > 0;
   }
 
   private updateInstances(focus: number): void {

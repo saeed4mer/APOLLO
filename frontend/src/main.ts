@@ -1,6 +1,7 @@
 import { fetchWorld } from "./api/client";
 import { createApp, type AppDeps } from "./app";
 import { withSyntheticRecords } from "./dev/synthetic";
+import { progressForDistance } from "./scene/skyLayout";
 
 const root = document.getElementById("app");
 if (!root) throw new Error("Missing #app root element");
@@ -39,9 +40,13 @@ if (import.meta.env.DEV) {
     },
     objectCounts: () => app.renderer.objectCounts,
     frontierLabel: () => (document.querySelector(".frontier-label:not([hidden])") as HTMLElement | null)?.textContent ?? null,
-    rulerLabels: () => [...document.querySelectorAll(".ruler-label:not([hidden])")].map((n) => n.textContent),
+    guideLabels: () => [...document.querySelectorAll(".guide-label:not([hidden])")].map((n) => n.textContent),
+    visibleGuides: () => app.renderer.visibleGuides.map((g) => ({ ...g })),
+    moonOpacity: () => app.renderer.moonOpacity,
+    moonLabelVisible: () => !(document.querySelector(".moon-label") as HTMLElement | null)?.hidden,
     /** Sets the exploration TARGET exactly (used only to demonstrate an exact threshold; wheel input drives everything else). */
     exploreTo: (progress: number) => app.renderer.exploration.setTarget(progress),
+    progressForKm: (km: number) => progressForDistance(km, app.renderer.distanceDomain),
     restAltitudeOf: (id: string) => app.renderer.restAltitudeOf(id),
     hazardShownOf: (id: string) => app.renderer.hazardShownOf(id),
     moonScreenPosition: () => app.renderer.moonScreenPosition(),

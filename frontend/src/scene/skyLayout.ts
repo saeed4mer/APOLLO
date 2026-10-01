@@ -92,38 +92,96 @@ export function surfaceY(layout: SkyLayout, x: number): number {
 }
 
 /**
- * Real distance -> fraction in [0, 1] on a logarithmic scale over the domain. Uses the exact
- * value (never rounded). Strictly increasing inside the domain; only distances at or below Earth's
- * radius share the bottom (they cannot be genuine misses), and no real record exceeds maxKm.
+ * EXPLORATION JOURNEY: progress in [0, 1] -> revealed distance (km). Three documented stages, each
+ * strictly increasing and continuous at the joins, so the mapping is deterministic, monotonic,
+ * finite and bounded by the domain:
+ *
+ *   p = 0                         0 km (nothing revealed: daytime sky, no Moon, no asteroids)
+ *   0 < p <= MOON_PROGRESS        log  6,371 km -> 384,400 km   (leaving the atmosphere; sky -> night)
+ *   MOON_PROGRESS < p <= FIELD    log  384,400 km -> 1,000,000 km (the Moon landmark is passed)
+ *   FIELD_PROGRESS < p <= 1       1M + (maxKm - 1M) * t^FIELD_EXPONENT  (the million-km field;
+ *                                 t = (p - FIELD) / (1 - FIELD); ~0.3-2.9M km per wheel notch)
  */
-export function altitudeFraction(km: number, domain: DistanceDomain = DEFAULT_DOMAIN): number {
-  if (!Number.isFinite(km) || km <= 0) throw new RangeError(`distance must be a positive finite number, got ${km}`);
-  return clamp01(Math.log(km / domain.minKm) / Math.log(domain.maxKm / domain.minKm));
-}
+export const MOON_PROGRESS = 0.26;
+export const FIELD_PROGRESS = 0.32;
+export const FIELD_START_KM = 1_000_000;
+export const FIELD_EXPONENT = 1.6;
 
-/** Altitude above the Earth surface (px) for a real distance. */
-export function altitudePx(layout: SkyLayout, km: number, domain: DistanceDomain = DEFAULT_DOMAIN): number {
-  return MIN_ALTITUDE_PX + altitudeFraction(km, domain) * (layout.altitudeRangePx - MIN_ALTITUDE_PX);
-}
-
-/**
- * Exploration progress -> REVEALED DISTANCE (km): the inverse of the altitude mapping, so the
- * revealed frontier always sits at altitude MIN + progress x range. Progress 0 reveals nothing
- * (0 km); progress 1 reveals the whole domain. Deterministic, monotonic, finite, bounded.
- */
 export function revealedDistanceKm(progress: number, domain: DistanceDomain): number {
   const p = clamp01(progress);
-  return p === 0 ? 0 : domain.minKm * (domain.maxKm / domain.minKm) ** p;
+  if (p === 0) return 0;
+  if (p <= MOON_PROGRESS) return domain.minKm * (MOON_DISTANCE_KM / domain.minKm) ** (p / MOON_PROGRESS);
+  if (p <= FIELD_PROGRESS) {
+    return MOON_DISTANCE_KM * (FIELD_START_KM / MOON_DISTANCE_KM) ** ((p - MOON_PROGRESS) / (FIELD_PROGRESS - MOON_PROGRESS));
+  }
+  const t = (p - FIELD_PROGRESS) / (1 - FIELD_PROGRESS);
+  return Math.min(domain.maxKm, FIELD_START_KM + (domain.maxKm - FIELD_START_KM) * t ** FIELD_EXPONENT);
 }
 
-/** The exploration progress at which a real distance is first revealed. */
+/** The exploration progress at which a real distance is first revealed (inverse of the journey). */
 export function progressForDistance(km: number, domain: DistanceDomain): number {
-  return altitudeFraction(km, domain);
+  if (!Number.isFinite(km) || km <= domain.minKm) return 0;
+  if (km <= MOON_DISTANCE_KM) return (MOON_PROGRESS * Math.log(km / domain.minKm)) / Math.log(MOON_DISTANCE_KM / domain.minKm);
+  if (km <= FIELD_START_KM) {
+    return MOON_PROGRESS + ((FIELD_PROGRESS - MOON_PROGRESS) * Math.log(km / MOON_DISTANCE_KM)) / Math.log(FIELD_START_KM / MOON_DISTANCE_KM);
+  }
+  const t = ((Math.min(km, domain.maxKm) - FIELD_START_KM) / (domain.maxKm - FIELD_START_KM)) ** (1 / FIELD_EXPONENT);
+  return FIELD_PROGRESS + t * (1 - FIELD_PROGRESS);
 }
 
 /** An asteroid is eligible to be shown once the revealed distance reaches its EXACT miss distance. */
 export function isRevealed(missDistanceKm: number, revealedKm: number): boolean {
   return missDistanceKm <= revealedKm;
+}
+
+/**
+ * VISUAL DISTANCE MAPPING (focus + context). Height above the Earth arc is a function of the exact
+ * distance AND the current frontier (the revealed distance), so the distance being explored is
+ * always legible while everything nearer stays visible, compressed toward Earth:
+ *
+ *   km <= F:  fraction = PHI * ( BETA * ctx(km) / ctx(F)  +  (1 - BETA) * (km / F)^GAMMA )
+ *   km >  F:  fraction = PHI + (1 - PHI) * (1 - (F / km)^2)          (unrevealed: above the frontier)
+ *
+ *   F    = max(revealed distance, MIN_FRONTIER_KM)
+ *   ctx  = log(km / 6,371) / log(maxKm / 6,371)   (global log context, so near objects stay apart)
+ *   PHI  = FRONTIER_FRACTION: the frontier always sits at this fraction of the sky height.
+ *
+ * For any frontier, the fraction is STRICTLY increasing in km (a sum of increasing terms; the two
+ * branches meet at PHI), so a nearer asteroid always rests lower than a farther one. As the user
+ * travels outward the whole field slides toward Earth: the Moon and earlier arcs are "passed".
+ * The million-km guide arcs use exactly this mapping, so an asteroid at 12.4M km rests between the
+ * 12M and 13M arcs. Exact source values are used; nothing is rounded.
+ */
+export const FRONTIER_FRACTION = 0.86;
+export const CONTEXT_WEIGHT = 0.3;
+export const FRONTIER_EXPONENT = 1.6;
+export const MIN_FRONTIER_KM = 10_000;
+
+export interface DistanceView {
+  domain: DistanceDomain;
+  /** The revealed distance (km) the view is focused on. */
+  frontierKm: number;
+}
+
+/** Global log context in [0, 1] (0 at or below Earth's radius). */
+export function contextFraction(km: number, domain: DistanceDomain): number {
+  if (km <= domain.minKm) return 0;
+  return clamp01(Math.log(km / domain.minKm) / Math.log(domain.maxKm / domain.minKm));
+}
+
+export function distanceFraction(km: number, view: DistanceView): number {
+  if (!Number.isFinite(km) || km <= 0) throw new RangeError(`distance must be a positive finite number, got ${km}`);
+  const f = Math.max(Number.isFinite(view.frontierKm) ? view.frontierKm : 0, MIN_FRONTIER_KM);
+  if (km <= f) {
+    const context = contextFraction(km, view.domain) / contextFraction(f, view.domain);
+    return FRONTIER_FRACTION * (CONTEXT_WEIGHT * context + (1 - CONTEXT_WEIGHT) * (km / f) ** FRONTIER_EXPONENT);
+  }
+  return FRONTIER_FRACTION + (1 - FRONTIER_FRACTION) * (1 - (f / km) ** 2);
+}
+
+/** Altitude above the Earth surface (px) for a real distance under the current view. */
+export function altitudePx(layout: SkyLayout, km: number, view: DistanceView): number {
+  return MIN_ALTITUDE_PX + distanceFraction(km, view) * (layout.altitudeRangePx - MIN_ALTITUDE_PX);
 }
 
 /**
@@ -141,9 +199,9 @@ export interface RestPosition {
   altitude: number;
 }
 
-export function restPosition(layout: SkyLayout, record: WorldRecord, domain: DistanceDomain = DEFAULT_DOMAIN): RestPosition {
+export function restPosition(layout: SkyLayout, record: WorldRecord, view: DistanceView): RestPosition {
   const x = layout.cx + skyHorizontal(record.illustrative_direction) * (layout.width / 2) * HORIZONTAL_SPAN;
-  const altitude = altitudePx(layout, record.encounter.miss_distance_km, domain);
+  const altitude = altitudePx(layout, record.encounter.miss_distance_km, view);
   return { x, y: surfaceY(layout, x) + altitude, altitude };
 }
 
@@ -151,15 +209,23 @@ export function restPosition(layout: SkyLayout, record: WorldRecord, domain: Dis
 export const MOON_X_FRACTION = 0.86;
 
 /**
- * Distance-scale ticks: every 1,000,000 km up to `uptoKm` (the revealed frontier), within the
- * domain. Presentation only: asteroid positions always use exact miss distances.
+ * Million-kilometre distance guides: one arc per 1,000,000 km across the whole domain (1M, 2M, ...,
+ * up to the domain maximum). VISUAL DISTANCE GUIDES (distance from Earth), not orbits or
+ * trajectories. Every 10M is a major guide, every 5M a mid guide, the rest minor.
  */
 export const SCALE_STEP_KM = 1_000_000;
-export function scaleTicks(uptoKm: number, domain: DistanceDomain): number[] {
+export type GuideTier = "major" | "mid" | "minor";
+
+export function guideDistances(domain: DistanceDomain): number[] {
   const out: number[] = [];
-  const last = Math.min(uptoKm, domain.maxKm);
-  for (let km = SCALE_STEP_KM; km <= last; km += SCALE_STEP_KM) out.push(km);
+  for (let km = SCALE_STEP_KM; km <= domain.maxKm; km += SCALE_STEP_KM) out.push(km);
   return out;
+}
+
+export function guideTier(km: number): GuideTier {
+  if (km % (10 * SCALE_STEP_KM) === 0) return "major";
+  if (km % (5 * SCALE_STEP_KM) === 0) return "mid";
+  return "minor";
 }
 
 /** Revealed-distance indicator text value: floored to whole millions (to 10,000 km below 1M). */

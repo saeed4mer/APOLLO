@@ -1,34 +1,48 @@
 import type { WorldRecord } from "../models/world";
 import type { ViewSnapshot, WorldRenderer } from "../renderer/WorldRenderer";
-import { labelDetailOpacity, labelOpacity, MAX_LABELS, rulerOpacity } from "../scene/atmosphere";
-import { frontierLabelKm, scaleTicks, SCALE_STEP_KM } from "../scene/skyLayout";
+import type { GuideState } from "../renderer/WorldRenderer";
+import { frontierOpacity, labelDetailOpacity, labelOpacity, MAX_LABELS } from "../scene/atmosphere";
+import { frontierLabelKm, SCALE_STEP_KM } from "../scene/skyLayout";
 import { el } from "./dom";
 import { formatKmCompact } from "./format";
 
-/** Most ruler labels shown at once, and the minimum vertical gap between them (px). */
-export const MAX_RULER_LABELS = 16;
-const RULER_GAP_PX = 15;
-/** Space reserved left of the ruler for its labels, and for the frontier label (px). */
+/** Most distance-guide labels shown at once, and the minimum vertical gap between them (px). */
+export const MAX_GUIDE_LABELS = 16;
+const GUIDE_LABEL_GAP_PX = 15;
+/** Distance guides within this range behind the frontier are labelled (the part being explored). */
+export const GUIDE_LABEL_WINDOW_KM = 3 * SCALE_STEP_KM;
+/** Below this frontier every revealed million gets a label (the early field: 1M, 2M, 3M ...). */
+export const EARLY_FIELD_KM = 10 * SCALE_STEP_KM;
+/** Space reserved left of the guide labels' column, and for the frontier label (px). */
 const SCALE_COLUMN_PX = 64;
 const FRONTIER_LABEL_PX = 230;
 /** The frontier label sits this far above its arc, so it never covers an asteroid resting just inside it. */
 const FRONTIER_LIFT_PX = 12;
 
 /**
- * Which 1M-km ruler ticks get a text label: rounder values first (multiples of 10M, then 5M, then
- * 1M), keeping at least RULER_GAP_PX between labels and away from the frontier label. Every tick is
- * still drawn; only labels are thinned. Presentation only.
+ * Progressive distance-guide labels. Candidates are REVEALED guides that are either near the
+ * frontier (within GUIDE_LABEL_WINDOW_KM), major (every 10M), mid (every 5M), or part of the early
+ * field (frontier below 10M). Priority: nearest the frontier, then majors, then mids, then the rest.
+ * Greedy placement keeps GUIDE_LABEL_GAP_PX between labels and away from the frontier label.
  */
-export function chooseRulerLabels<T extends { km: number; y: number }>(ticks: readonly T[], frontierY: number | null): T[] {
-  const rank = (km: number): number => (km % (10 * SCALE_STEP_KM) === 0 ? 0 : km % (5 * SCALE_STEP_KM) === 0 ? 1 : 2);
-  const ordered = [...ticks].sort((a, b) => rank(a.km) - rank(b.km) || a.km - b.km);
+export function guideLabelCandidates(guides: readonly GuideState[], frontierKm: number): GuideState[] {
+  const rank = (g: GuideState): number => {
+    if (frontierKm - g.km <= GUIDE_LABEL_WINDOW_KM) return 0;
+    return g.tier === "major" ? 1 : g.tier === "mid" ? 2 : 3;
+  };
+  return guides
+    .filter((g) => g.km <= frontierKm && (frontierKm - g.km <= GUIDE_LABEL_WINDOW_KM || g.tier !== "minor" || frontierKm < EARLY_FIELD_KM))
+    .sort((a, b) => rank(a) - rank(b) || (rank(a) === 0 ? b.km - a.km : a.km - b.km));
+}
+
+export function chooseGuideLabels<T extends { km: number; y: number }>(ordered: readonly T[], frontierY: number | null): T[] {
   const taken: number[] = frontierY === null ? [] : [frontierY];
   const chosen: T[] = [];
-  for (const tick of ordered) {
-    if (chosen.length >= MAX_RULER_LABELS) break;
-    if (taken.some((y) => Math.abs(y - tick.y) < RULER_GAP_PX)) continue;
-    taken.push(tick.y);
-    chosen.push(tick);
+  for (const label of ordered) {
+    if (chosen.length >= MAX_GUIDE_LABELS) break;
+    if (taken.some((y) => Math.abs(y - label.y) < GUIDE_LABEL_GAP_PX)) continue;
+    taken.push(label.y);
+    chosen.push(label);
   }
   return chosen.sort((a, b) => a.km - b.km);
 }
@@ -53,13 +67,13 @@ export function overlaps(a: Box, b: Box): boolean {
  * Progressive information density. Names appear around 50% depth and miss distances around 66%,
  * for at most MAX_LABELS settled asteroids, nearest first (deterministic: by real miss distance,
  * then neows_id); a label that would overlap a nearer asteroid's label is skipped. Also labels the
- * Moon landmark, the revealed-distance frontier and the 1M-km ruler. Fixed pools of DOM nodes are
+ * Moon landmark, the revealed-distance frontier and the million-km distance guides. Fixed pools of DOM nodes are
  * reused, so large populations never create unbounded DOM.
  */
 export class LabelLayer {
   readonly element = el("div", { className: "label-layer", attrs: { "aria-hidden": "true" } });
   private readonly pool: { root: HTMLElement; name: HTMLElement; detail: HTMLElement }[] = [];
-  private readonly rulerLabels: HTMLElement[] = [];
+  private readonly guideLabels: HTMLElement[] = [];
   private readonly moonLabel = el("div", { className: "moon-label" }, [
     el("span", { className: "moon-title", text: "MOON DISTANCE" }),
     el("span", { className: "moon-km", text: "384,400 km" }),
@@ -71,10 +85,11 @@ export class LabelLayer {
 
   constructor() {
     this.element.append(this.moonLabel, this.frontierLabel);
-    for (let i = 0; i < MAX_RULER_LABELS; i++) {
-      const node = el("div", { className: "ruler-label" });
+    this.moonLabel.hidden = true;
+    for (let i = 0; i < MAX_GUIDE_LABELS; i++) {
+      const node = el("div", { className: "guide-label" });
       node.hidden = true;
-      this.rulerLabels.push(node);
+      this.guideLabels.push(node);
       this.element.append(node);
     }
     for (let i = 0; i < MAX_LABELS; i++) {
@@ -127,31 +142,40 @@ export class LabelLayer {
     }
     for (let i = used; i < this.pool.length; i++) this.pool[i]!.root.hidden = true;
 
-    // Moon landmark label (always present: it is environmental context, not data).
-    const moon = renderer.moonScreenPosition();
-    this.moonLabel.style.transform = `translate(${Math.round(moon.x + 16)}px, ${Math.round(moon.y - 14)}px)`;
-    this.moonLabel.style.opacity = String(0.9 * fade);
-
-    // Revealed-distance frontier: counts in whole millions as the user travels outward.
-    this.frontierLabel.hidden = frontier === null || fade < 0.01;
-    if (frontier) {
-      this.frontierLabel.textContent = `REVEALED TO ${formatKmCompact(frontierLabelKm(view.revealedKm))}`;
-      this.frontierLabel.style.transform = `translate(calc(${Math.round(frontier.x - 14)}px - 100%), ${Math.round(frontier.y - FRONTIER_LIFT_PX - 9)}px)`;
-      this.frontierLabel.style.opacity = String(fade);
+    // Moon landmark label: shown with the Moon (revealed when the frontier reaches 384,400 km).
+    const moonAlpha = renderer.moonOpacity * fade;
+    this.moonLabel.hidden = moonAlpha < 0.01;
+    if (!this.moonLabel.hidden) {
+      const moon = renderer.moonScreenPosition();
+      this.moonLabel.style.transform = `translate(${Math.round(moon.x + 16)}px, ${Math.round(moon.y - 14)}px)`;
+      this.moonLabel.style.opacity = String(0.9 * moonAlpha);
     }
 
-    // 1M-km ruler labels up to the frontier.
-    const rulerAlpha = rulerOpacity(view.progress) * fade;
-    const ticks = rulerAlpha > 0.01 ? renderer.rulerScreenPositions(scaleTicks(view.revealedKm, renderer.distanceDomain)) : [];
-    const chosen = chooseRulerLabels(ticks, frontier === null ? null : frontier.y - FRONTIER_LIFT_PX);
-    chosen.forEach((tick, i) => {
-      const node = this.rulerLabels[i]!;
-      node.textContent = formatScaleKm(tick.km);
-      node.style.transform = `translate(calc(${Math.round(tick.x - 14)}px - 100%), ${Math.round(tick.y - 7)}px)`;
-      node.style.opacity = String(rulerAlpha);
+    // Revealed-distance frontier: counts in whole millions as the user travels outward.
+    const frontierAlpha = frontierOpacity(view.progress) * fade;
+    this.frontierLabel.hidden = frontier === null || frontierAlpha < 0.01;
+    if (frontier && !this.frontierLabel.hidden) {
+      this.frontierLabel.textContent = `REVEALED TO ${formatKmCompact(frontierLabelKm(view.revealedKm))}`;
+      this.frontierLabel.style.transform = `translate(calc(${Math.round(frontier.x - 14)}px - 100%), ${Math.round(frontier.y - FRONTIER_LIFT_PX - 9)}px)`;
+      this.frontierLabel.style.opacity = String(frontierAlpha);
+    }
+
+    // Progressive million-km guide labels, at the right end of their guides.
+    const candidates = guideLabelCandidates(renderer.visibleGuides, view.revealedKm);
+    const positions = renderer.distanceScreenPositions(candidates.map((g) => g.km));
+    const placedGuides = chooseGuideLabels(
+      candidates.map((g, i) => ({ ...g, x: positions[i]!.x, y: positions[i]!.y - 7 })),
+      frontier === null || this.frontierLabel.hidden ? null : frontier.y - FRONTIER_LIFT_PX,
+    );
+    placedGuides.forEach((g, i) => {
+      const node = this.guideLabels[i]!;
+      node.textContent = formatScaleKm(g.km);
+      node.dataset.tier = g.tier;
+      node.style.transform = `translate(calc(${Math.round(g.x - 14)}px - 100%), ${Math.round(g.y - 7)}px)`;
+      node.style.opacity = String(Math.min(1, 0.45 + 1.4 * g.alpha) * fade);
       node.hidden = false;
     });
-    for (let i = chosen.length; i < this.rulerLabels.length; i++) this.rulerLabels[i]!.hidden = true;
+    for (let i = placedGuides.length; i < this.guideLabels.length; i++) this.guideLabels[i]!.hidden = true;
   }
 
   dispose(): void {
