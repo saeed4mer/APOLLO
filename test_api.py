@@ -13,6 +13,7 @@ Adheres strictly to the locked M6.2 contract and M6.3 requirements:
 from __future__ import annotations
 
 from datetime import datetime
+import math as _math
 from pathlib import Path
 from unittest.mock import patch
 
@@ -38,6 +39,10 @@ from api.schemas import (
     WorldResponse,
 )
 from api.service import REQUIRED_PARQUET_ASSETS
+from api.service import ILLUSTRATIVE_DIRECTION_ALGORITHM, illustrative_direction
+from dashboard_data import LocalDuckDBDataProvider
+from api.schemas import AsteroidProfileResponse
+from nasa_asteroids import ASTEROID_SCHEMA as _NEOWS_SCHEMA
 from dashboard_data import DashboardDataProvider
 from entity_resolution import (
     BRIDGE_ASTEROID_IDENTIFIER_SCHEMA,
@@ -292,12 +297,63 @@ def test_health_method_not_allowed(mock_client: TestClient):
 
 
 def test_default_app_instance_healthy():
-    """Verify that the module-level app instance can serve /health."""
+    """Verify that the module-level app instance can serve /health.
+
+    With a real local lakehouse it serves that; on a fresh checkout it serves an empty
+    placeholder lakehouse from outside the repository (see resolve_default_lakehouse).
+    """
     client = TestClient(app)
     resp = client.get("/health")
-    # In this environment, the 4 local Parquet assets exist, so it returns 200
     assert resp.status_code == 200
     assert resp.json()["data"]["status"] == "healthy"
+
+
+def _write_real_lakehouse(root: Path, names: tuple[str, ...]) -> None:
+    from api.main import _PLACEHOLDER_SCHEMAS
+
+    for name in names:
+        schema = _PLACEHOLDER_SCHEMAS[name]
+        pq.write_table(pa.Table.from_arrays([pa.array([], type=f.type) for f in schema], schema=schema), root / name)
+
+
+def test_default_lakehouse_fresh_checkout_uses_placeholder_outside_the_repo(tmp_path: Path):
+    """No required tables at all: serve an empty schema-valid lakehouse from a temp dir, never the root."""
+    from api.main import resolve_default_lakehouse
+
+    root = tmp_path / "fresh_clone"
+    root.mkdir()
+    resolved = resolve_default_lakehouse(root)
+    assert list(root.iterdir()) == []  # nothing written into the working tree
+    assert resolved != root.resolve() and root.resolve() not in resolved.parents
+    assert sorted(p.name for p in resolved.iterdir()) == sorted(REQUIRED_PARQUET_ASSETS)
+    for name in REQUIRED_PARQUET_ASSETS:
+        assert pq.read_table(resolved / name).num_rows == 0
+    client = TestClient(create_app(provider=DashboardDataProvider(base_dir=resolved, execution_mode="LOCAL")))
+    assert client.get("/health").status_code == 200
+    world = client.get("/asteroids/world")
+    assert world.status_code == 200
+    assert world.json()["data"] == []
+
+
+def test_default_lakehouse_real_data_is_served_unchanged(tmp_path: Path):
+    """All required tables present: the project root itself is the lakehouse; nothing is added."""
+    from api.main import resolve_default_lakehouse
+
+    _write_real_lakehouse(tmp_path, REQUIRED_PARQUET_ASSETS)
+    before = sorted(p.name for p in tmp_path.iterdir())
+    assert resolve_default_lakehouse(tmp_path) == tmp_path.resolve()
+    assert sorted(p.name for p in tmp_path.iterdir()) == before
+
+
+def test_default_lakehouse_partial_data_is_not_masked(tmp_path: Path):
+    """Some required tables present: serve the root as-is (health stays 503); no placeholders are mixed in."""
+    from api.main import resolve_default_lakehouse
+
+    _write_real_lakehouse(tmp_path, ("asteroids.parquet",))
+    assert resolve_default_lakehouse(tmp_path) == tmp_path.resolve()
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["asteroids.parquet"]
+    client = TestClient(create_app(provider=DashboardDataProvider(base_dir=tmp_path, execution_mode="LOCAL")))
+    assert client.get("/health").status_code == 503
 
 
 # ============================================================================
@@ -2999,10 +3055,7 @@ def test_sbdb_flag_tri_state_survives_ingestion_to_api(mock_lakehouse: Path, raw
 # PHASE 1 STEP 4 — GET /asteroids/world (set-based world snapshot contract)
 # ============================================================================
 
-import math as _math
 
-from api.service import ILLUSTRATIVE_DIRECTION_ALGORITHM, illustrative_direction
-from dashboard_data import LocalDuckDBDataProvider
 
 _WORLD_URL = "/asteroids/world"
 _TW54_NEOWS = "3548666"
@@ -3485,7 +3538,6 @@ def test_list_and_world_resolution_agree_on_real_lakehouse():
 # PHASE 1 STEP 5 — GET /asteroids/{neows_id}/profile
 # ============================================================================
 
-from api.schemas import AsteroidProfileResponse
 
 _PROFILE_ORBIT_FIELDS = (
     "orbit_class_code", "orbit_class_name", "is_neo", "is_pha", "orbit_id", "epoch_jd", "equinox",
@@ -4104,7 +4156,6 @@ def test_sentry_assessment_real_local_lakehouse():
 # PHASE 1 STEP 7 — NORMALIZED NEOWS FIELDS IN WORLD AND PROFILE
 # ============================================================================
 
-from nasa_asteroids import ASTEROID_SCHEMA as _NEOWS_SCHEMA
 
 # NeoWs values chosen to differ from SBDB/Sentry so source separation is observable.
 _NEOWS_ENRICHED = {
@@ -4474,7 +4525,8 @@ def test_final_contract_real_data_end_to_end():
         names = [d[0] for d in cur.description]
         return [dict(zip(names, r)) for r in cur.fetchall()]
 
-    p = lambda name: str(lake / name).replace("\\", "/")
+    def p(name: str) -> str:
+        return str(lake / name).replace("\\", "/")
     neows = {r["id"]: r for r in rows(f"SELECT * FROM '{p('asteroids.parquet')}'")}
     if "relative_velocity_km_s" not in next(iter(neows.values())):
         pytest.skip("Local asteroids.parquet predates Step 7; run: python nasa_asteroids.py --from-raw asteroids_raw.json")
