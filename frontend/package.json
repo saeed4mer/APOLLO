@@ -1,0 +1,25 @@
+{
+  "name": "asteroid-intelligence-renderer",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "description": "M7 immersive renderer for the NASA Asteroid Intelligence Platform. Consumes the FastAPI serving layer only.",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc --noEmit && vite build",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "e2e": "node e2e/torture.mjs"
+  },
+  "dependencies": {
+    "three": "0.170.0"
+  },
+  "devDependencies": {
+    "@types/three": "0.170.0",
+    "jsdom": "25.0.1",
+    "playwright-core": "1.49.1",
+    "typescript": "5.6.3",
+    "vite": "5.4.11",
+    "vitest": "2.1.8"
+  }
+}

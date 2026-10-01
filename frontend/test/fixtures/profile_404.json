@@ -1,0 +1,11 @@
+{
+ "meta": {
+  "api_version": "1.0.0",
+  "execution_mode": "LOCAL (DUCKDB / PARQUET LAKEHOUSE)",
+  "timestamp": "2026-10-01T15:01:29.567937+00:00"
+ },
+ "error": {
+  "code": "TARGET_NOT_FOUND",
+  "message": "NeoWs asteroid with identifier '99999999' was not found in authoritative lakehouse telemetry."
+ }
+}

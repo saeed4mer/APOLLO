@@ -1,0 +1,205 @@
+{
+ "meta": {
+  "api_version": "1.0.0",
+  "execution_mode": "LOCAL (DUCKDB / PARQUET LAKEHOUSE)",
+  "timestamp": "2026-10-01T15:01:29.474372+00:00"
+ },
+ "data": {
+  "neows_id": "3830890",
+  "identity": {
+   "neows_id": "3830890",
+   "name": "(2018 SP2)",
+   "match_state": "UNRESOLVED",
+   "asteroid_key": null,
+   "sbdb_spkid": null,
+   "sbdb_designation": null,
+   "sbdb_fullname": null,
+   "sentry_id": null,
+   "crosswalk": [],
+   "availability": {
+    "status": "unavailable",
+    "unavailable": {
+     "asteroid_key": "not_resolved",
+     "sbdb_spkid": "not_resolved",
+     "sbdb_designation": "not_resolved",
+     "sbdb_fullname": "not_resolved",
+     "sentry_id": "not_resolved"
+    }
+   }
+  },
+  "orbit": {
+   "source": "jpl_sbdb",
+   "orbit_class_code": null,
+   "orbit_class_name": null,
+   "is_neo": null,
+   "is_pha": null,
+   "orbit_id": null,
+   "epoch_jd": null,
+   "equinox": null,
+   "semi_major_axis_au": null,
+   "eccentricity": null,
+   "perihelion_distance_au": null,
+   "aphelion_distance_au": null,
+   "inclination_deg": null,
+   "ascending_node_longitude_deg": null,
+   "argument_of_perihelion_deg": null,
+   "mean_anomaly_deg": null,
+   "mean_motion_deg_per_day": null,
+   "orbital_period_days": null,
+   "time_of_perihelion_jd_tdb": null,
+   "soln_date": null,
+   "first_obs": null,
+   "last_obs": null,
+   "data_arc_days": null,
+   "n_obs_used": null,
+   "condition_code": null,
+   "rms": null,
+   "earth_moid_au": null,
+   "jupiter_moid_au": null,
+   "t_jup": null,
+   "availability": {
+    "status": "unavailable",
+    "unavailable": {
+     "orbit_class_code": "not_resolved",
+     "orbit_class_name": "not_resolved",
+     "is_neo": "not_resolved",
+     "is_pha": "not_resolved",
+     "orbit_id": "not_resolved",
+     "epoch_jd": "not_resolved",
+     "equinox": "not_resolved",
+     "semi_major_axis_au": "not_resolved",
+     "eccentricity": "not_resolved",
+     "perihelion_distance_au": "not_resolved",
+     "aphelion_distance_au": "not_resolved",
+     "inclination_deg": "not_resolved",
+     "ascending_node_longitude_deg": "not_resolved",
+     "argument_of_perihelion_deg": "not_resolved",
+     "mean_anomaly_deg": "not_resolved",
+     "mean_motion_deg_per_day": "not_resolved",
+     "orbital_period_days": "not_resolved",
+     "time_of_perihelion_jd_tdb": "not_resolved",
+     "soln_date": "not_resolved",
+     "first_obs": "not_resolved",
+     "last_obs": "not_resolved",
+     "data_arc_days": "not_resolved",
+     "n_obs_used": "not_resolved",
+     "condition_code": "not_resolved",
+     "rms": "not_resolved",
+     "earth_moid_au": "not_resolved",
+     "jupiter_moid_au": "not_resolved",
+     "t_jup": "not_resolved"
+    }
+   }
+  },
+  "physical": {
+   "source": "jpl_sbdb",
+   "absolute_magnitude": null,
+   "estimated_diameter_km": null,
+   "albedo": null,
+   "rotational_period_hr": null,
+   "availability": {
+    "status": "unavailable",
+    "unavailable": {
+     "absolute_magnitude": "not_resolved",
+     "estimated_diameter_km": "not_resolved",
+     "albedo": "not_resolved",
+     "rotational_period_hr": "not_resolved"
+    }
+   }
+  },
+  "neows_physical": {
+   "source": "nasa_neows",
+   "absolute_magnitude_h": 24.8,
+   "estimated_diameter_min_km": 0.0291443905,
+   "estimated_diameter_max_km": 0.0651688382,
+   "availability": {
+    "status": "available",
+    "unavailable": {}
+   }
+  },
+  "encounter": {
+   "source": "nasa_neows",
+   "selection_rule": "CLOSEST_OBSERVED_APPROACH",
+   "closest_approach_date": "2026-09-30",
+   "miss_distance_km": 1927097.426378009,
+   "is_potentially_hazardous": false,
+   "close_approach_datetime": "2026-09-30T20:54",
+   "close_approach_epoch_ms": 1790801640000,
+   "relative_velocity_km_s": 14.2601518512,
+   "is_sentry_object": false,
+   "availability": {
+    "status": "available",
+    "unavailable": {}
+   }
+  },
+  "sentry": {
+   "source": "jpl_sentry",
+   "source_contract": "sentry_mode_s_summary",
+   "status": "not_resolved",
+   "sentry_id": null,
+   "in_latest_catalog": null,
+   "assessment": {
+    "designation": null,
+    "fullname": null,
+    "impact_probability": null,
+    "potential_impacts_count": null,
+    "impact_year_range": null,
+    "palermo_scale_cum": null,
+    "palermo_scale_max": null,
+    "torino_scale_max": null,
+    "v_infinity_km_s": null,
+    "absolute_magnitude": null,
+    "estimated_diameter_km": null,
+    "last_obs_date": null,
+    "last_obs_jd": null,
+    "availability": {
+     "status": "unavailable",
+     "unavailable": {
+      "designation": "not_resolved",
+      "fullname": "not_resolved",
+      "absolute_magnitude": "not_resolved",
+      "estimated_diameter_km": "not_resolved",
+      "impact_probability": "not_resolved",
+      "potential_impacts_count": "not_resolved",
+      "palermo_scale_cum": "not_resolved",
+      "palermo_scale_max": "not_resolved",
+      "torino_scale_max": "not_resolved",
+      "v_infinity_km_s": "not_resolved",
+      "impact_year_range": "not_resolved",
+      "last_obs_date": "not_resolved",
+      "last_obs_jd": "not_resolved"
+     }
+    }
+   },
+   "assessment_endpoint": null
+  },
+  "provenance": {
+   "neows": {
+    "source": "nasa_neows",
+    "dataset_run_id": null,
+    "source_raw_file": "asteroids_raw.json",
+    "source_raw_sha256": "4cc41e360a82f97c72ca65faa3ee77949f5830f1df27b59d37042ffce518585c"
+   },
+   "resolution": {
+    "source": "entity_resolution",
+    "match_rule": "NO_CROSS_SOURCE_MATCH",
+    "resolved_at": "2026-09-28T01:15:26.842071+00:00"
+   },
+   "sbdb": {
+    "source": "jpl_sbdb",
+    "spkid": null,
+    "snapshot_key": null,
+    "run_id": null,
+    "snapshot_time": null
+   },
+   "sentry": {
+    "source": "jpl_sentry",
+    "sentry_id": null,
+    "latest_snapshot_key": null,
+    "run_id": null,
+    "snapshot_time": null,
+    "latest_catalog_snapshot_key": "2026-09-26"
+   }
+  }
+ }
+}

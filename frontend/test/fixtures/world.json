@@ -1,0 +1,1358 @@
+{
+ "meta": {
+  "api_version": "1.0.0",
+  "execution_mode": "LOCAL (DUCKDB / PARQUET LAKEHOUSE)",
+  "timestamp": "2026-10-01T15:01:29.171831+00:00"
+ },
+ "world": {
+  "object_count": 35,
+  "encounter_selection_rule": "CLOSEST_OBSERVED_APPROACH",
+  "neows": {
+   "source": "nasa_neows",
+   "dataset_run_id": null,
+   "source_raw_file": "asteroids_raw.json",
+   "source_raw_sha256": "4cc41e360a82f97c72ca65faa3ee77949f5830f1df27b59d37042ffce518585c"
+  },
+  "sentry_latest_catalog_snapshot_key": "2026-09-26",
+  "neows_fields_not_in_dataset": [],
+  "spatial_model": {
+   "direction_semantics": "illustrative",
+   "direction_algorithm": "sha256-uniform-sphere-v1",
+   "direction_seed_field": "neows_id",
+   "distance_field": "encounter.miss_distance_km",
+   "note": "Illustrative direction, real distance. Directions are derived deterministically from neows_id for visualization only and are not astronomical positions or trajectories."
+  }
+ },
+ "data": [
+  {
+   "neows_id": "3830890",
+   "name": "(2018 SP2)",
+   "asteroid_key": null,
+   "encounter": {
+    "source": "nasa_neows",
+    "closest_approach_date": "2026-09-30",
+    "miss_distance_km": 1927097.426378009,
+    "is_potentially_hazardous": false,
+    "close_approach_datetime": "2026-09-30T20:54",
+    "relative_velocity_km_s": 14.2601518512,
+    "estimated_diameter_min_km": 0.0291443905,
+    "estimated_diameter_max_km": 0.0651688382
+   },
+   "resolution": {
+    "match_state": "UNRESOLVED",
+    "match_rule": "NO_CROSS_SOURCE_MATCH",
+    "resolved_at": "2026-09-28T01:15:26.842071+00:00"
+   },
+   "sbdb": {
+    "status": "not_resolved",
+    "spkid": null,
+    "snapshot_key": null,
+    "run_id": null
+   },
+   "sentry": {
+    "status": "not_resolved",
+    "sentry_id": null,
+    "latest_snapshot_key": null,
+    "run_id": null,
+    "in_latest_catalog": null
+   },
+   "illustrative_direction": {
+    "x": -0.9116500706840102,
+    "y": -0.403265062907251,
+    "z": 0.07919240910750491
+   }
+  },
+  {
+   "neows_id": "2138971",
+   "name": "138971 (2001 CB21)",
+   "asteroid_key": null,
+   "encounter": {
+    "source": "nasa_neows",
+    "closest_approach_date": "2026-09-29",
+    "miss_distance_km": 8096701.943856126,
+    "is_potentially_hazardous": true,
+    "close_approach_datetime": "2026-09-29T07:18",
+    "relative_velocity_km_s": 10.2283269894,
+    "estimated_diameter_min_km": 0.5206609142,
+    "estimated_diameter_max_km": 1.1642331974
+   },
+   "resolution": {
+    "match_state": "UNRESOLVED",
+    "match_rule": "NO_CROSS_SOURCE_MATCH",
+    "resolved_at": "2026-09-28T01:15:26.842071+00:00"
+   },
+   "sbdb": {
+    "status": "not_resolved",
+    "spkid": null,
+    "snapshot_key": null,
+    "run_id": null
+   },
+   "sentry": {
+    "status": "not_resolved",
+    "sentry_id": null,
+    "latest_snapshot_key": null,
+    "run_id": null,
+    "in_latest_catalog": null
+   },
+   "illustrative_direction": {
+    "x": -0.06473789578048324,
+    "y": 0.3254707504991425,
+    "z": 0.9433333426840378
+   }
+  },
+  {
+   "neows_id": "3753791",
+   "name": "(2016 LY8)",
+   "asteroid_key": null,
+   "encounter": {
+    "source": "nasa_neows",
+    "closest_approach_date": "2026-09-25",
+    "miss_distance_km": 13142326.651150573,
+    "is_potentially_hazardous": false,
+    "close_approach_datetime": "2026-09-25T12:12",
+    "relative_velocity_km_s": 7.2817604581,
+    "estimated_diameter_min_km": 0.0658498783,
+    "estimated_diameter_max_km": 0.1472448042
+   },
+   "resolution": {
+    "match_state": "UNRESOLVED",
+    "match_rule": "NO_CROSS_SOURCE_MATCH",
+    "resolved_at": "2026-09-28T01:15:26.842071+00:00"
+   },
+   "sbdb": {
+    "status": "not_resolved",
+    "spkid": null,
+    "snapshot_key": null,
+    "run_id": null
+   },
+   "sentry": {
+    "status": "not_resolved",
+    "sentry_id": null,
+    "latest_snapshot_key": null,
+    "run_id": null,
+    "in_latest_catalog": null
+   },
+   "illustrative_direction": {
+    "x": -0.9139111689661732,
+    "y": -0.34921191662797263,
+    "z": -0.20692368768195868
+   }
+  },
+  {
+   "neows_id": "3427460",
+   "name": "(2008 ST)",
+   "asteroid_key": "ast_8520aaac-9c77-5e8f-9a88-b4e501749e26",
+   "encounter": {
+    "source": "nasa_neows",
+    "closest_approach_date": "2026-09-26",
+    "miss_distance_km": 14878930.159093497,
+    "is_potentially_hazardous": false,
+    "close_approach_datetime": "2026-09-26T23:54",
+    "relative_velocity_km_s": 6.1640876924,
+    "estimated_diameter_min_km": 0.0101054342,
+    "estimated_diameter_max_km": 0.0225964377
+   },
+   "resolution": {
+    "match_state": "RESOLVED",
+    "match_rule": "EXACT_DESIGNATION_MATCH",
+    "resolved_at": "2026-09-28T01:15:26.842071+00:00"
+   },
+   "sbdb": {
+    "status": "available",
+    "spkid": "50427483",
+    "snapshot_key": "2026-09-26",
+    "run_id": "3a217b3b1657"
+   },
+   "sentry": {
+    "status": "available",
+    "sentry_id": "bK08S00T",
+    "latest_snapshot_key": "2026-09-26",
+    "run_id": "7d446dc65b5a",
+    "in_latest_catalog": true
+   },
+   "illustrative_direction": {
+    "x": 0.41789421064936794,
+    "y": 0.4178751627645238,
+    "z": -0.8066875337144268
+   }
+  },
+  {
+   "neows_id": "2523934",
+   "name": "523934 (1998 FF14)",
+   "asteroid_key": null,
+   "encounter": {
+    "source": "nasa_neows",
+    "closest_approach_date": "2026-09-28",
+    "miss_distance_km": 15393500.935266983,
+    "is_potentially_hazardous": true,
+    "close_approach_datetime": "2026-09-28T13:19",
+    "relative_velocity_km_s": 23.4785426105,
+    "estimated_diameter_min_km": 0.2007035141,
+    "estimated_diameter_max_km": 0.4487867009
+   },
+   "resolution": {
+    "match_state": "UNRESOLVED",
+    "match_rule": "NO_CROSS_SOURCE_MATCH",
+    "resolved_at": "2026-09-28T01:15:26.842071+00:00"
+   },
+   "sbdb": {
+    "status": "not_resolved",
+    "spkid": null,
+    "snapshot_key": null,
+    "run_id": null
+   },
+   "sentry": {
+    "status": "not_resolved",
+    "sentry_id": null,
+    "latest_snapshot_key": null,
+    "run_id": null,
+    "in_latest_catalog": null
+   },
+   "illustrative_direction": {
+    "x": 0.7512033427086319,
+    "y": 0.17123915506655596,
+    "z": 0.6374721089392617
+   }
+  },
+  {
+   "neows_id": "3803909",
+   "name": "(2018 HN)",
+   "asteroid_key": null,
+   "encounter": {
+    "source": "nasa_neows",
+    "closest_approach_date": "2026-09-25",
+    "miss_distance_km": 16612223.948800756,
+    "is_potentially_hazardous": false,
+    "close_approach_datetime": "2026-09-25T14:23",
+    "relative_velocity_km_s": 11.7934274052,
+    "estimated_diameter_min_km": 0.0270741591,
+    "estimated_diameter_max_km": 0.0605396602
+   },
+   "resolution": {
+    "match_state": "UNRESOLVED",
+    "match_rule": "NO_CROSS_SOURCE_MATCH",
+    "resolved_at": "2026-09-28T01:15:26.842071+00:00"
+   },
+   "sbdb": {
+    "status": "not_resolved",
+    "spkid": null,
+    "snapshot_key": null,
+    "run_id": null
+   },
+   "sentry": {
+    "status": "not_resolved",
+    "sentry_id": null,
+    "latest_snapshot_key": null,
+    "run_id": null,
+    "in_latest_catalog": null
+   },
+   "illustrative_direction": {
+    "x": 0.15692873080968817,
+    "y": 0.8967063749291933,
+    "z": -0.4138732301173942
+   }
+  },
+  {
+   "neows_id": "3682467",
+   "name": "(2014 QJ33)",
+   "asteroid_key": null,
+   "encounter": {
+    "source": "nasa_neows",
+    "closest_approach_date": "2026-09-30",
+    "miss_distance_km": 16885636.660463914,
+    "is_potentially_hazardous": false,
+    "close_approach_datetime": "2026-09-30T11:56",
+    "relative_velocity_km_s": 5.9552842843,
+    "estimated_diameter_min_km": 0.0483676488,
+    "estimated_diameter_max_km": 0.1081533507
+   },
+   "resolution": {
+    "match_state": "UNRESOLVED",
+    "match_rule": "NO_CROSS_SOURCE_MATCH",
+    "resolved_at": "2026-09-28T01:15:26.842071+00:00"
+   },
+   "sbdb": {
+    "status": "not_resolved",
+    "spkid": null,
+    "snapshot_key": null,
+    "run_id": null
+   },
+   "sentry": {
+    "status": "not_resolved",
+    "sentry_id": null,
+    "latest_snapshot_key": null,
+    "run_id": null,
+    "in_latest_catalog": null
+   },
+   "illustrative_direction": {
+    "x": 0.7128738891101933,
+    "y": -0.29466720761586546,
+    "z": -0.6363820039730665
+   }
+  },
+  {
+   "neows_id": "3548666",
+   "name": "(2010 TW54)",
+   "asteroid_key": "ast_b8259bf1-e6e5-5059-853e-9434274cdf2c",
+   "encounter": {
+    "source": "nasa_neows",
+    "closest_approach_date": "2026-09-30",
+    "miss_distance_km": 17457205.45180993,
+    "is_potentially_hazardous": false,
+    "close_approach_datetime": "2026-09-30T05:42",
+    "relative_velocity_km_s": 4.5115736676,
+    "estimated_diameter_min_km": 0.0080270317,
+    "estimated_diameter_max_km": 0.0179489885
+   },
+   "resolution": {
+    "match_state": "RESOLVED",
+    "match_rule": "EXACT_DESIGNATION_MATCH",
+    "resolved_at": "2026-09-28T01:15:26.842071+00:00"
+   },
+   "sbdb": {
+    "status": "available",
+    "spkid": "50548689",
+    "snapshot_key": "2026-09-26",
+    "run_id": "26b0c1ef0bba"
+   },
+   "sentry": {
+    "status": "available",
+    "sentry_id": "bK10T54W",
+    "latest_snapshot_key": "2026-09-26",
+    "run_id": "7d446dc65b5a",
+    "in_latest_catalog": true
+   },
+   "illustrative_direction": {
+    "x": 0.9666469148488352,
+    "y": -0.01108839961802617,
+    "z": -0.25587260386203825
+   }
+  },
+  {
+   "neows_id": "3773752",
+   "name": "(2017 GK4)",
+   "asteroid_key": null,
+   "encounter": {
+    "source": "nasa_neows",
+    "closest_approach_date": "2026-09-28",
+    "miss_distance_km": 18423686.14113296,
+    "is_potentially_hazardous": true,
+    "close_approach_datetime": "2026-09-28T00:38",
+    "relative_velocity_km_s": 12.1676168651,
+    "estimated_diameter_min_km": 0.1165614595,
+    "estimated_diameter_max_km": 0.2606393469
+   },
+   "resolution": {
+    "match_state": "UNRESOLVED",
+    "match_rule": "NO_CROSS_SOURCE_MATCH",
+    "resolved_at": "2026-09-28T01:15:26.842071+00:00"
+   },
+   "sbdb": {
+    "status": "not_resolved",
+    "spkid": null,
+    "snapshot_key": null,
+    "run_id": null
+   },
+   "sentry": {
+    "status": "not_resolved",
+    "sentry_id": null,
+    "latest_snapshot_key": null,
+    "run_id": null,
+    "in_latest_catalog": null
+   },
+   "illustrative_direction": {
+    "x": -0.42342776180655894,
+    "y": 0.9001804559797528,
+    "z": -0.10190229243531479
+   }
+  },
+  {
+   "neows_id": "2376848",
+   "name": "376848 (2001 RY47)",
+   "asteroid_key": null,
+   "encounter": {
+    "source": "nasa_neows",
+    "closest_approach_date": "2026-09-26",
+    "miss_distance_km": 19724592.195650574,
+    "is_potentially_hazardous": false,
+    "close_approach_datetime": "2026-09-26T00:32",
+    "relative_velocity_km_s": 12.0505623546,
+    "estimated_diameter_min_km": 0.3180936332,
+    "estimated_diameter_max_km": 0.7112789871
+   },
+   "resolution": {
+    "match_state": "UNRESOLVED",
+    "match_rule": "NO_CROSS_SOURCE_MATCH",
+    "resolved_at": "2026-09-28T01:15:26.842071+00:00"
+   },
+   "sbdb": {
+    "status": "not_resolved",
+    "spkid": null,
+    "snapshot_key": null,
+    "run_id": null
+   },
+   "sentry": {
+    "status": "not_resolved",
+    "sentry_id": null,
+    "latest_snapshot_key": null,
+    "run_id": null,
+    "in_latest_catalog": null
+   },
+   "illustrative_direction": {
+    "x": 0.908733653093877,
+    "y": 0.3240688894401524,
+    "z": 0.26302566914976866
+   }
+  },
+  {
+   "neows_id": "3616702",
+   "name": "(2012 VT6)",
+   "asteroid_key": null,
+   "encounter": {
+    "source": "nasa_neows",
+    "closest_approach_date": "2026-09-30",
+    "miss_distance_km": 22754832.15433697,
+    "is_potentially_hazardous": false,
+    "close_approach_datetime": "2026-09-30T15:24",
+    "relative_velocity_km_s": 6.3543103761,
+    "estimated_diameter_min_km": 0.063760979,
+    "estimated_diameter_max_km": 0.1425738833
+   },
+   "resolution": {
+    "match_state": "UNRESOLVED",
+    "match_rule": "NO_CROSS_SOURCE_MATCH",
+    "resolved_at": "2026-09-28T01:15:26.842071+00:00"
+   },
+   "sbdb": {
+    "status": "not_resolved",
+    "spkid": null,
+    "snapshot_key": null,
+    "run_id": null
+   },
+   "sentry": {
+    "status": "not_resolved",
+    "sentry_id": null,
+    "latest_snapshot_key": null,
+    "run_id": null,
+    "in_latest_catalog": null
+   },
+   "illustrative_direction": {
+    "x": -0.8971051620298979,
+    "y": -0.4083785866465501,
+    "z": 0.1686097809377528
+   }
+  },
+  {
+   "neows_id": "2499496",
+   "name": "499496 (2010 MR87)",
+   "asteroid_key": null,
+   "encounter": {
+    "source": "nasa_neows",
+    "closest_approach_date": "2026-10-01",
+    "miss_distance_km": 28345941.169972755,
+    "is_potentially_hazardous": false,
+    "close_approach_datetime": "2026-10-01T15:58",
+    "relative_velocity_km_s": 18.8379132082,
+    "estimated_diameter_min_km": 0.3377185972,
+    "estimated_diameter_max_km": 0.7551617405
+   },
+   "resolution": {
+    "match_state": "UNRESOLVED",
+    "match_rule": "NO_CROSS_SOURCE_MATCH",
+    "resolved_at": "2026-09-28T01:15:26.842071+00:00"
+   },
+   "sbdb": {
+    "status": "not_resolved",
+    "spkid": null,
+    "snapshot_key": null,
+    "run_id": null
+   },
+   "sentry": {
+    "status": "not_resolved",
+    "sentry_id": null,
+    "latest_snapshot_key": null,
+    "run_id": null,
+    "in_latest_catalog": null
+   },
+   "illustrative_direction": {
+    "x": -0.814173423528881,
+    "y": -0.32401675110458594,
+    "z": -0.4818036751861594
+   }
+  },
+  {
+   "neows_id": "3713318",
+   "name": "(2015 EQ7)",
+   "asteroid_key": null,
+   "encounter": {
+    "source": "nasa_neows",
+    "closest_approach_date": "2026-09-28",
+    "miss_distance_km": 29487898.560108572,
+    "is_potentially_hazardous": false,
+    "close_approach_datetime": "2026-09-28T09:53",
+    "relative_velocity_km_s": 6.2859743336,
+    "estimated_diameter_min_km": 0.0506471459,
+    "estimated_diameter_max_km": 0.1132504611
+   },
+   "resolution": {
+    "match_state": "UNRESOLVED",
+    "match_rule": "NO_CROSS_SOURCE_MATCH",
+    "resolved_at": "2026-09-28T01:15:26.842071+00:00"
+   },
+   "sbdb": {
+    "status": "not_resolved",
+    "spkid": null,
+    "snapshot_key": null,
+    "run_id": null
+   },
+   "sentry": {
+    "status": "not_resolved",
+    "sentry_id": null,
+    "latest_snapshot_key": null,
+    "run_id": null,
+    "in_latest_catalog": null
+   },
+   "illustrative_direction": {
+    "x": -0.5012772188529361,
+    "y": -0.40249684907602107,
+    "z": 0.7659748274864784
+   }
+  },
+  {
+   "neows_id": "3872621",
+   "name": "(2019 SH7)",
+   "asteroid_key": null,
+   "encounter": {
+    "source": "nasa_neows",
+    "closest_approach_date": "2026-09-27",
+    "miss_distance_km": 32446692.879890166,
+    "is_potentially_hazardous": false,
+    "close_approach_datetime": "2026-09-27T05:50",
+    "relative_velocity_km_s": 9.5902213908,
+    "estimated_diameter_min_km": 0.0584191154,
+    "estimated_diameter_max_km": 0.1306291133
+   },
+   "resolution": {
+    "match_state": "UNRESOLVED",
+    "match_rule": "NO_CROSS_SOURCE_MATCH",
+    "resolved_at": "2026-09-28T01:15:26.842071+00:00"
+   },
+   "sbdb": {
+    "status": "not_resolved",
+    "spkid": null,
+    "snapshot_key": null,
+    "run_id": null
+   },
+   "sentry": {
+    "status": "not_resolved",
+    "sentry_id": null,
+    "latest_snapshot_key": null,
+    "run_id": null,
+    "in_latest_catalog": null
+   },
+   "illustrative_direction": {
+    "x": 0.44344594881619676,
+    "y": -0.3539959761489549,
+    "z": 0.8234333848884507
+   }
+  },
+  {
+   "neows_id": "3824978",
+   "name": "(2018 KS)",
+   "asteroid_key": null,
+   "encounter": {
+    "source": "nasa_neows",
+    "closest_approach_date": "2026-09-25",
+    "miss_distance_km": 34180550.04021606,
+    "is_potentially_hazardous": false,
+    "close_approach_datetime": "2026-09-25T16:03",
+    "relative_velocity_km_s": 6.878540103,
+    "estimated_diameter_min_km": 0.0069912523,
+    "estimated_diameter_max_km": 0.0156329154
+   },
+   "resolution": {
+    "match_state": "UNRESOLVED",
+    "match_rule": "NO_CROSS_SOURCE_MATCH",
+    "resolved_at": "2026-09-28T01:15:26.842071+00:00"
+   },
+   "sbdb": {
+    "status": "not_resolved",
+    "spkid": null,
+    "snapshot_key": null,
+    "run_id": null
+   },
+   "sentry": {
+    "status": "not_resolved",
+    "sentry_id": null,
+    "latest_snapshot_key": null,
+    "run_id": null,
+    "in_latest_catalog": null
+   },
+   "illustrative_direction": {
+    "x": -0.5720726616741689,
+    "y": -0.8137561174286728,
+    "z": 0.1026345512604997
+   }
+  },
+  {
+   "neows_id": "3256319",
+   "name": "(2004 TB10)",
+   "asteroid_key": null,
+   "encounter": {
+    "source": "nasa_neows",
+    "closest_approach_date": "2026-09-28",
+    "miss_distance_km": 35666461.52163483,
+    "is_potentially_hazardous": true,
+    "close_approach_datetime": "2026-09-28T13:53",
+    "relative_velocity_km_s": 11.5723191742,
+    "estimated_diameter_min_km": 0.1332155667,
+    "estimated_diameter_max_km": 0.2978790628
+   },
+   "resolution": {
+    "match_state": "UNRESOLVED",
+    "match_rule": "NO_CROSS_SOURCE_MATCH",
+    "resolved_at": "2026-09-28T01:15:26.842071+00:00"
+   },
+   "sbdb": {
+    "status": "not_resolved",
+    "spkid": null,
+    "snapshot_key": null,
+    "run_id": null
+   },
+   "sentry": {
+    "status": "not_resolved",
+    "sentry_id": null,
+    "latest_snapshot_key": null,
+    "run_id": null,
+    "in_latest_catalog": null
+   },
+   "illustrative_direction": {
+    "x": 0.9010121846151552,
+    "y": -0.39737417677090514,
+    "z": -0.17398507640217553
+   }
+  },
+  {
+   "neows_id": "3830851",
+   "name": "(2018 SD1)",
+   "asteroid_key": null,
+   "encounter": {
+    "source": "nasa_neows",
+    "closest_approach_date": "2026-09-26",
+    "miss_distance_km": 35828309.58721446,
+    "is_potentially_hazardous": false,
+    "close_approach_datetime": "2026-09-26T14:58",
+    "relative_velocity_km_s": 22.8074917582,
+    "estimated_diameter_min_km": 0.0319561887,
+    "estimated_diameter_max_km": 0.0714562102
+   },
+   "resolution": {
+    "match_state": "UNRESOLVED",
+    "match_rule": "NO_CROSS_SOURCE_MATCH",
+    "resolved_at": "2026-09-28T01:15:26.842071+00:00"
+   },
+   "sbdb": {
+    "status": "not_resolved",
+    "spkid": null,
+    "snapshot_key": null,
+    "run_id": null
+   },
+   "sentry": {
+    "status": "not_resolved",
+    "sentry_id": null,
+    "latest_snapshot_key": null,
+    "run_id": null,
+    "in_latest_catalog": null
+   },
+   "illustrative_direction": {
+    "x": 0.95613092690676,
+    "y": 0.2449352664213479,
+    "z": 0.16068716773757374
+   }
+  },
+  {
+   "neows_id": "3689018",
+   "name": "(2014 RX22)",
+   "asteroid_key": null,
+   "encounter": {
+    "source": "nasa_neows",
+    "closest_approach_date": "2026-10-01",
+    "miss_distance_km": 37754643.5707825,
+    "is_potentially_hazardous": false,
+    "close_approach_datetime": "2026-10-01T14:05",
+    "relative_velocity_km_s": 13.0044710271,
+    "estimated_diameter_min_km": 0.0167708462,
+    "estimated_diameter_max_km": 0.0375007522
+   },
+   "resolution": {
+    "match_state": "UNRESOLVED",
+    "match_rule": "NO_CROSS_SOURCE_MATCH",
+    "resolved_at": "2026-09-28T01:15:26.842071+00:00"
+   },
+   "sbdb": {
+    "status": "not_resolved",
+    "spkid": null,
+    "snapshot_key": null,
+    "run_id": null
+   },
+   "sentry": {
+    "status": "not_resolved",
+    "sentry_id": null,
+    "latest_snapshot_key": null,
+    "run_id": null,
+    "in_latest_catalog": null
+   },
+   "illustrative_direction": {
+    "x": 0.3744455948723302,
+    "y": 0.5280201804509889,
+    "z": -0.7622238421337999
+   }
+  },
+  {
+   "neows_id": "3717039",
+   "name": "(2015 HA10)",
+   "asteroid_key": null,
+   "encounter": {
+    "source": "nasa_neows",
+    "closest_approach_date": "2026-09-26",
+    "miss_distance_km": 38850386.1696524,
+    "is_potentially_hazardous": false,
+    "close_approach_datetime": "2026-09-26T21:33",
+    "relative_velocity_km_s": 15.4515027616,
+    "estimated_diameter_min_km": 0.2007035141,
+    "estimated_diameter_max_km": 0.4487867009
+   },
+   "resolution": {
+    "match_state": "UNRESOLVED",
+    "match_rule": "NO_CROSS_SOURCE_MATCH",
+    "resolved_at": "2026-09-28T01:15:26.842071+00:00"
+   },
+   "sbdb": {
+    "status": "not_resolved",
+    "spkid": null,
+    "snapshot_key": null,
+    "run_id": null
+   },
+   "sentry": {
+    "status": "not_resolved",
+    "sentry_id": null,
+    "latest_snapshot_key": null,
+    "run_id": null,
+    "in_latest_catalog": null
+   },
+   "illustrative_direction": {
+    "x": 0.812667605214412,
+    "y": -0.21137944237300751,
+    "z": 0.5430378391761932
+   }
+  },
+  {
+   "neows_id": "3691093",
+   "name": "(2014 SQ260)",
+   "asteroid_key": null,
+   "encounter": {
+    "source": "nasa_neows",
+    "closest_approach_date": "2026-09-28",
+    "miss_distance_km": 39365623.793291196,
+    "is_potentially_hazardous": false,
+    "close_approach_datetime": "2026-09-28T12:00",
+    "relative_velocity_km_s": 12.3118504896,
+    "estimated_diameter_min_km": 0.0417402433,
+    "estimated_diameter_max_km": 0.0933340215
+   },
+   "resolution": {
+    "match_state": "UNRESOLVED",
+    "match_rule": "NO_CROSS_SOURCE_MATCH",
+    "resolved_at": "2026-09-28T01:15:26.842071+00:00"
+   },
+   "sbdb": {
+    "status": "not_resolved",
+    "spkid": null,
+    "snapshot_key": null,
+    "run_id": null
+   },
+   "sentry": {
+    "status": "not_resolved",
+    "sentry_id": null,
+    "latest_snapshot_key": null,
+    "run_id": null,
+    "in_latest_catalog": null
+   },
+   "illustrative_direction": {
+    "x": 0.457777162401841,
+    "y": -0.857412565869875,
+    "z": -0.235124991168008
+   }
+  },
+  {
+   "neows_id": "3666677",
+   "name": "(2014 FR37)",
+   "asteroid_key": null,
+   "encounter": {
+    "source": "nasa_neows",
+    "closest_approach_date": "2026-09-29",
+    "miss_distance_km": 39845554.075641945,
+    "is_potentially_hazardous": false,
+    "close_approach_datetime": "2026-09-29T16:36",
+    "relative_velocity_km_s": 15.0801608238,
+    "estimated_diameter_min_km": 0.0664591797,
+    "estimated_diameter_max_km": 0.1486072436
+   },
+   "resolution": {
+    "match_state": "UNRESOLVED",
+    "match_rule": "NO_CROSS_SOURCE_MATCH",
+    "resolved_at": "2026-09-28T01:15:26.842071+00:00"
+   },
+   "sbdb": {
+    "status": "not_resolved",
+    "spkid": null,
+    "snapshot_key": null,
+    "run_id": null
+   },
+   "sentry": {
+    "status": "not_resolved",
+    "sentry_id": null,
+    "latest_snapshot_key": null,
+    "run_id": null,
+    "in_latest_catalog": null
+   },
+   "illustrative_direction": {
+    "x": 0.8015274805454774,
+    "y": 0.5045858300177313,
+    "z": -0.3208532968129463
+   }
+  },
+  {
+   "neows_id": "3692560",
+   "name": "(2014 TU)",
+   "asteroid_key": null,
+   "encounter": {
+    "source": "nasa_neows",
+    "closest_approach_date": "2026-09-27",
+    "miss_distance_km": 40650768.30598433,
+    "is_potentially_hazardous": false,
+    "close_approach_datetime": "2026-09-27T10:19",
+    "relative_velocity_km_s": 15.5811895497,
+    "estimated_diameter_min_km": 0.0255008688,
+    "estimated_diameter_max_km": 0.0570216761
+   },
+   "resolution": {
+    "match_state": "UNRESOLVED",
+    "match_rule": "NO_CROSS_SOURCE_MATCH",
+    "resolved_at": "2026-09-28T01:15:26.842071+00:00"
+   },
+   "sbdb": {
+    "status": "not_resolved",
+    "spkid": null,
+    "snapshot_key": null,
+    "run_id": null
+   },
+   "sentry": {
+    "status": "not_resolved",
+    "sentry_id": null,
+    "latest_snapshot_key": null,
+    "run_id": null,
+    "in_latest_catalog": null
+   },
+   "illustrative_direction": {
+    "x": -0.09943036204188671,
+    "y": -0.20200453608097232,
+    "z": 0.974324263531875
+   }
+  },
+  {
+   "neows_id": "3838859",
+   "name": "(2019 DJ1)",
+   "asteroid_key": null,
+   "encounter": {
+    "source": "nasa_neows",
+    "closest_approach_date": "2026-09-27",
+    "miss_distance_km": 42105242.557971746,
+    "is_potentially_hazardous": false,
+    "close_approach_datetime": "2026-09-27T01:53",
+    "relative_velocity_km_s": 12.3662936673,
+    "estimated_diameter_min_km": 0.0116025908,
+    "estimated_diameter_max_km": 0.0259441818
+   },
+   "resolution": {
+    "match_state": "UNRESOLVED",
+    "match_rule": "NO_CROSS_SOURCE_MATCH",
+    "resolved_at": "2026-09-28T01:15:26.842071+00:00"
+   },
+   "sbdb": {
+    "status": "not_resolved",
+    "spkid": null,
+    "snapshot_key": null,
+    "run_id": null
+   },
+   "sentry": {
+    "status": "not_resolved",
+    "sentry_id": null,
+    "latest_snapshot_key": null,
+    "run_id": null,
+    "in_latest_catalog": null
+   },
+   "illustrative_direction": {
+    "x": -0.5867438887556895,
+    "y": -0.6029799953385123,
+    "z": 0.5405059983288056
+   }
+  },
+  {
+   "neows_id": "3869353",
+   "name": "(2019 SD7)",
+   "asteroid_key": null,
+   "encounter": {
+    "source": "nasa_neows",
+    "closest_approach_date": "2026-10-01",
+    "miss_distance_km": 43473504.48498495,
+    "is_potentially_hazardous": false,
+    "close_approach_datetime": "2026-10-01T04:23",
+    "relative_velocity_km_s": 8.5172856106,
+    "estimated_diameter_min_km": 0.0483676488,
+    "estimated_diameter_max_km": 0.1081533507
+   },
+   "resolution": {
+    "match_state": "UNRESOLVED",
+    "match_rule": "NO_CROSS_SOURCE_MATCH",
+    "resolved_at": "2026-09-28T01:15:26.842071+00:00"
+   },
+   "sbdb": {
+    "status": "not_resolved",
+    "spkid": null,
+    "snapshot_key": null,
+    "run_id": null
+   },
+   "sentry": {
+    "status": "not_resolved",
+    "sentry_id": null,
+    "latest_snapshot_key": null,
+    "run_id": null,
+    "in_latest_catalog": null
+   },
+   "illustrative_direction": {
+    "x": -0.8934786151723533,
+    "y": -0.0027201087899474024,
+    "z": -0.4490975008145388
+   }
+  },
+  {
+   "neows_id": "3648745",
+   "name": "(2013 TL)",
+   "asteroid_key": null,
+   "encounter": {
+    "source": "nasa_neows",
+    "closest_approach_date": "2026-09-29",
+    "miss_distance_km": 47966664.318208545,
+    "is_potentially_hazardous": false,
+    "close_approach_datetime": "2026-09-29T03:21",
+    "relative_velocity_km_s": 19.1475874219,
+    "estimated_diameter_min_km": 0.096506147,
+    "estimated_diameter_max_km": 0.2157943048
+   },
+   "resolution": {
+    "match_state": "UNRESOLVED",
+    "match_rule": "NO_CROSS_SOURCE_MATCH",
+    "resolved_at": "2026-09-28T01:15:26.842071+00:00"
+   },
+   "sbdb": {
+    "status": "not_resolved",
+    "spkid": null,
+    "snapshot_key": null,
+    "run_id": null
+   },
+   "sentry": {
+    "status": "not_resolved",
+    "sentry_id": null,
+    "latest_snapshot_key": null,
+    "run_id": null,
+    "in_latest_catalog": null
+   },
+   "illustrative_direction": {
+    "x": 0.922539744119069,
+    "y": -0.3542568190606302,
+    "z": -0.15304419841917105
+   }
+  },
+  {
+   "neows_id": "3291224",
+   "name": "(2005 SP9)",
+   "asteroid_key": null,
+   "encounter": {
+    "source": "nasa_neows",
+    "closest_approach_date": "2026-09-26",
+    "miss_distance_km": 56699114.96312618,
+    "is_potentially_hazardous": false,
+    "close_approach_datetime": "2026-09-26T09:37",
+    "relative_velocity_km_s": 16.5300508984,
+    "estimated_diameter_min_km": 0.1266353563,
+    "estimated_diameter_max_km": 0.283165265
+   },
+   "resolution": {
+    "match_state": "UNRESOLVED",
+    "match_rule": "NO_CROSS_SOURCE_MATCH",
+    "resolved_at": "2026-09-28T01:15:26.842071+00:00"
+   },
+   "sbdb": {
+    "status": "not_resolved",
+    "spkid": null,
+    "snapshot_key": null,
+    "run_id": null
+   },
+   "sentry": {
+    "status": "not_resolved",
+    "sentry_id": null,
+    "latest_snapshot_key": null,
+    "run_id": null,
+    "in_latest_catalog": null
+   },
+   "illustrative_direction": {
+    "x": -0.5537606613177656,
+    "y": -0.3723703609714405,
+    "z": 0.744774760747778
+   }
+  },
+  {
+   "neows_id": "3132507",
+   "name": "(2002 PN6)",
+   "asteroid_key": null,
+   "encounter": {
+    "source": "nasa_neows",
+    "closest_approach_date": "2026-09-30",
+    "miss_distance_km": 62349988.91125866,
+    "is_potentially_hazardous": false,
+    "close_approach_datetime": "2026-09-30T17:42",
+    "relative_velocity_km_s": 1.5721996376,
+    "estimated_diameter_min_km": 0.1756123185,
+    "estimated_diameter_max_km": 0.3926810818
+   },
+   "resolution": {
+    "match_state": "UNRESOLVED",
+    "match_rule": "NO_CROSS_SOURCE_MATCH",
+    "resolved_at": "2026-09-28T01:15:26.842071+00:00"
+   },
+   "sbdb": {
+    "status": "not_resolved",
+    "spkid": null,
+    "snapshot_key": null,
+    "run_id": null
+   },
+   "sentry": {
+    "status": "not_resolved",
+    "sentry_id": null,
+    "latest_snapshot_key": null,
+    "run_id": null,
+    "in_latest_catalog": null
+   },
+   "illustrative_direction": {
+    "x": -0.04585729003566543,
+    "y": -0.27068389755510036,
+    "z": -0.9615754450665661
+   }
+  },
+  {
+   "neows_id": "3748418",
+   "name": "(2016 FL12)",
+   "asteroid_key": null,
+   "encounter": {
+    "source": "nasa_neows",
+    "closest_approach_date": "2026-09-28",
+    "miss_distance_km": 63605339.886157274,
+    "is_potentially_hazardous": false,
+    "close_approach_datetime": "2026-09-28T06:57",
+    "relative_velocity_km_s": 7.3029112882,
+    "estimated_diameter_min_km": 0.0146067964,
+    "estimated_diameter_max_km": 0.0326617897
+   },
+   "resolution": {
+    "match_state": "UNRESOLVED",
+    "match_rule": "NO_CROSS_SOURCE_MATCH",
+    "resolved_at": "2026-09-28T01:15:26.842071+00:00"
+   },
+   "sbdb": {
+    "status": "not_resolved",
+    "spkid": null,
+    "snapshot_key": null,
+    "run_id": null
+   },
+   "sentry": {
+    "status": "not_resolved",
+    "sentry_id": null,
+    "latest_snapshot_key": null,
+    "run_id": null,
+    "in_latest_catalog": null
+   },
+   "illustrative_direction": {
+    "x": -0.10495865515674377,
+    "y": -0.3017638442767776,
+    "z": 0.9475876017524651
+   }
+  },
+  {
+   "neows_id": "3747498",
+   "name": "(2016 FB)",
+   "asteroid_key": null,
+   "encounter": {
+    "source": "nasa_neows",
+    "closest_approach_date": "2026-10-01",
+    "miss_distance_km": 64412686.73885502,
+    "is_potentially_hazardous": false,
+    "close_approach_datetime": "2026-10-01T17:42",
+    "relative_velocity_km_s": 11.0846956407,
+    "estimated_diameter_min_km": 0.0490405098,
+    "estimated_diameter_max_km": 0.1096579137
+   },
+   "resolution": {
+    "match_state": "UNRESOLVED",
+    "match_rule": "NO_CROSS_SOURCE_MATCH",
+    "resolved_at": "2026-09-28T01:15:26.842071+00:00"
+   },
+   "sbdb": {
+    "status": "not_resolved",
+    "spkid": null,
+    "snapshot_key": null,
+    "run_id": null
+   },
+   "sentry": {
+    "status": "not_resolved",
+    "sentry_id": null,
+    "latest_snapshot_key": null,
+    "run_id": null,
+    "in_latest_catalog": null
+   },
+   "illustrative_direction": {
+    "x": 0.44768636651958005,
+    "y": -0.8927669594939596,
+    "z": -0.050438807166772515
+   }
+  },
+  {
+   "neows_id": "3448110",
+   "name": "(2009 DC12)",
+   "asteroid_key": null,
+   "encounter": {
+    "source": "nasa_neows",
+    "closest_approach_date": "2026-09-29",
+    "miss_distance_km": 64533048.981356874,
+    "is_potentially_hazardous": false,
+    "close_approach_datetime": "2026-09-29T20:11",
+    "relative_velocity_km_s": 6.0584391288,
+    "estimated_diameter_min_km": 0.0699125232,
+    "estimated_diameter_max_km": 0.1563291544
+   },
+   "resolution": {
+    "match_state": "UNRESOLVED",
+    "match_rule": "NO_CROSS_SOURCE_MATCH",
+    "resolved_at": "2026-09-28T01:15:26.842071+00:00"
+   },
+   "sbdb": {
+    "status": "not_resolved",
+    "spkid": null,
+    "snapshot_key": null,
+    "run_id": null
+   },
+   "sentry": {
+    "status": "not_resolved",
+    "sentry_id": null,
+    "latest_snapshot_key": null,
+    "run_id": null,
+    "in_latest_catalog": null
+   },
+   "illustrative_direction": {
+    "x": 0.32779126048763313,
+    "y": 0.8355278124447539,
+    "z": 0.4409605018357231
+   }
+  },
+  {
+   "neows_id": "3430304",
+   "name": "(2008 TX3)",
+   "asteroid_key": null,
+   "encounter": {
+    "source": "nasa_neows",
+    "closest_approach_date": "2026-10-01",
+    "miss_distance_km": 65905705.79459494,
+    "is_potentially_hazardous": false,
+    "close_approach_datetime": "2026-10-01T18:10",
+    "relative_velocity_km_s": 16.7792429091,
+    "estimated_diameter_min_km": 0.0278326768,
+    "estimated_diameter_max_km": 0.0622357573
+   },
+   "resolution": {
+    "match_state": "UNRESOLVED",
+    "match_rule": "NO_CROSS_SOURCE_MATCH",
+    "resolved_at": "2026-09-28T01:15:26.842071+00:00"
+   },
+   "sbdb": {
+    "status": "not_resolved",
+    "spkid": null,
+    "snapshot_key": null,
+    "run_id": null
+   },
+   "sentry": {
+    "status": "not_resolved",
+    "sentry_id": null,
+    "latest_snapshot_key": null,
+    "run_id": null,
+    "in_latest_catalog": null
+   },
+   "illustrative_direction": {
+    "x": -0.6490858571819503,
+    "y": -0.453514696734537,
+    "z": -0.6107470588158028
+   }
+  },
+  {
+   "neows_id": "3092330",
+   "name": "(2001 SY169)",
+   "asteroid_key": null,
+   "encounter": {
+    "source": "nasa_neows",
+    "closest_approach_date": "2026-09-26",
+    "miss_distance_km": 70322607.8143903,
+    "is_potentially_hazardous": false,
+    "close_approach_datetime": "2026-09-26T10:58",
+    "relative_velocity_km_s": 25.869866957,
+    "estimated_diameter_min_km": 0.063760979,
+    "estimated_diameter_max_km": 0.1425738833
+   },
+   "resolution": {
+    "match_state": "UNRESOLVED",
+    "match_rule": "NO_CROSS_SOURCE_MATCH",
+    "resolved_at": "2026-09-28T01:15:26.842071+00:00"
+   },
+   "sbdb": {
+    "status": "not_resolved",
+    "spkid": null,
+    "snapshot_key": null,
+    "run_id": null
+   },
+   "sentry": {
+    "status": "not_resolved",
+    "sentry_id": null,
+    "latest_snapshot_key": null,
+    "run_id": null,
+    "in_latest_catalog": null
+   },
+   "illustrative_direction": {
+    "x": -0.3438370857414648,
+    "y": -0.24082693361492663,
+    "z": 0.9076224140656997
+   }
+  },
+  {
+   "neows_id": "3629117",
+   "name": "(2013 ET)",
+   "asteroid_key": null,
+   "encounter": {
+    "source": "nasa_neows",
+    "closest_approach_date": "2026-09-26",
+    "miss_distance_km": 70330127.72532052,
+    "is_potentially_hazardous": false,
+    "close_approach_datetime": "2026-09-26T11:01",
+    "relative_velocity_km_s": 25.8713848901,
+    "estimated_diameter_min_km": 0.063760979,
+    "estimated_diameter_max_km": 0.1425738833
+   },
+   "resolution": {
+    "match_state": "UNRESOLVED",
+    "match_rule": "NO_CROSS_SOURCE_MATCH",
+    "resolved_at": "2026-09-28T01:15:26.842071+00:00"
+   },
+   "sbdb": {
+    "status": "not_resolved",
+    "spkid": null,
+    "snapshot_key": null,
+    "run_id": null
+   },
+   "sentry": {
+    "status": "not_resolved",
+    "sentry_id": null,
+    "latest_snapshot_key": null,
+    "run_id": null,
+    "in_latest_catalog": null
+   },
+   "illustrative_direction": {
+    "x": 0.223375374922067,
+    "y": -0.8085233628125286,
+    "z": -0.5444202546422627
+   }
+  },
+  {
+   "neows_id": "3825100",
+   "name": "(2018 LC1)",
+   "asteroid_key": null,
+   "encounter": {
+    "source": "nasa_neows",
+    "closest_approach_date": "2026-10-01",
+    "miss_distance_km": 71893233.35323587,
+    "is_potentially_hazardous": false,
+    "close_approach_datetime": "2026-10-01T00:26",
+    "relative_velocity_km_s": 8.4337545538,
+    "estimated_diameter_min_km": 0.0278326768,
+    "estimated_diameter_max_km": 0.0622357573
+   },
+   "resolution": {
+    "match_state": "UNRESOLVED",
+    "match_rule": "NO_CROSS_SOURCE_MATCH",
+    "resolved_at": "2026-09-28T01:15:26.842071+00:00"
+   },
+   "sbdb": {
+    "status": "not_resolved",
+    "spkid": null,
+    "snapshot_key": null,
+    "run_id": null
+   },
+   "sentry": {
+    "status": "not_resolved",
+    "sentry_id": null,
+    "latest_snapshot_key": null,
+    "run_id": null,
+    "in_latest_catalog": null
+   },
+   "illustrative_direction": {
+    "x": -0.8024416710093206,
+    "y": 0.3178420543687024,
+    "z": -0.505038407551794
+   }
+  },
+  {
+   "neows_id": "3843612",
+   "name": "(2019 QY1)",
+   "asteroid_key": null,
+   "encounter": {
+    "source": "nasa_neows",
+    "closest_approach_date": "2026-09-26",
+    "miss_distance_km": 74134162.95081787,
+    "is_potentially_hazardous": true,
+    "close_approach_datetime": "2026-09-26T02:49",
+    "relative_velocity_km_s": 20.0345827649,
+    "estimated_diameter_min_km": 0.1864468183,
+    "estimated_diameter_max_km": 0.41690776
+   },
+   "resolution": {
+    "match_state": "UNRESOLVED",
+    "match_rule": "NO_CROSS_SOURCE_MATCH",
+    "resolved_at": "2026-09-28T01:15:26.842071+00:00"
+   },
+   "sbdb": {
+    "status": "not_resolved",
+    "spkid": null,
+    "snapshot_key": null,
+    "run_id": null
+   },
+   "sentry": {
+    "status": "not_resolved",
+    "sentry_id": null,
+    "latest_snapshot_key": null,
+    "run_id": null,
+    "in_latest_catalog": null
+   },
+   "illustrative_direction": {
+    "x": 0.3021918930698076,
+    "y": 0.042511147896507555,
+    "z": -0.9522987252261799
+   }
+  }
+ ]
+}

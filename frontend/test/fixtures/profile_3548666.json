@@ -1,0 +1,201 @@
+{
+ "meta": {
+  "api_version": "1.0.0",
+  "execution_mode": "LOCAL (DUCKDB / PARQUET LAKEHOUSE)",
+  "timestamp": "2026-10-01T15:01:29.375282+00:00"
+ },
+ "data": {
+  "neows_id": "3548666",
+  "identity": {
+   "neows_id": "3548666",
+   "name": "(2010 TW54)",
+   "match_state": "RESOLVED",
+   "asteroid_key": "ast_b8259bf1-e6e5-5059-853e-9434274cdf2c",
+   "sbdb_spkid": "50548689",
+   "sbdb_designation": "2010 TW54",
+   "sbdb_fullname": "(2010 TW54)",
+   "sentry_id": "bK10T54W",
+   "crosswalk": [
+    {
+     "asteroid_key": "ast_b8259bf1-e6e5-5059-853e-9434274cdf2c",
+     "source_system": "sbdb",
+     "identifier_name": "spkid",
+     "identifier_value": "50548689",
+     "is_primary_pivot": true,
+     "created_at": "2026-09-28T01:15:26.842071+00:00",
+     "updated_at": "2026-09-28T01:15:26.842071+00:00"
+    },
+    {
+     "asteroid_key": "ast_b8259bf1-e6e5-5059-853e-9434274cdf2c",
+     "source_system": "neows",
+     "identifier_name": "id",
+     "identifier_value": "3548666",
+     "is_primary_pivot": false,
+     "created_at": "2026-09-28T01:15:26.842071+00:00",
+     "updated_at": "2026-09-28T01:15:26.842071+00:00"
+    },
+    {
+     "asteroid_key": "ast_b8259bf1-e6e5-5059-853e-9434274cdf2c",
+     "source_system": "sbdb",
+     "identifier_name": "des",
+     "identifier_value": "2010 TW54",
+     "is_primary_pivot": false,
+     "created_at": "2026-09-28T01:15:26.842071+00:00",
+     "updated_at": "2026-09-28T01:15:26.842071+00:00"
+    },
+    {
+     "asteroid_key": "ast_b8259bf1-e6e5-5059-853e-9434274cdf2c",
+     "source_system": "sentry",
+     "identifier_name": "des",
+     "identifier_value": "2010 TW54",
+     "is_primary_pivot": false,
+     "created_at": "2026-09-28T01:15:26.842071+00:00",
+     "updated_at": "2026-09-28T01:15:26.842071+00:00"
+    },
+    {
+     "asteroid_key": "ast_b8259bf1-e6e5-5059-853e-9434274cdf2c",
+     "source_system": "sentry",
+     "identifier_name": "sentry_id",
+     "identifier_value": "bK10T54W",
+     "is_primary_pivot": false,
+     "created_at": "2026-09-28T01:15:26.842071+00:00",
+     "updated_at": "2026-09-28T01:15:26.842071+00:00"
+    }
+   ],
+   "availability": {
+    "status": "available",
+    "unavailable": {}
+   }
+  },
+  "orbit": {
+   "source": "jpl_sbdb",
+   "orbit_class_code": "APO",
+   "orbit_class_name": "Apollo",
+   "is_neo": true,
+   "is_pha": false,
+   "orbit_id": "14",
+   "epoch_jd": 2461200.5,
+   "equinox": "J2000",
+   "semi_major_axis_au": 1.042699543697046,
+   "eccentricity": 0.2340036536591127,
+   "perihelion_distance_au": 0.7987040408032474,
+   "aphelion_distance_au": 1.286695046590844,
+   "inclination_deg": 3.847985990811305,
+   "ascending_node_longitude_deg": 196.2035517490737,
+   "argument_of_perihelion_deg": 86.09566594834301,
+   "mean_anomaly_deg": 319.6240400428038,
+   "mean_motion_deg_per_day": 0.9256894170147976,
+   "orbital_period_days": 388.8993364112806,
+   "time_of_perihelion_jd_tdb": 2461244.117177873,
+   "soln_date": "2021-04-15 04:16:11",
+   "first_obs": "2010-10-11",
+   "last_obs": "2010-10-16",
+   "data_arc_days": 5,
+   "n_obs_used": 70,
+   "condition_code": "6",
+   "rms": 0.47283,
+   "earth_moid_au": 0.000607628,
+   "jupiter_moid_au": 3.81749,
+   "t_jup": 5.859,
+   "availability": {
+    "status": "available",
+    "unavailable": {}
+   }
+  },
+  "physical": {
+   "source": "jpl_sbdb",
+   "absolute_magnitude": 27.6,
+   "estimated_diameter_km": null,
+   "albedo": null,
+   "rotational_period_hr": null,
+   "availability": {
+    "status": "partial",
+    "unavailable": {
+     "estimated_diameter_km": "not_in_source",
+     "albedo": "not_in_source",
+     "rotational_period_hr": "not_in_source"
+    }
+   }
+  },
+  "neows_physical": {
+   "source": "nasa_neows",
+   "absolute_magnitude_h": 27.6,
+   "estimated_diameter_min_km": 0.0080270317,
+   "estimated_diameter_max_km": 0.0179489885,
+   "availability": {
+    "status": "available",
+    "unavailable": {}
+   }
+  },
+  "encounter": {
+   "source": "nasa_neows",
+   "selection_rule": "CLOSEST_OBSERVED_APPROACH",
+   "closest_approach_date": "2026-09-30",
+   "miss_distance_km": 17457205.45180993,
+   "is_potentially_hazardous": false,
+   "close_approach_datetime": "2026-09-30T05:42",
+   "close_approach_epoch_ms": 1790746920000,
+   "relative_velocity_km_s": 4.5115736676,
+   "is_sentry_object": true,
+   "availability": {
+    "status": "available",
+    "unavailable": {}
+   }
+  },
+  "sentry": {
+   "source": "jpl_sentry",
+   "source_contract": "sentry_mode_s_summary",
+   "status": "available",
+   "sentry_id": "bK10T54W",
+   "in_latest_catalog": true,
+   "assessment": {
+    "designation": "2010 TW54",
+    "fullname": "(2010 TW54)",
+    "impact_probability": 6.594578e-05,
+    "potential_impacts_count": 16,
+    "impact_year_range": "2088-2122",
+    "palermo_scale_cum": -5.76,
+    "palermo_scale_max": -6.12,
+    "torino_scale_max": 0,
+    "v_infinity_km_s": 7.76209523793638,
+    "absolute_magnitude": 27.55,
+    "estimated_diameter_km": 0.01,
+    "last_obs_date": "2010-10-16",
+    "last_obs_jd": 2455485.5,
+    "availability": {
+     "status": "available",
+     "unavailable": {}
+    }
+   },
+   "assessment_endpoint": "/asteroids/3548666/sentry"
+  },
+  "provenance": {
+   "neows": {
+    "source": "nasa_neows",
+    "dataset_run_id": null,
+    "source_raw_file": "asteroids_raw.json",
+    "source_raw_sha256": "4cc41e360a82f97c72ca65faa3ee77949f5830f1df27b59d37042ffce518585c"
+   },
+   "resolution": {
+    "source": "entity_resolution",
+    "match_rule": "EXACT_DESIGNATION_MATCH",
+    "resolved_at": "2026-09-28T01:15:26.842071+00:00"
+   },
+   "sbdb": {
+    "source": "jpl_sbdb",
+    "spkid": "50548689",
+    "snapshot_key": "2026-09-26",
+    "run_id": "26b0c1ef0bba",
+    "snapshot_time": "2026-09-26T20:27:39.451638+00:00"
+   },
+   "sentry": {
+    "source": "jpl_sentry",
+    "sentry_id": "bK10T54W",
+    "latest_snapshot_key": "2026-09-26",
+    "run_id": "7d446dc65b5a",
+    "snapshot_time": "2026-09-26T20:15:16.035354+00:00",
+    "latest_catalog_snapshot_key": "2026-09-26"
+   }
+  }
+ }
+}

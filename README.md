@@ -18,6 +18,7 @@ An end-to-end planetary defense data engineering platform that ingests, validate
 - [Analytical Intelligence Layer](#analytical-intelligence-layer)
 - [Interactive Streamlit Dossier](#interactive-streamlit-dossier)
 - [FastAPI Data Serving Layer](#fastapi-data-serving-layer)
+- [Immersive Renderer (M7)](#immersive-renderer-m7)
 - [Production Orchestration](#production-orchestration)
 - [Historical Backfill Semantics](#historical-backfill-semantics)
 - [Data Quality & Reliability Gates](#data-quality--reliability-gates)
@@ -438,6 +439,20 @@ A renderer can be built entirely on two endpoints, without reading Parquet, know
 **Re-deriving NeoWs fields offline.** `python nasa_asteroids.py --from-raw asteroids_raw.json` rebuilds `asteroids.parquet` from an existing raw snapshot without any network call, recording the raw file's SHA-256 (served as `neows.source_raw_sha256`). The raw file is only read.
 
 **Storage shapes.** The processed Parquet (and the Athena `asteroids` table) carries the full NeoWs field set; the CSV, its Athena table and SQLite intentionally keep the original five columns. The API reads only Parquet and serves older 5-column Parquet files, reporting the newer fields as `not_in_current_contract`.
+
+---
+
+## Immersive Renderer (M7)
+
+The new presentation layer lives in [`frontend/`](frontend/): a Three.js + TypeScript renderer that consumes **only** `GET /asteroids/world` (once, at load) and `GET /asteroids/{neows_id}/profile` (on selection). It never reads storage or re-derives backend logic. Architecture, spatial model, state model and lifecycle guarantees are documented in [`frontend/README.md`](frontend/README.md). The Streamlit dashboard remains available as the reference until the renderer is validated.
+
+```bash
+uvicorn api.main:app --host 127.0.0.1 --port 8000   # terminal 1: API
+cd frontend && npm install && npm run dev            # terminal 2: renderer (Node.js LTS)
+# open http://127.0.0.1:5173
+```
+
+Tests: `npm test` (unit/integration), `npm run e2e` (real-browser interaction torture test; starts its own servers).
 
 ---
 
