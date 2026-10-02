@@ -29,6 +29,8 @@ const ARTIFACTS = join(FRONTEND, "e2e", "artifacts");
 const VIEW = { width: 1400, height: 860 };
 const TW54 = "3548666";
 const ST = "3427460";
+/** A resolved SBDB object with no Sentry Mode S record (present-day data fact, not a safety claim). */
+const NO_SENTRY = "3830890";
 
 const report = { steps: [], dataAccuracy: [], console: [], requests: {}, diagnostics: [], states: [], performance: {}, memory: {} };
 const failures = [];
@@ -105,8 +107,15 @@ async function main() {
   // Ground truth straight from the API, never from the UI.
   const worldApi = await (await fetch(`${API}/asteroids/world`)).json();
   const apiById = new Map(worldApi.data.map((r) => [r.neows_id, r]));
+  // Present-day dataset facts: 35 NeoWs objects, every one resolved to SBDB; Sentry Mode S lists only two.
+  if (worldApi.data.length !== 35) failures.push(`expected 35 world objects, API returned ${worldApi.data.length}`);
+  const unresolvedNow = worldApi.data.filter((r) => r.resolution.match_state !== "RESOLVED").map((r) => r.neows_id);
+  if (unresolvedNow.length) failures.push(`expected every world object resolved, unresolved: ${unresolvedNow.join(",")}`);
+  const sentryLinked = worldApi.data.filter((r) => r.sentry.status === "available").map((r) => r.neows_id).sort();
+  if (JSON.stringify(sentryLinked) !== JSON.stringify([ST, TW54].sort())) failures.push(`expected Sentry only on ${ST},${TW54}, got ${sentryLinked.join(",")}`);
+  if (apiById.get(NO_SENTRY)?.sentry.status !== "not_present") failures.push(`${NO_SENTRY} should be resolved with no Sentry record (not_present)`);
   const profiles = {};
-  for (const id of [TW54, ST, "3830890"]) profiles[id] = (await (await fetch(`${API}/asteroids/${id}/profile`)).json()).data;
+  for (const id of [TW54, ST, NO_SENTRY]) profiles[id] = (await (await fetch(`${API}/asteroids/${id}/profile`)).json()).data;
 
   const browser = await chromium.launch({
     executablePath: browserPath(),
@@ -650,12 +659,12 @@ async function main() {
     }
     return null;
   }, [key, label]);
-  const pick = [TW54, ST, worldApi.data.find((r) => r.resolution.match_state === "UNRESOLVED").neows_id];
+  const pick = [TW54, ST, NO_SENTRY];
   for (const id of pick) await page.evaluate((target) => (location.hash = `#/asteroid/${target}`), id);
   await waitFor(async () => (await dbg("profileStatus")) === "ready" && (await dbg("focusProgress")) === 1, "focus on C");
   await sleep(600);
   check((await dbg("selectedId")) === pick[2], `rapid A -> B -> C keeps C (got ${await dbg("selectedId")})`);
-  for (const id of [TW54, ST, "3830890"]) {
+  for (const id of [TW54, ST, NO_SENTRY]) {
     await page.evaluate((target) => (location.hash = `#/asteroid/${target}`), id);
     await waitFor(async () => (await dbg("selectedId")) === id && (await dbg("profileStatus")) === "ready", `focus ${id}`);
     const prof = profiles[id];
@@ -674,12 +683,12 @@ async function main() {
     const sentryShown = prof.sentry.status === "available"
       ? await calloutValue("sentry_assessment", "Linkage")
       : (await page.$$eval(".focus-unavailable", (n) => n.map((x) => x.textContent))).find((t) => t.startsWith("Sentry"));
-    const sentryExpected = prof.sentry.status === "available" ? "Linked Sentry record available" : "Sentry · JPL Sentry — Not linkable: identity not resolved";
+    const sentryExpected = prof.sentry.status === "available" ? "Linked Sentry record available" : "Sentry · JPL Sentry — No Sentry record linked";
     check(sentryShown === sentryExpected, `${id} Sentry state: "${sentryShown}"`);
     report.dataAccuracy.push({ view: "focus", neows_id: id, field: "sentry", api: prof.sentry.status, shown: sentryShown });
     if (id === TW54) await page.screenshot({ path: join(ARTIFACTS, "state5-focus.png") });
   }
-  step("16. callouts match the API for three objects (and rapid A -> B -> C keeps C)");
+  step("16. callouts match the API for a Sentry-linked pair and a resolved no-Sentry-record object (and rapid A -> B -> C keeps C)");
 
   // ── 17-18. Return: same exploration distance, same states, nothing re-falls ──────────────
   await page.keyboard.press("Escape");
