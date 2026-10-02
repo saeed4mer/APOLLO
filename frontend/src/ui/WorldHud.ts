@@ -6,7 +6,7 @@ import { el } from "./dom";
 
 /** Product identity. The subtitle is fixed text: shown exactly as written, on one line. */
 export const PRODUCT_NAME = "APOLLO";
-export const PRODUCT_SUBTITLE = "Asteroid Proximity & Orbital Logistics Lookout Operation";
+export const PRODUCT_SUBTITLE = "Asteroid Proximity & Orbital Location, Linkage & Observation";
 
 const titleBlock = (className: string): HTMLElement =>
   el("div", { className }, [

@@ -24,12 +24,12 @@ const frames = (n: number) => {
 describe("APOLLO title", () => {
   it("shows APOLLO with the subtitle exactly as written, in the opening title and the docked wordmark", () => {
     expect(PRODUCT_NAME).toBe("APOLLO");
-    expect(PRODUCT_SUBTITLE).toBe("Asteroid Proximity & Orbital Logistics Lookout Operation");
+    expect(PRODUCT_SUBTITLE).toBe("Asteroid Proximity & Orbital Location, Linkage & Observation");
     const hud = new WorldHud(() => {});
     for (const selector of [".brand-hero", ".brand-docked"]) {
       const block = hud.element.querySelector(selector)!;
       expect(block.querySelector(".brand-name")!.textContent).toBe("APOLLO");
-      expect(block.querySelector(".brand-subtitle")!.textContent).toBe("Asteroid Proximity & Orbital Logistics Lookout Operation");
+      expect(block.querySelector(".brand-subtitle")!.textContent).toBe("Asteroid Proximity & Orbital Location, Linkage & Observation");
     }
     expect(hud.element.querySelector("h1")?.textContent).toBe("APOLLO");
     expect(hud.element.textContent).not.toContain("ASTEROID INTELLIGENCE");

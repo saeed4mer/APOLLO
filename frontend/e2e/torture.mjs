@@ -293,7 +293,7 @@ async function main() {
   check(sky0.zenith && sky0.zenith[2] > sky0.zenith[0] && luminance(sky0.zenith) > 120, `initial background is sky blue: ${sky0.zenith}`);
   check(await page.isVisible(".intro"), "title and scroll hint visible");
   // APOLLO identity: exact texts, subtitle on ONE line, wordmark docked only once the journey starts.
-  const SUBTITLE = "Asteroid Proximity & Orbital Logistics Lookout Operation";
+  const SUBTITLE = "Asteroid Proximity & Orbital Location, Linkage & Observation";
   const hero = await page.$eval(".brand-hero", (n) => {
     const sub = n.querySelector(".brand-subtitle");
     const range = document.createRange();

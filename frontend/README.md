@@ -1,10 +1,12 @@
-# APOLLO renderer — Asteroid Proximity & Orbital Logistics Lookout Operation (M7)
+# APOLLO frontend / renderer
 
-An immersive, source-grounded view of the platform's asteroid intelligence: Earth's curved horizon
-below, the asteroid field in the sky above, and a scroll-driven journey from sky into space. The
-renderer is a **consumer of the FastAPI serving layer only**: it never reads Parquet/SQLite, never
-imports Python modules, never re-derives directions, resolution or Sentry membership, and holds no
-credentials.
+**APOLLO — Asteroid Proximity & Orbital Location, Linkage & Observation**
+
+The APOLLO frontend is an immersive, source-grounded view of the real near-Earth asteroid population:
+Earth's curved horizon below, the asteroid field above, and a scroll-driven journey outward from Earth
+through a distance world. It is a **consumer of the FastAPI serving layer only**: it never reads
+Parquet/SQLite, never imports Python modules, never re-derives directions, resolution or Sentry
+membership, and holds no credentials.
 
 ```
 Browser ─▶ src/app.ts ─▶ src/api/client.ts ─▶ /api (Vite proxy) ─▶ FastAPI
@@ -26,6 +28,10 @@ npm install
 npm run dev            # http://127.0.0.1:5173  (proxies /api -> 127.0.0.1:8000)
 ```
 
+The app is served by the Vite development server. `npm run build` produces a static bundle in
+`dist/`; serving it in production (and pointing `VITE_API_BASE_URL` at a deployed API) is not
+configured in this repository.
+
 `VITE_API_BASE_URL` (default `/api`) is the single API location setting (`src/config.ts`).
 `ASTEROID_API_TARGET` changes where the dev proxy forwards. Because the dev server proxies the API,
 browser and API share one origin: **no CORS is configured**.
@@ -42,13 +48,13 @@ names `SYNTHETIC …`, red banner) for performance testing. It does not exist in
 
 ## Technology decision
 
-**Three.js + TypeScript + Vite, plain DOM for UI.** Instanced rendering, raycast picking, full
+**Three.js + TypeScript + Vite, plain DOM for UI.** Instanced rendering, screen-space picking, full
 camera/loop control, first-class types. No UI framework: one module owns the single animation frame
-and every listener has an explicit `dispose()`. (Rejected: Babylon.js, deck.gl, CesiumJS,
-react-three-fiber; see M7.1 report.) Dependencies are exact-pinned: `three` at runtime; `typescript`,
+and every listener has an explicit `dispose()`. (Alternatives considered and not used: Babylon.js,
+deck.gl, CesiumJS, react-three-fiber.) Dependencies are exact-pinned: `three` at runtime; `typescript`,
 `vite`, `vitest`, `jsdom`, `@types/three`, `playwright-core` for development.
 
-## Scene composition (M7.2): the distance world
+## Scene composition: the distance world
 
 The distance field is a **long virtual world**, not a chart fitted to the screen:
 
@@ -72,7 +78,7 @@ trees/houses/people) · fall trails · asteroid rocks · PHA badges · focus glo
 | Horizontal (illustrative) | Longitude of the served `illustrative_direction`: `atan2(y, x) / π` (projection `longitude-fan-v1`). The served vector is used as-is, never regenerated; latitude (z) is unused | `scene/skyLayout.ts` |
 | Appearance | Every asteroid: same low-poly rock and on-screen size (size encodes nothing); facts are text | `renderer/WorldRenderer.ts` |
 | Sentry gold | **Gold** (muted gold rock, thin gold rim, soft radial halo) marks an **actual JPL Sentry link**, read only from the served `sentry.status` (`available` or `linked_no_record`, the API's own definition of linked; `isSentryLinked`). Never derived from PHA or any other field. Same size and position as any other asteroid; the rim/halo give way in focus; hover shows a small SENTRY LINKED tag. In the current data: 2008 ST and 2010 TW54 | `models/world.ts`, `renderer/WorldRenderer.ts`, `ui/HoverTooltip.ts` |
-| Title | **APOLLO** — *Asteroid Proximity & Orbital Logistics Lookout Operation* (one line): a centred opening title that cross-fades into a docked top-left wordmark for the journey (hidden during focus) | `ui/WorldHud.ts` |
+| Title | **APOLLO** — *Asteroid Proximity & Orbital Location, Linkage & Observation* (one line): a centred opening title that cross-fades into a docked top-left wordmark for the journey (hidden during focus) | `ui/WorldHud.ts` |
 | Hazard badge | A small ⚠ beside the rock **only** when NeoWs `is_potentially_hazardous === true` (not for `false`, not for `null`). It is the NeoWs PHA flag, not an impact prediction, Sentry result or risk score; nothing else encodes hazard | `renderer/WorldRenderer.ts` |
 | Trail | Only while falling; identical for every asteroid; a visual metaphor for approach, not a trajectory | `renderer/WorldRenderer.ts` |
 | Moon landmark | A visual Moon on a dashed arc at the world height of 384,400 km, labelled "MOON DISTANCE / 384,400 km" (to its left). **Hidden until the frontier reaches 384,400 km** (progress 0.16, the night transition), fading in over 0.015 progress; it is then passed and leaves the viewport (~6M km), and returns when scrolling back. Context, not data: not a record, no direction semantics, never uses `illustrative_direction` | `scene/atmosphere.ts`, `renderer/WorldRenderer.ts` |
