@@ -862,10 +862,11 @@ cd frontend && npm install && npm run dev   # with the API running; open http://
   - Renderer serving contracts (`GET /asteroids/world`, `GET /asteroids/{id}/profile`) and normalized NeoWs fields
   - APOLLO, a TypeScript / Three.js renderer consuming only those endpoints (see [`frontend/README.md`](frontend/README.md))
 
-- **M8: Repository finalization — in progress**
+- **M8: Repository finalization — COMPLETE**
   - The M5 Streamlit dossier (`dashboard.py`) and its UI tests were retired; the data-access provider (`dashboard_data.py`) remains the API's provider
   - Documentation updated to the FastAPI → APOLLO architecture
   - All 35 NeoWs objects enriched from SBDB with identity resolution (designation, full-name and alternate-designation rules) and a Sentry Mode S crosswalk (2 of 35 linked; the rest have no Sentry record)
+  - Final validation: 663 Python tests, 158 frontend tests, Ruff, typecheck, production build, API validation and the browser/E2E test all pass
 
 ### Parked / Future Architectural Roadmap
 *The following items are explicitly parked and represent future potential enhancements:*
