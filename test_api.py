@@ -2814,10 +2814,36 @@ def test_world_route_not_captured_by_neows_id_route(mock_client: TestClient):
     WorldResponse.model_validate(resp.json())
 
 
-def test_world_route_registered_before_neows_id_route():
-    """Starlette matches in registration order; the static world path must come first."""
-    paths = [getattr(r, "path", None) for r in create_app().routes]
-    assert paths.index("/asteroids/world") < paths.index("/asteroids/{neows_id}")
+def test_world_route_registered_before_neows_id_route(mock_client: TestClient):
+    """The static /asteroids/world path takes precedence over /asteroids/{neows_id}.
+
+    Asserted through observable behaviour (HTTP responses and the OpenAPI document), not by
+    inspecting FastAPI/Starlette route objects, whose structure differs between versions.
+    """
+    # /asteroids/world resolves to the world endpoint: the world envelope, not a NeoWs object.
+    world_resp = mock_client.get("/asteroids/world")
+    assert world_resp.status_code == 200
+    world_body = world_resp.json()
+    WorldResponse.model_validate(world_body)
+    assert {"meta", "world", "data"} <= world_body.keys()
+    assert "resolution" not in world_body  # the single-asteroid envelope would carry one
+
+    # /asteroids/{neows_id} still resolves a real asteroid: the single-object envelope.
+    detail_resp = mock_client.get("/asteroids/3548666")
+    assert detail_resp.status_code == 200
+    detail_body = detail_resp.json()
+    AsteroidDetailResponse.model_validate(detail_body)
+    assert detail_body["data"]["neows_id"] == "3548666"
+    assert "world" not in detail_body  # ... and is not the world snapshot
+
+    # The two routes are distinct: "world" is never treated as an ID (422 pattern rejection), and
+    # a malformed ID is still rejected by the dynamic route's own validation.
+    assert world_resp.status_code != 422
+    assert mock_client.get("/asteroids/abc").status_code == 422
+
+    # The documented API lists the static path before the dynamic one.
+    paths = list(mock_client.get("/openapi.json").json()["paths"])
+    assert paths.index("/asteroids") < paths.index("/asteroids/world") < paths.index("/asteroids/{neows_id}")
 
 
 # ============================================================================
