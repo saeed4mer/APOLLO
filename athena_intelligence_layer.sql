@@ -29,7 +29,8 @@ CREATE EXTERNAL TABLE IF NOT EXISTS nasa_asteroids.fact_sbdb_object_snapshot (
     orbit_class_code STRING,
     orbit_class_name STRING,
     orbit_id STRING,
-    prefix STRING
+    prefix STRING,
+    alternate_designations ARRAY<STRING>  -- SBDB object.des_alt; NULL = not captured (older snapshots)
 )
 PARTITIONED BY (
     year STRING,

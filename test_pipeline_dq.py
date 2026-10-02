@@ -262,6 +262,51 @@ def test_sbdb_ingestion_success(tmp_path):
     assert results[1].status == DQStatus.PASSED
 
 
+def test_sbdb_ingestion_accounts_for_same_object_duplicate_targets(tmp_path):
+    """3 targets, 2 distinct SPK-IDs: one duplicate target is neither a success row nor a failure.
+
+    successful (2) == object rows (2), and successful + failed + duplicate == total (3)."""
+    summary_file = tmp_path / "sbdb_batch_summary.json"
+    summary_file.write_text(json.dumps({
+        "run_id": "run_sbdb_dup",
+        "total_targets": 3,
+        "successful_targets_count": 2,
+        "failed_targets_count": 0,
+        "duplicate_targets_count": 1,
+        "duplicate_targets": [{"target": "3629117", "spkid": "50092353"}],
+        "failure_rate_pct": 0.0,
+        "circuit_breaker_passed": True,
+    }), encoding="utf-8")
+    write_parquet(
+        tmp_path / "fact_sbdb_object_snapshot.parquet",
+        [{"spkid": "50092353", "snapshot_key": "2026-10-02"}, {"spkid": "50548689", "snapshot_key": "2026-10-02"}],
+    )
+    results = check_sbdb_ingestion(str(summary_file), base_dir=str(tmp_path))
+    by_name = {r.check_name: r for r in results}
+    assert by_name["sbdb_circuit_breaker"].status == DQStatus.PASSED
+    assert by_name["sbdb_circuit_breaker"].metrics["duplicate_targets_count"] == 1
+    assert by_name["sbdb_ingestion_lineage"].status == DQStatus.PASSED
+
+
+def test_sbdb_ingestion_rejects_unaccounted_targets(tmp_path):
+    """Without the duplicate count, 2 successes of 3 targets with 0 failures does not reconcile."""
+    summary_file = tmp_path / "sbdb_batch_summary.json"
+    summary_file.write_text(json.dumps({
+        "run_id": "run_sbdb_gap",
+        "total_targets": 3,
+        "successful_targets_count": 2,
+        "failed_targets_count": 0,
+        "failure_rate_pct": 0.0,
+        "circuit_breaker_passed": True,
+    }), encoding="utf-8")
+    write_parquet(
+        tmp_path / "fact_sbdb_object_snapshot.parquet",
+        [{"spkid": "50092353", "snapshot_key": "2026-10-02"}, {"spkid": "50548689", "snapshot_key": "2026-10-02"}],
+    )
+    results = check_sbdb_ingestion(str(summary_file), base_dir=str(tmp_path))
+    assert {r.check_name: r for r in results}["sbdb_circuit_breaker"].status == DQStatus.FAILED
+
+
 def test_sbdb_ingestion_ignores_child_table_integrity_boundary_isolation(tmp_path):
     """Boundary isolation: check-ingestion validates object count, NOT child table integrity."""
     summary_file = tmp_path / "sbdb_batch_summary.json"

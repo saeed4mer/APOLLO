@@ -917,6 +917,47 @@ _FIXTURE_SENTRY = [
     },
 ]
 
+# Real SBDB identity fields for the 34 distinct SBDB objects behind the 35 NeoWs fixture records
+# (JPL SBDB API, sstr=<neows id>&alt-des=1; snapshot 2026-10-02, run 0c3a5360819b). NeoWs 3092330 (2001 SY169)
+# and 3629117 (2013 ET) are the same SBDB object; numbered asteroids carry their number as `des`.
+_FIXTURE_SBDB_IDENTITIES_ALL35 = [
+    {"spkid": "20138971", "designation": "138971", "fullname": "138971 (2001 CB21)", "alternate_designations": ['2001 CB21']},
+    {"spkid": "20376848", "designation": "376848", "fullname": "376848 (2001 RY47)", "alternate_designations": ['2001 RY47']},
+    {"spkid": "20499496", "designation": "499496", "fullname": "499496 (2010 MR87)", "alternate_designations": ['2010 MR87']},
+    {"spkid": "20523934", "designation": "523934", "fullname": "523934 (1998 FF14)", "alternate_designations": ['2005 FF', '1998 FF14']},
+    {"spkid": "50092353", "designation": "2001 SY169", "fullname": "(2001 SY169)", "alternate_designations": ['2013 ET']},
+    {"spkid": "50132530", "designation": "2002 PN6", "fullname": "(2002 PN6)", "alternate_designations": []},
+    {"spkid": "50256342", "designation": "2004 TB10", "fullname": "(2004 TB10)", "alternate_designations": []},
+    {"spkid": "50291247", "designation": "2005 SP9", "fullname": "(2005 SP9)", "alternate_designations": []},
+    {"spkid": "50427483", "designation": "2008 ST", "fullname": "(2008 ST)", "alternate_designations": []},
+    {"spkid": "50430327", "designation": "2008 TX3", "fullname": "(2008 TX3)", "alternate_designations": []},
+    {"spkid": "50448133", "designation": "2009 DC12", "fullname": "(2009 DC12)", "alternate_designations": []},
+    {"spkid": "50548689", "designation": "2010 TW54", "fullname": "(2010 TW54)", "alternate_designations": []},
+    {"spkid": "50616725", "designation": "2012 VT6", "fullname": "(2012 VT6)", "alternate_designations": []},
+    {"spkid": "50648768", "designation": "2013 TL", "fullname": "(2013 TL)", "alternate_designations": []},
+    {"spkid": "50666700", "designation": "2014 FR37", "fullname": "(2014 FR37)", "alternate_designations": []},
+    {"spkid": "50682490", "designation": "2014 QJ33", "fullname": "(2014 QJ33)", "alternate_designations": []},
+    {"spkid": "50689041", "designation": "2014 RX22", "fullname": "(2014 RX22)", "alternate_designations": []},
+    {"spkid": "50691116", "designation": "2014 SQ260", "fullname": "(2014 SQ260)", "alternate_designations": []},
+    {"spkid": "50692583", "designation": "2014 TU", "fullname": "(2014 TU)", "alternate_designations": []},
+    {"spkid": "50713341", "designation": "2015 EQ7", "fullname": "(2015 EQ7)", "alternate_designations": []},
+    {"spkid": "50717062", "designation": "2015 HA10", "fullname": "(2015 HA10)", "alternate_designations": []},
+    {"spkid": "50747521", "designation": "2016 FB", "fullname": "(2016 FB)", "alternate_designations": []},
+    {"spkid": "50748441", "designation": "2016 FL12", "fullname": "(2016 FL12)", "alternate_designations": []},
+    {"spkid": "50753814", "designation": "2016 LY8", "fullname": "(2016 LY8)", "alternate_designations": []},
+    {"spkid": "50773775", "designation": "2017 GK4", "fullname": "(2017 GK4)", "alternate_designations": []},
+    {"spkid": "50803932", "designation": "2018 HN", "fullname": "(2018 HN)", "alternate_designations": []},
+    {"spkid": "50825001", "designation": "2018 KS", "fullname": "(2018 KS)", "alternate_designations": []},
+    {"spkid": "50825123", "designation": "2018 LC1", "fullname": "(2018 LC1)", "alternate_designations": []},
+    {"spkid": "50830874", "designation": "2018 SD1", "fullname": "(2018 SD1)", "alternate_designations": []},
+    {"spkid": "50830913", "designation": "2018 SP2", "fullname": "(2018 SP2)", "alternate_designations": []},
+    {"spkid": "50838882", "designation": "2019 DJ1", "fullname": "(2019 DJ1)", "alternate_designations": []},
+    {"spkid": "50843635", "designation": "2019 QY1", "fullname": "(2019 QY1)", "alternate_designations": []},
+    {"spkid": "50869376", "designation": "2019 SD7", "fullname": "(2019 SD7)", "alternate_designations": []},
+    {"spkid": "50872644", "designation": "2019 SH7", "fullname": "(2019 SH7)", "alternate_designations": []},
+]
+
+
 _DETERMINISTIC_LAKEHOUSE_SPECS = [
     ("asteroids.parquet", _FIXTURE_ASTEROIDS, ASTEROID_SCHEMA),
     (

@@ -36,6 +36,8 @@ def execute_sql_file(conn, file_path: Path, frozen_now: str = "2026-09-27T00:00:
         clean_stmt = re.sub(r"\)\s*PARTITIONED\s+BY\s*\(([^)]*)\)", r", \1)", clean_stmt, flags=re.IGNORECASE)
         clean_stmt = re.sub(r"PARTITIONED\s+BY\s*\([^)]*\)", "", clean_stmt, flags=re.IGNORECASE)
         clean_stmt = re.sub(r"\bEXTERNAL\b", "", clean_stmt, flags=re.IGNORECASE)
+        # Athena ARRAY<STRING> (SBDB alternate_designations) -> DuckDB list type
+        clean_stmt = re.sub(r"\bARRAY\s*<\s*STRING\s*>", "VARCHAR[]", clean_stmt, flags=re.IGNORECASE)
         clean_stmt = re.sub(r"\bNOW\(\)", f"CAST('{frozen_now}' AS TIMESTAMP)", clean_stmt, flags=re.IGNORECASE)
         # DuckDB compatibility: quote reserved keyword identifier 'desc' in table column definitions
         clean_stmt = re.sub(

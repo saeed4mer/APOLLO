@@ -47,6 +47,8 @@ from dashboard_data import DashboardDataProvider
 from entity_resolution import (
     BRIDGE_ASTEROID_IDENTIFIER_SCHEMA,
     FACT_ENTITY_RESOLUTION_SCHEMA,
+    resolve_entities,
+    save_resolution_outputs,
 )
 from nasa_asteroids import ASTEROID_SCHEMA
 from nasa_sbdb import (
@@ -63,6 +65,7 @@ from test_data_provider import (
     _FIXTURE_SBDB_ELEM,
     _FIXTURE_SBDB_OBJ,
     _FIXTURE_SBDB_ORB,
+    _FIXTURE_SBDB_IDENTITIES_ALL35,
     _FIXTURE_SBDB_PHYS,
     _FIXTURE_SENTRY,
 )
@@ -3473,10 +3476,13 @@ def test_world_real_local_lakehouse():
     for nid, rec in recs.items():
         assert rec["encounter"]["miss_distance_km"] == source[nid]
     resolved = {nid for nid, r in recs.items() if r["resolution"]["match_state"] == "RESOLVED"}
-    assert {_TW54_NEOWS, _ST_NEOWS} <= resolved
+    assert resolved == set(source)  # M8: every NeoWs object resolves to SBDB
     for nid in resolved:
         assert recs[nid]["sbdb"]["status"] == "available"
-        assert recs[nid]["sentry"]["status"] == "available"
+    # SBDB-resolved is not Sentry-linked: only the crosswalked Mode S listings are "available".
+    linked = {nid for nid, r in recs.items() if r["sentry"]["status"] == "available"}
+    assert linked == {_TW54_NEOWS, _ST_NEOWS}
+    assert all(recs[nid]["sentry"]["status"] == "not_present" for nid in resolved - linked)
     _assert_world_matches_per_object_endpoints(client)
 
 
@@ -3924,12 +3930,14 @@ def test_profile_real_local_lakehouse():
         assert prof["sentry"]["status"] == "available"
         assert prof["orbit"]["ascending_node_longitude_deg"] is not None
         _assert_profile_matches_existing_endpoints(client, neows_id)
-    unresolved = sorted(nid for nid, r in world.items() if r["resolution"]["match_state"] != "RESOLVED")
-    assert len(unresolved) == 33
-    for neows_id in unresolved:
+    # M8: all 35 resolve to SBDB (the unresolved profile path is covered on the fixture lakehouse).
+    assert all(r["resolution"]["match_state"] == "RESOLVED" for r in world.values())
+    for neows_id in sorted(set(world) - {_TW54_NEOWS, _ST_NEOWS}):
         prof = _profile(client, neows_id)
-        assert prof["orbit"]["availability"]["status"] == "unavailable"
+        assert prof["orbit"]["availability"]["status"] == "available", neows_id
         assert prof["encounter"]["miss_distance_km"] == world[neows_id]["encounter"]["miss_distance_km"]
+        assert prof["sentry"]["status"] == "not_present", neows_id  # no Mode S listing: no assessment, not "safe"
+        assert all(v is None for k, v in prof["sentry"]["assessment"].items() if k != "availability")
 
 
 # ============================================================================
@@ -4616,8 +4624,10 @@ def test_final_contract_real_data_end_to_end():
         else:
             assert all(v is None for k, v in prof["sentry"]["assessment"].items() if k != "availability")
 
-    # Present-day facts of the local dataset (not architectural assumptions).
-    assert resolved == linked == {_TW54_NEOWS, _ST_NEOWS}
+    # Present-day facts of the local dataset (not architectural assumptions): after the M8 SBDB
+    # backfill every NeoWs object resolves; Mode S lists only 2008 ST and 2010 TW54.
+    assert resolved == set(neows)
+    assert linked == {_TW54_NEOWS, _ST_NEOWS}
 
 
 @pytest.mark.skipif(
@@ -4625,7 +4635,10 @@ def test_final_contract_real_data_end_to_end():
     reason="Local Parquet lakehouse not present (gitignored; absent in CI).",
 )
 def test_final_query_budget_on_real_data():
-    """World: 1 connection, 1 query. Profile: 3 connections resolved, 1 connection + 1 query unresolved."""
+    """World: 1 connection, 1 query. Profile of a resolved object: 3 connections, Sentry-linked or not.
+
+    (Every real object is resolved after M8; the unresolved 1 connection + 1 query budget is asserted
+    on the fixture lakehouse.)"""
     executed, opened, served = _instrumented_world_call(_REAL_LAKEHOUSE)
     assert (opened, len(executed)) == (1, 1) and served > 0
 
@@ -4642,11 +4655,89 @@ def test_final_query_budget_on_real_data():
         with patch.object(LocalDuckDBDataProvider, "_get_connection", counting_connect):
             _profile(_client_for(_REAL_LAKEHOUSE), neows_id)
         counts.append((opened_box[0], len(log)))
-    assert counts[0][0] == 3
-    assert counts[1] == (1, 1)
+    assert counts[0][0] == 3  # 2010 TW54: resolved, Sentry-linked
+    assert counts[1][0] == 3  # 138971 (2001 CB21): resolved, no Sentry link
 
 
 def test_forbidden_key_guard_is_token_based():
     assert _is_forbidden_key("impact_solution_count") and _is_forbidden_key("danger_score")
     assert _is_forbidden_key("impact_energy_mt") and _is_forbidden_key("impact_dates")
     assert not _is_forbidden_key("resolution") and not _is_forbidden_key("match_rule")
+
+
+# ============================================================================
+# M8 — ALL 35 NeoWs OBJECTS THROUGH SBDB RESOLUTION, SENTRY CROSSWALK AND SERVING
+# ============================================================================
+
+
+@pytest.fixture
+def all35_client(tmp_path: Path) -> TestClient:
+    """A clean-room lakehouse for the real 35 NeoWs records with the real SBDB identities of the
+    same objects (one coherent snapshot), crosswalked by the real entity-resolution code."""
+    snapshot = {"snapshot_key": "2026-10-02", "run_id": "m8run000001", "snapshot_time": "2026-10-02T12:00:00+00:00"}
+    sbdb_rows = [{**snapshot, **identity} for identity in _FIXTURE_SBDB_IDENTITIES_ALL35]
+    pq.write_table(pa.Table.from_pylist(_FIXTURE_ASTEROIDS, schema=ASTEROID_SCHEMA), tmp_path / "asteroids.parquet")
+    pq.write_table(pa.Table.from_pylist(sbdb_rows, schema=SBDB_OBJECT_SCHEMA), tmp_path / "fact_sbdb_object_snapshot.parquet")
+    for name, schema in (("fact_sbdb_orbit", SBDB_ORBIT_SCHEMA), ("fact_sbdb_orbit_element", SBDB_ORBIT_ELEMENT_SCHEMA),
+                         ("fact_sbdb_physical_parameter", SBDB_PHYS_PAR_SCHEMA)):
+        pq.write_table(pa.Table.from_pylist([], schema=schema), tmp_path / f"{name}.parquet")
+    pq.write_table(pa.Table.from_pylist(_FIXTURE_SENTRY, schema=SENTRY_RISK_SNAPSHOT_SCHEMA), tmp_path / "fact_sentry_risk_snapshot.parquet")
+    bridge, audit, _ = resolve_entities(_FIXTURE_ASTEROIDS, sbdb_rows, _FIXTURE_SENTRY, run_id="m8resolve001")
+    save_resolution_outputs(bridge, audit, str(tmp_path))
+    return TestClient(create_app(provider=DashboardDataProvider(base_dir=tmp_path, execution_mode="LOCAL")))
+
+
+def test_all35_world_every_object_resolved_with_explicit_sbdb_and_sentry_outcomes(all35_client: TestClient):
+    resp = all35_client.get("/asteroids/world")
+    assert resp.status_code == 200
+    body = resp.json()
+    WorldResponse.model_validate(body)
+    records = {r["neows_id"]: r for r in body["data"]}
+    assert set(records) == {r["id"] for r in _FIXTURE_ASTEROIDS} and len(records) == 35
+
+    for nid, r in records.items():
+        assert r["resolution"]["match_state"] == "RESOLVED", nid
+        assert r["sbdb"]["status"] == "available" and r["sbdb"]["spkid"], nid
+        assert (r["sbdb"]["snapshot_key"], r["sbdb"]["run_id"]) == ("2026-10-02", "m8run000001"), nid  # one coherent snapshot
+        d = r["illustrative_direction"]
+        assert (d["x"], d["y"], d["z"]) == illustrative_direction(nid)  # direction unchanged: seeded by neows_id only
+    assert body["world"]["spatial_model"]["direction_algorithm"] == ILLUSTRATIVE_DIRECTION_ALGORITHM
+
+    sentry_available = sorted(nid for nid, r in records.items() if r["sentry"]["status"] == "available")
+    assert sentry_available == ["3427460", "3548666"]  # 2008 ST, 2010 TW54: the only Mode S listings
+    for nid, r in records.items():
+        if nid not in sentry_available:
+            # Resolved, but no Sentry link: "not_present", with nothing that could read as "safe".
+            assert r["sentry"] == {"status": "not_present", "sentry_id": None, "latest_snapshot_key": None,
+                                   "run_id": None, "in_latest_catalog": None}, nid
+    pha_true = [nid for nid, r in records.items() if r["encounter"]["is_potentially_hazardous"] is True]
+    assert len(pha_true) == 5 and not set(pha_true) & set(sentry_available)  # PHA is not Sentry linkage
+
+    # Numbered asteroids now carry their real SPK-ID; 2001 SY169 and 2013 ET are one SBDB object.
+    assert records["2138971"]["sbdb"]["spkid"] == "20138971"
+    assert records["3092330"]["asteroid_key"] == records["3629117"]["asteroid_key"]
+    assert records["3092330"]["sbdb"]["spkid"] == records["3629117"]["sbdb"]["spkid"] == "50092353"
+
+
+def test_all35_profiles_keep_source_provenance_and_unknown_is_not_false(all35_client: TestClient):
+    numbered = all35_client.get("/asteroids/2138971/profile")
+    assert numbered.status_code == 200
+    AsteroidProfileResponse.model_validate(numbered.json())
+    data = numbered.json()["data"]
+    assert data["identity"]["match_state"] == "RESOLVED"
+    assert data["identity"]["sbdb_spkid"] == "20138971"
+    assert data["encounter"]["is_potentially_hazardous"] is True  # NeoWs PHA flag served as published...
+    sentry = data["sentry"]
+    assert sentry["status"] == "not_present"  # ...and is not Sentry linkage
+    assert sentry["sentry_id"] is None and sentry["in_latest_catalog"] is None
+    assessment = {k: v for k, v in sentry["assessment"].items() if k != "availability"}
+    assert all(v is None for v in assessment.values())  # no assessment is null, never zero / "safe"
+    assert sentry["assessment"]["availability"]["status"] == "unavailable"
+
+    alt = all35_client.get("/asteroids/3629117/profile").json()["data"]
+    assert alt["identity"]["name"] == "(2013 ET)"  # the NeoWs name is kept as published
+    assert alt["identity"]["sbdb_spkid"] == "50092353"
+
+    linked = all35_client.get("/asteroids/3548666/profile").json()["data"]
+    assert linked["sentry"]["status"] == "available"
+    assert linked["sentry"]["sentry_id"] == "bK10T54W"

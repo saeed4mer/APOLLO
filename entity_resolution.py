@@ -66,6 +66,8 @@ RULE_CANONICAL_EXTERNAL_PIVOT = "CANONICAL_EXTERNAL_PIVOT"
 RULE_CANONICAL_ASSOCIATED_ID = "CANONICAL_ASSOCIATED_IDENTIFIER"
 RULE_EXACT_SPKID = "EXACT_SPKID_MATCH"
 RULE_EXACT_DESIGNATION = "EXACT_DESIGNATION_MATCH"
+RULE_EXACT_FULLNAME = "EXACT_FULLNAME_MATCH"
+RULE_ALTERNATE_DESIGNATION = "ALTERNATE_DESIGNATION_MATCH"
 RULE_ASSOCIATED_NEOWS_NAME = "ASSOCIATED_NAME_VIA_SPKID"
 RULE_ASSOCIATED_SENTRY_ID = "ASSOCIATED_SENTRY_ID_VIA_DESIGNATION"
 RULE_ASSOCIATED_SENTRY_NAME = "ASSOCIATED_NAME_VIA_DESIGNATION"
@@ -164,8 +166,13 @@ def resolve_entities(
     Resolves NeoWs and Sentry records to canonical SBDB asteroid entities using:
     1. Primary match rule: NeoWs.id == SBDB.spkid (EXACT_SPKID_MATCH)
     2. Secondary match rule: NeoWs.name == SBDB.des (EXACT_DESIGNATION_MATCH)
-    3. Secondary match rule: Sentry.des == SBDB.des (EXACT_DESIGNATION_MATCH)
-    4. Global DQ invariant: (source_system, identifier_name, identifier_value) -> at most one asteroid_key
+    3. Fallback, only when rule 2 finds no SBDB entity, using SBDB's own identity fields:
+       NeoWs.name == SBDB.fullname (EXACT_FULLNAME_MATCH; e.g. numbered "138971 (2001 CB21)")
+       or NeoWs.name in SBDB.alternate_designations (ALTERNATE_DESIGNATION_MATCH; e.g. a later
+       provisional designation SBDB links to an earlier one). Candidates that point to more than
+       one SPK-ID are quarantined as AMBIGUOUS, exactly like rule 2.
+    4. Secondary match rule: Sentry.des == SBDB.des (EXACT_DESIGNATION_MATCH)
+    5. Global DQ invariant: (source_system, identifier_name, identifier_value) -> at most one asteroid_key
 
     Returns:
         (bridge_records, fact_resolution_records, metrics_dict)
@@ -192,6 +199,9 @@ def resolve_entities(
     # Indexes for the canonical hub (SBDB)
     sbdb_by_spkid: dict[str, dict] = {}
     sbdb_by_norm_des: dict[str, list[dict]] = defaultdict(list)
+    # Fallback identity indexes (exact, normalized): SBDB full name and SBDB alternate designations.
+    sbdb_by_norm_fullname: dict[str, list[dict]] = defaultdict(list)
+    sbdb_by_norm_alt_des: dict[str, list[dict]] = defaultdict(list)
     conflicting_sbdb_spkids: set[str] = set()
 
     # -----------------------------------------------------------------------
@@ -258,6 +268,12 @@ def resolve_entities(
         sbdb_by_spkid[clean_spkid] = entity
         if norm_des:
             sbdb_by_norm_des[norm_des].append(entity)
+        if clean_fullname:
+            sbdb_by_norm_fullname[normalize_designation(clean_fullname)].append(entity)
+        for alt_des in record.get("alternate_designations") or []:
+            norm_alt = normalize_designation(alt_des) if isinstance(alt_des, str) else ""
+            if norm_alt and norm_alt != norm_des:
+                sbdb_by_norm_alt_des[norm_alt].append(entity)
 
         # Primary pivot audit & bridge
         spkid_evidence = {"pivot": "canonical_external_pivot", "spkid": clean_spkid}
@@ -429,9 +445,22 @@ def resolve_entities(
             # Clean ID is not in SBDB SPK-ID index: attempt secondary exact designation match
             norm_name = normalize_designation(clean_name) if clean_name else None
             candidates = sbdb_by_norm_des.get(norm_name, []) if norm_name else []
+            secondary_rule = RULE_EXACT_DESIGNATION
+            matched_field = "des"
+
+            if not candidates and norm_name:
+                # Fallback: SBDB full name, then SBDB alternate designations (exact, normalized).
+                by_fullname = sbdb_by_norm_fullname.get(norm_name, [])
+                by_alt = sbdb_by_norm_alt_des.get(norm_name, [])
+                distinct = {c["spkid"]: c for c in [*by_fullname, *by_alt]}
+                candidates = list(distinct.values())
+                if by_fullname:
+                    secondary_rule, matched_field = RULE_EXACT_FULLNAME, "fullname"
+                elif by_alt:
+                    secondary_rule, matched_field = RULE_ALTERNATE_DESIGNATION, "alternate_designation"
 
             if len(candidates) == 1:
-                # Case A: Exactly one SBDB entity matches normalized designation
+                # Case A: Exactly one SBDB entity matches
                 matched_entity = candidates[0]
                 target_key = matched_entity["asteroid_key"]
                 target_spkid = matched_entity["spkid"]
@@ -442,8 +471,10 @@ def resolve_entities(
                     "matched_spkid": target_spkid,
                     "name": clean_name,
                     "normalized_designation": norm_name,
-                    "resolution_rule": RULE_EXACT_DESIGNATION,
+                    "resolution_rule": secondary_rule,
                 }
+                if matched_field != "des":
+                    neows_des_evidence["matched_sbdb_field"] = matched_field
 
                 audit_records.append({
                     "resolution_run_id": run_id,
@@ -456,7 +487,7 @@ def resolve_entities(
                     "matched_target_identifier_value": target_sbdb_des,
                     "assigned_asteroid_key": target_key,
                     "match_state": STATE_RESOLVED,
-                    "match_rule": RULE_EXACT_DESIGNATION,
+                    "match_rule": secondary_rule,
                     "evidence_json": json.dumps(neows_des_evidence, sort_keys=True),
                 })
                 candidate_bridge_rows.append({
@@ -487,6 +518,8 @@ def resolve_entities(
                     "name": clean_name,
                     "normalized_designation": norm_name,
                 }
+                if matched_field != "des":
+                    amb_neows_ev["matched_sbdb_field"] = matched_field
 
                 audit_records.append({
                     "resolution_run_id": run_id,

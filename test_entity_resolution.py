@@ -14,6 +14,7 @@ Verifies the locked M5 Phase 6 entity-resolution contract for entity_resolution.
 - Complete offline isolation and S3 reference pathing
 """
 
+from collections import Counter
 from datetime import date
 import json
 import os
@@ -27,12 +28,14 @@ from entity_resolution import (
     BRIDGE_ASTEROID_IDENTIFIER_SCHEMA,
     FACT_ENTITY_RESOLUTION_SCHEMA,
     NAMESPACE_PLANETARY_DEFENSE,
+    RULE_ALTERNATE_DESIGNATION,
     RULE_ASSOCIATED_SENTRY_ID,
     RULE_CANONICAL_ASSOCIATED_ID,
     RULE_CANONICAL_EXTERNAL_PIVOT,
     RULE_COLLISION_QUARANTINE,
     RULE_CONTRADICTORY_CANDIDATE,
     RULE_EXACT_DESIGNATION,
+    RULE_EXACT_FULLNAME,
     RULE_EXACT_SPKID,
     RULE_INVALID_IDENTIFIER,
     RULE_NO_MATCH,
@@ -49,6 +52,7 @@ from entity_resolution import (
     save_resolution_outputs,
     upload_crosswalk_to_s3,
 )
+from test_data_provider import _FIXTURE_ASTEROIDS, _FIXTURE_SBDB_IDENTITIES_ALL35, _FIXTURE_SENTRY
 
 # ---------------------------------------------------------------------------
 # Test Fixtures & Representative Payloads
@@ -1004,3 +1008,109 @@ def test_empty_inputs_safety(tmp_path):
     assert os.path.exists(b_path)
     assert os.path.exists(r_path)
     assert pq.read_table(b_path).num_rows == 0
+
+
+# ---------------------------------------------------------------------------
+# M8: all-35 NeoWs -> SBDB identity resolution (exact fallback rules)
+# ---------------------------------------------------------------------------
+
+def _neows_audit(audit, neows_id):
+    rows = [a for a in audit if a["source_system"] == "neows" and a["source_identifier_value"] == neows_id]
+    assert len(rows) == 1
+    return rows[0]
+
+
+def test_numbered_asteroid_resolves_by_exact_sbdb_fullname():
+    """Numbered objects: NeoWs id 2138971 != SPK-ID 20138971 and NeoWs name "138971 (2001 CB21)" !=
+    SBDB des "138971", but the name equals SBDB's fullname exactly."""
+    bridge, audit, _ = resolve_entities(
+        neows_records=[{"id": "2138971", "name": "138971 (2001 CB21)"}],
+        sbdb_records=[{"spkid": "20138971", "designation": "138971", "fullname": "138971 (2001 CB21)",
+                       "alternate_designations": ["2001 CB21"]}],
+        run_id="run_numbered",
+    )
+    a = _neows_audit(audit, "2138971")
+    assert a["match_state"] == STATE_RESOLVED
+    assert a["match_rule"] == RULE_EXACT_FULLNAME
+    assert a["assigned_asteroid_key"] == generate_asteroid_key("20138971")
+    assert a["matched_target_identifier_value"] == "138971"
+    assert json.loads(a["evidence_json"])["matched_sbdb_field"] == "fullname"
+    assert {(b["source_system"], b["identifier_value"]) for b in bridge} >= {("neows", "2138971"), ("sbdb", "20138971")}
+
+
+def test_alternate_designation_links_second_neows_record_to_same_object():
+    """NeoWs lists 2001 SY169 (3092330) and 2013 ET (3629117) separately; SBDB knows 2013 ET as an
+    alternate designation of 2001 SY169. Both NeoWs ids map to the one canonical key."""
+    sbdb = [{"spkid": "50092353", "designation": "2001 SY169", "fullname": "(2001 SY169)", "alternate_designations": ["2013 ET"]}]
+    neows = [{"id": "3092330", "name": "(2001 SY169)"}, {"id": "3629117", "name": "(2013 ET)"}]
+    bridge, audit, _ = resolve_entities(neows_records=neows, sbdb_records=sbdb, run_id="run_alt")
+    key = generate_asteroid_key("50092353")
+    assert _neows_audit(audit, "3092330")["match_rule"] == RULE_EXACT_DESIGNATION
+    alt = _neows_audit(audit, "3629117")
+    assert (alt["match_state"], alt["match_rule"], alt["assigned_asteroid_key"]) == (STATE_RESOLVED, RULE_ALTERNATE_DESIGNATION, key)
+    assert json.loads(alt["evidence_json"])["matched_sbdb_field"] == "alternate_designation"
+    neows_bridge = sorted(b["identifier_value"] for b in bridge if b["source_system"] == "neows" and b["asteroid_key"] == key)
+    assert neows_bridge == ["3092330", "3629117"]
+    assert sum(1 for b in bridge if b["is_primary_pivot"] and b["asteroid_key"] == key) == 1
+
+
+def test_designation_match_keeps_precedence_over_fallbacks():
+    """An exact SBDB designation always wins; the fallback indexes are consulted only when it finds nothing."""
+    sbdb = [
+        {"spkid": "1", "designation": "2020 AB", "fullname": "(2020 AB)", "alternate_designations": []},
+        {"spkid": "2", "designation": "2019 ZZ", "fullname": "(2019 ZZ)", "alternate_designations": ["2020 AB"]},
+    ]
+    _, audit, _ = resolve_entities(neows_records=[{"id": "9001", "name": "(2020 AB)"}], sbdb_records=sbdb, run_id="run_prec")
+    a = _neows_audit(audit, "9001")
+    assert (a["match_rule"], a["assigned_asteroid_key"]) == (RULE_EXACT_DESIGNATION, generate_asteroid_key("1"))
+
+
+def test_fallback_candidates_for_different_objects_are_quarantined():
+    """If the fullname and an alternate designation point at different SPK-IDs, nothing is guessed."""
+    sbdb = [
+        {"spkid": "1", "designation": "111", "fullname": "111 (2001 AA)", "alternate_designations": []},
+        {"spkid": "2", "designation": "2002 BB", "fullname": "(2002 BB)", "alternate_designations": ["111 (2001 AA)"]},
+    ]
+    bridge, audit, _ = resolve_entities(neows_records=[{"id": "9002", "name": "111 (2001 AA)"}], sbdb_records=sbdb, run_id="run_amb")
+    a = _neows_audit(audit, "9002")
+    assert a["match_state"] == STATE_AMBIGUOUS
+    assert a["assigned_asteroid_key"] is None
+    assert sorted(json.loads(a["evidence_json"])["conflicting_spkids"]) == ["1", "2"]
+    assert not any(b["source_system"] == "neows" for b in bridge)
+
+
+@pytest.mark.parametrize("alternate_designations", [None, [], "missing"])
+def test_fallback_is_exact_and_tolerates_uncaptured_alternates(alternate_designations):
+    """Older SBDB snapshots have no alternate designations (null / absent): resolution still works by
+    fullname, and a near-miss name stays UNRESOLVED (no partial or token matching)."""
+    sbdb_row = {"spkid": "20138971", "designation": "138971", "fullname": "138971 (2001 CB21)"}
+    if alternate_designations != "missing":
+        sbdb_row["alternate_designations"] = alternate_designations
+    neows = [{"id": "2138971", "name": "138971 (2001 CB21)"}, {"id": "9003", "name": "138971 (2001 CB2)"}]
+    _, audit, _ = resolve_entities(neows_records=neows, sbdb_records=[sbdb_row], run_id="run_tolerant")
+    assert _neows_audit(audit, "2138971")["match_rule"] == RULE_EXACT_FULLNAME
+    near = _neows_audit(audit, "9003")
+    assert (near["match_state"], near["match_rule"]) == (STATE_UNRESOLVED, RULE_NO_MATCH)
+
+
+def test_real_35_neows_objects_all_resolve_with_sentry_only_where_linked():
+    """The real 35 NeoWs records against the real SBDB identities of the same objects: every record
+    gets an explicit outcome (all RESOLVED here), and Sentry links come only from the crosswalk."""
+    bridge, audit, _ = resolve_entities(
+        neows_records=_FIXTURE_ASTEROIDS,
+        sbdb_records=_FIXTURE_SBDB_IDENTITIES_ALL35,
+        sentry_records=_FIXTURE_SENTRY,
+        run_id="run_all35",
+    )
+    neows = [a for a in audit if a["source_system"] == "neows"]
+    assert len(neows) == 35 and {a["source_identifier_value"] for a in neows} == {r["id"] for r in _FIXTURE_ASTEROIDS}
+    assert all(a["match_state"] == STATE_RESOLVED for a in neows)
+    assert Counter(a["match_rule"] for a in neows) == {RULE_EXACT_DESIGNATION: 30, RULE_EXACT_FULLNAME: 4, RULE_ALTERNATE_DESIGNATION: 1}
+    assert len({a["assigned_asteroid_key"] for a in neows}) == 34  # 2001 SY169 and 2013 ET are one object
+    assert _neows_audit(audit, "3092330")["assigned_asteroid_key"] == _neows_audit(audit, "3629117")["assigned_asteroid_key"]
+
+    linked_sentry = {b["asteroid_key"] for b in bridge if b["source_system"] == "sentry"}
+    sentry_neows = sorted(a["source_identifier_value"] for a in neows if a["assigned_asteroid_key"] in linked_sentry)
+    assert sentry_neows == ["3427460", "3548666"]  # 2008 ST, 2010 TW54: the only Mode S listings
+    pha_ids = {r["id"] for r in _FIXTURE_ASTEROIDS if r["hazardous"] is True}
+    assert pha_ids and not (pha_ids & set(sentry_neows))  # PHA is not Sentry linkage

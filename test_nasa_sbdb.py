@@ -183,7 +183,7 @@ SAMPLE_SBDB_EROS_PAYLOAD = {
 # 1. API Fetch & HTTP Tests
 # ---------------------------------------------------------------------------
 def test_fetch_sbdb_success_2025_hx():
-    """Verify fetch_sbdb_data issues correct GET request with full-prec=1 and phys-par=1."""
+    """Verify fetch_sbdb_data issues correct GET request with full-prec=1, phys-par=1 and alt-des=1."""
     with patch("nasa_sbdb.get_http_session") as mock_get_session:
         mock_session = MagicMock()
         mock_response = MagicMock()
@@ -197,7 +197,7 @@ def test_fetch_sbdb_success_2025_hx():
         assert payload == SAMPLE_SBDB_2025_HX_PAYLOAD
         mock_session.get.assert_called_once_with(
             "https://ssd-api.jpl.nasa.gov/sbdb.api",
-            params={"sstr": "2025 HX", "phys-par": "1", "full-prec": "1"},
+            params={"sstr": "2025 HX", "phys-par": "1", "full-prec": "1", "alt-des": "1"},
             headers={"User-Agent": "NASA-Planetary-Defense-Platform/1.0"},
             timeout=15,
         )
@@ -342,6 +342,7 @@ def test_extract_sbdb_object_fields_2025_hx():
     assert record["orbit_class_name"] == "Apollo"
     assert record["orbit_id"] == "4"
     assert record["prefix"] is None
+    assert record["alternate_designations"] is None  # payload carries no des_alt: not captured
 
 
 def test_extract_sbdb_object_missing_identifiers_raises_value_error():
@@ -578,8 +579,10 @@ def test_extract_sbdb_nullable_optional_fields():
 # ---------------------------------------------------------------------------
 def test_exact_pyarrow_schemas_match_contract():
     """Verify all 4 PyArrow schemas conform to the approved contract."""
-    # 1. Object: 14 fields
-    assert len(nasa_sbdb.SBDB_OBJECT_SCHEMA) == 14
+    # 1. Object: 15 fields (alternate_designations added for identity resolution)
+    assert len(nasa_sbdb.SBDB_OBJECT_SCHEMA) == 15
+    assert nasa_sbdb.SBDB_OBJECT_SCHEMA.field("alternate_designations").type == pa.list_(pa.string())
+    assert nasa_sbdb.SBDB_OBJECT_SCHEMA.field("alternate_designations").nullable
     assert nasa_sbdb.SBDB_OBJECT_SCHEMA.field("snapshot_key").type == pa.string()
     assert nasa_sbdb.SBDB_OBJECT_SCHEMA.field("spkid").type == pa.string()
     assert nasa_sbdb.SBDB_OBJECT_SCHEMA.field("is_neo").type == pa.bool_()
@@ -1270,3 +1273,71 @@ def test_sbdb_object_flag_tri_state_survives_parquet_round_trip(tmp_path):
     table = pq.read_table(out)
     assert table.column("is_neo").to_pylist() == [True, False, None]
     assert table.column("is_pha").to_pylist() == [True, False, None]
+
+
+# ---------------------------------------------------------------------------
+# M8: Alternate designations, same-object de-duplication, local backfill without S3
+# ---------------------------------------------------------------------------
+def _payload_with_alt(spkid, des, fullname, des_alt):
+    payload = make_mock_payload(spkid, des)
+    payload["object"]["fullname"] = fullname
+    if des_alt is not ...:
+        payload["object"]["des_alt"] = des_alt
+    return payload
+
+
+@pytest.mark.parametrize(
+    ("des_alt", "expected"),
+    [
+        (..., None),  # key absent: not captured, never claimed empty
+        ([], []),  # SBDB lists none
+        ([{"des": "2013 ET"}], ["2013 ET"]),  # a later provisional designation linked to the object
+        ([{"pri": "2001 CB21"}], ["2001 CB21"]),  # principal provisional designation of a numbered object
+        ([{"des": "2001 SY169"}, {"des": " 2013  ET "}, {"des": "2013 ET"}], ["2013 ET"]),  # primary excluded, whitespace normalized, de-duplicated
+    ],
+)
+def test_extract_sbdb_object_alternate_designations(des_alt, expected):
+    payload = _payload_with_alt("50092353", "2001 SY169", "(2001 SY169)", des_alt)
+    record = nasa_sbdb.extract_sbdb_object(payload, "2026-10-02", "r1", "t1")
+    assert record["alternate_designations"] == expected
+
+
+def test_batch_same_object_targets_written_once_and_summarized(tmp_path):
+    """Two targets SBDB resolves to the same SPK-ID (e.g. NeoWs 3092330 and 3629117 -> 2001 SY169)
+    produce ONE object row per (snapshot_key, spkid); the second is recorded as a duplicate,
+    neither a success row nor a failure, so DQ lineage and the failure rate stay exact."""
+    same = _payload_with_alt("50092353", "2001 SY169", "(2001 SY169)", [{"des": "2013 ET"}])
+    other = make_mock_payload("50548689", "2010 TW54")
+
+    def mock_fetch(target, id_type="sstr", run_id=None):
+        return {"3092330": same, "3629117": same, "3548666": other}[target]
+
+    summary_file = tmp_path / "sbdb_batch_summary.json"
+    with patch("nasa_sbdb.fetch_sbdb_data", side_effect=mock_fetch),          patch("nasa_sbdb.save_raw_json") as mock_raw,          patch("nasa_sbdb.write_parquet") as mock_pq,          patch("nasa_sbdb.upload_raw_to_s3"),          patch("nasa_sbdb.upload_processed_to_s3"),          patch("time.sleep"):
+        exit_code = nasa_sbdb.main(targets="3092330,3629117,3548666", summary_filename=str(summary_file))
+
+    assert exit_code == 0
+    obj_rows = mock_pq.call_args_list[0][0][0]
+    assert sorted(r["spkid"] for r in obj_rows) == ["50092353", "50548689"]
+    assert mock_raw.call_count == 2
+    summary = json.loads(summary_file.read_text(encoding="utf-8"))
+    assert summary["total_targets"] == 3
+    assert summary["successful_targets_count"] == 2
+    assert summary["failed_targets_count"] == 0
+    assert summary["duplicate_targets_count"] == 1
+    assert summary["duplicate_targets"] == [{"target": "3629117", "spkid": "50092353"}]
+    assert summary["failure_rate_pct"] == 0.0
+    assert summary["circuit_breaker_passed"] is True
+
+
+def test_skip_s3_upload_writes_local_outputs_only(tmp_path):
+    summary_file = tmp_path / "sbdb_batch_summary.json"
+    with patch("nasa_sbdb.fetch_sbdb_data", return_value=SAMPLE_SBDB_2025_HX_PAYLOAD),          patch("nasa_sbdb.save_raw_json"),          patch("nasa_sbdb.write_parquet") as mock_pq,          patch("nasa_sbdb.upload_raw_to_s3") as mock_up_raw,          patch("nasa_sbdb.upload_processed_to_s3") as mock_up_proc:
+        exit_code = nasa_sbdb.main(target="2025 HX", summary_filename=str(summary_file), skip_s3_upload=True)
+
+    assert exit_code == 0
+    assert mock_pq.call_count == 4
+    mock_up_raw.assert_not_called()
+    mock_up_proc.assert_not_called()
+    assert nasa_sbdb.parse_args(["--skip-s3-upload"]).skip_s3_upload is True
+    assert nasa_sbdb.parse_args([]).skip_s3_upload is False  # production default: upload

@@ -221,7 +221,7 @@ Because different NASA systems identify celestial objects using varying nomencla
 
 ### 4. Deterministic Entity Resolution
 The resolution engine (`entity_resolution.py`) implements deterministic matching rules without heuristic fuzziness:
-- Matches on verified SPK-IDs (`EXACT_SPKID_MATCH`) or normalized astronomical designations (`EXACT_DESIGNATION_MATCH`).
+- Matches on verified SPK-IDs (`EXACT_SPKID_MATCH`) or normalized astronomical designations (`EXACT_DESIGNATION_MATCH`). Only when no SBDB designation matches, a NeoWs name is matched exactly against SBDB's own identity fields: the SBDB full name (`EXACT_FULLNAME_MATCH`, e.g. numbered asteroids such as `138971 (2001 CB21)`) or SBDB's alternate designations (`ALTERNATE_DESIGNATION_MATCH`). Candidates pointing to more than one SPK-ID are quarantined as `AMBIGUOUS`.
 - Strictly enforces three foundational crosswalk invariants:
   1. **Exactly One Primary Pivot:** Every canonical `asteroid_key` has exactly one record with `is_primary_pivot == True`.
   2. **Source Identifier Uniqueness:** Within any source system namespace, an identifier value is unique.
@@ -370,7 +370,7 @@ The API enforces strict semantic consistency across collections and optional lin
   - `GET /asteroids/{id}/history` (when entity is monitored in Sentry but has zero historical snapshots) $\rightarrow$ `data: []`
 - **`data: null` (JSON Null):** Indicates that the linked sub-resource or profile cannot be established because identity is missing, ambiguous, or unmonitored:
   - `GET /asteroids/{id}/sbdb` (when `UNRESOLVED` or `AMBIGUOUS`) $\rightarrow$ `data: null`
-  - `GET /asteroids/{id}/sentry` (when `UNRESOLVED`, `AMBIGUOUS`, or unmonitored) $\rightarrow$ `data: null`
+  - `GET /asteroids/{id}/sentry` (when `UNRESOLVED` or `AMBIGUOUS`) $\rightarrow$ `data: null`; for a resolved object with no Sentry record it returns a profile with `has_sentry_monitoring: false` and every assessment value `null`
   - `GET /asteroids/{id}/history` (when `UNRESOLVED`, `AMBIGUOUS`, or unmonitored) $\rightarrow$ `data: null`
 
 ### 8. Watchlist Pagination
@@ -397,11 +397,13 @@ The API contract is deterministically validated against two canonical objects:
    - **Sentry:** Populated impact risk profile (`sentry_id = bK10T54W`).
    - **History:** Populated snapshot trajectory (`data: list[SentryHistoryRecord]`).
    - **Crosswalk:** Populated multi-source bridge records across `neows`, `sbdb`, and `sentry` (`data: list[CrosswalkRecord]`).
-2. **1998 FF14 (NeoWs ID: `2523934`):**
-   - **Resolution State:** `UNRESOLVED`
-   - **Canonical Key:** `null`
-   - **SBDB / Sentry / History:** `data: null` (unlinked profile cannot be established).
-   - **Crosswalk:** `data: []` (empty identifier mappings, no fabricated keys).
+2. **1998 FF14 (NeoWs ID: `2523934`, a NeoWs PHA):**
+   - **Resolution State:** `RESOLVED` (SBDB full-name match, SPK-ID `20523934`)
+   - **SBDB:** Populated orbital and physical parameter profile.
+   - **Sentry:** a profile with `has_sentry_monitoring: false` and every assessment value `null`; **History:** `data: null`. The object has no Sentry Mode S record; this is the absence of a record, not a safety conclusion.
+   - **Crosswalk:** Populated bridge records for `neows` and `sbdb` only.
+
+In the current local snapshot all 35 NeoWs objects resolve to SBDB (34 distinct SPK-IDs; 2001 SY169 and 2013 ET are one SBDB object), and only two (2010 TW54 and 2008 ST) have a Sentry Mode S record. The `UNRESOLVED` and `AMBIGUOUS` states remain part of the contract and are covered by test fixtures.
 
 ### 10. Security & Runtime Isolation Caveat
 - **Local-First Boundary:** Milestone 6 establishes a clean local-first serving foundation.
@@ -863,6 +865,7 @@ cd frontend && npm install && npm run dev   # with the API running; open http://
 - **M8: Repository finalization — in progress**
   - The M5 Streamlit dossier (`dashboard.py`) and its UI tests were retired; the data-access provider (`dashboard_data.py`) remains the API's provider
   - Documentation updated to the FastAPI → APOLLO architecture
+  - All 35 NeoWs objects enriched from SBDB with identity resolution (designation, full-name and alternate-designation rules) and a Sentry Mode S crosswalk (2 of 35 linked; the rest have no Sentry record)
 
 ### Parked / Future Architectural Roadmap
 *The following items are explicitly parked and represent future potential enhancements:*

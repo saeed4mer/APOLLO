@@ -171,14 +171,15 @@ jobs:
           execution_mode = os.getenv("EXECUTION_MODE", "CURRENT_PRODUCTION")
           raw_targets = set()
 
-          # 1 & 2: Unique NeoWs target designations
+          # 1 & 2: Unique NeoWs targets by NeoWs ID: the SBDB lookup string NeoWs itself links to
+          # (nasa_jpl_url sstr=<id>). Names fail for numbered asteroids ("138971 (2001 CB21)").
           if os.path.exists("asteroids.parquet"):
               try:
                   neows_table = pq.read_table("asteroids.parquet")
-                  neows_names = neows_table.column("name").to_pylist()
-                  for name in neows_names:
-                      if name and str(name).strip():
-                          raw_targets.add(str(name).strip())
+                  neows_ids = neows_table.column("id").to_pylist()
+                  for neows_id in neows_ids:
+                      if neows_id and str(neows_id).strip():
+                          raw_targets.add(str(neows_id).strip())
                   print(f"Extracted {len(raw_targets)} unique target candidate(s) from NeoWs.")
               except Exception as e:
                   print(f"Warning: Failed reading asteroids.parquet for target generation: {e}")

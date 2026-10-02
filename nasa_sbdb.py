@@ -66,6 +66,10 @@ SBDB_OBJECT_SCHEMA = pa.schema([
     ("orbit_class_name", pa.string()),
     ("orbit_id", pa.string()),
     ("prefix", pa.string()),
+    # SBDB's alternate designations for this object (object.des_alt, requested with alt-des=1),
+    # e.g. a provisional designation later linked to it. null = not captured in this snapshot
+    # (older snapshots); [] = SBDB lists none.
+    ("alternate_designations", pa.list_(pa.string())),
 ])
 
 # Table 2: Orbit Solution (Grain: snapshot_key, spkid, orbit_id)
@@ -154,6 +158,7 @@ def fetch_sbdb_data(target=DEFAULT_TARGET, id_type=DEFAULT_ID_TYPE, run_id=None)
         id_type: target,
         "phys-par": "1",
         "full-prec": "1",
+        "alt-des": "1",
     }
     headers = {"User-Agent": HTTP_USER_AGENT}
 
@@ -270,6 +275,20 @@ def extract_sbdb_object(payload, snapshot_key, run_id, snapshot_time):
     prefix_val = obj.get("prefix")
     prefix_clean = prefix_val.strip() if isinstance(prefix_val, str) and prefix_val.strip() else None
 
+    # Alternate designations: SBDB returns a list of {"des": ...} / {"pri": ...} entries (empty when
+    # there are none). An absent key stays None (not captured), never [] (which would claim "none").
+    raw_alt = obj.get("des_alt")
+    alternate_designations = None
+    if isinstance(raw_alt, list):
+        alternate_designations = []
+        for entry in raw_alt:
+            values = entry.values() if isinstance(entry, dict) else [entry]
+            for value in values:
+                if isinstance(value, str) and value.strip():
+                    clean_alt = " ".join(value.split())
+                    if clean_alt != des and clean_alt not in alternate_designations:
+                        alternate_designations.append(clean_alt)
+
     return {
         "snapshot_key": snapshot_key,
         "run_id": run_id,
@@ -285,6 +304,7 @@ def extract_sbdb_object(payload, snapshot_key, run_id, snapshot_time):
         "orbit_class_name": str(orbit_class_name).strip(),
         "orbit_id": str(orbit_id).strip(),
         "prefix": prefix_clean,
+        "alternate_designations": alternate_designations,
     }
 
 
@@ -788,6 +808,11 @@ def parse_args(args=None):
         default="sbdb_batch_summary.json",
         help="Path for authoritative SBDB batch summary JSON (default: 'sbdb_batch_summary.json')",
     )
+    parser.add_argument(
+        "--skip-s3-upload",
+        action="store_true",
+        help="Write the local Parquet/raw outputs only; do not upload to S3 (local backfills)",
+    )
     return parser.parse_args(args)
 
 
@@ -801,6 +826,7 @@ def main(
     targets: str | list[str] | None = None,
     targets_file: str | None = None,
     summary_filename: str = "sbdb_batch_summary.json",
+    skip_s3_upload: bool = False,
 ) -> int:
     """Execute the end-to-end SBDB ingestion workflow."""
     start_time = time.perf_counter()
@@ -855,6 +881,10 @@ def main(
     saved_raw_files: list[tuple[str, str]] = []  # (filename, spkid)
     successful_targets: list[str] = []
     failed_targets: list[str] = []
+    # Targets that SBDB resolves to an object already ingested in this run (e.g. a NeoWs record
+    # under an alternate designation of the same object): one object row per (snapshot_key, spkid).
+    duplicate_targets: list[dict] = []
+    ingested_spkids: set[str] = set()
 
     for idx, target_item in enumerate(resolved_targets):
         if idx > 0:
@@ -869,6 +899,16 @@ def main(
             obj_record = extract_sbdb_object(raw_payload, snapshot_key, run_id, snapshot_time)
             spkid = obj_record["spkid"]
             orbit_id = obj_record["orbit_id"]
+
+            if spkid in ingested_spkids:
+                logger.info(
+                    "[%s] Target '%s' resolves to SPK-ID %s, already ingested in this run; not duplicated",
+                    run_id,
+                    target_item,
+                    spkid,
+                )
+                duplicate_targets.append({"target": target_item, "spkid": spkid})
+                continue
 
             orbit_record = extract_sbdb_orbit(raw_payload, snapshot_key, run_id, snapshot_time, spkid)
             epoch_jd = orbit_record["epoch_jd"]
@@ -896,6 +936,7 @@ def main(
             all_element_records.extend(element_records)
             all_phys_records.extend(phys_records)
             successful_targets.append(target_item)
+            ingested_spkids.add(spkid)
 
         except Exception as error:
             logger.error(
@@ -923,6 +964,8 @@ def main(
         "failed_targets_count": failed_targets_count,
         "successful_targets": successful_targets,
         "failed_targets": failed_targets,
+        "duplicate_targets_count": len(duplicate_targets),
+        "duplicate_targets": duplicate_targets,
         "failure_rate_pct": round(failure_pct, 2),
         "circuit_breaker_threshold_pct": 25.0,
         "circuit_breaker_passed": circuit_breaker_passed,
@@ -987,49 +1030,52 @@ def main(
     )
 
     # 5. Upload raw payload and 4 Parquet tables to S3
-    try:
-        for raw_file, spk in saved_raw_files:
-            upload_raw_to_s3(
-                local_file_path=raw_file,
+    if skip_s3_upload:
+        logger.info("[%s] --skip-s3-upload: local outputs written; S3 upload skipped", run_id)
+    else:
+        try:
+            for raw_file, spk in saved_raw_files:
+                upload_raw_to_s3(
+                    local_file_path=raw_file,
+                    snapshot_date=resolved_snapshot_date,
+                    spkid=spk,
+                    metadata=lineage_metadata,
+                )
+
+            upload_processed_to_s3(
+                table_name="fact_sbdb_object_snapshot",
+                local_file_path=obj_parquet,
                 snapshot_date=resolved_snapshot_date,
-                spkid=spk,
                 metadata=lineage_metadata,
             )
 
-        upload_processed_to_s3(
-            table_name="fact_sbdb_object_snapshot",
-            local_file_path=obj_parquet,
-            snapshot_date=resolved_snapshot_date,
-            metadata=lineage_metadata,
-        )
+            upload_processed_to_s3(
+                table_name="fact_sbdb_orbit",
+                local_file_path=orbit_parquet,
+                snapshot_date=resolved_snapshot_date,
+                metadata=lineage_metadata,
+            )
 
-        upload_processed_to_s3(
-            table_name="fact_sbdb_orbit",
-            local_file_path=orbit_parquet,
-            snapshot_date=resolved_snapshot_date,
-            metadata=lineage_metadata,
-        )
+            upload_processed_to_s3(
+                table_name="fact_sbdb_orbit_element",
+                local_file_path=elem_parquet,
+                snapshot_date=resolved_snapshot_date,
+                metadata=lineage_metadata,
+            )
 
-        upload_processed_to_s3(
-            table_name="fact_sbdb_orbit_element",
-            local_file_path=elem_parquet,
-            snapshot_date=resolved_snapshot_date,
-            metadata=lineage_metadata,
-        )
-
-        upload_processed_to_s3(
-            table_name="fact_sbdb_physical_parameter",
-            local_file_path=phys_parquet,
-            snapshot_date=resolved_snapshot_date,
-            metadata=lineage_metadata,
-        )
-    except Exception as error:
-        logger.error(
-            "[%s] S3 upload sequence failed: %s",
-            run_id,
-            redact_api_key(str(error)),
-        )
-        return 1
+            upload_processed_to_s3(
+                table_name="fact_sbdb_physical_parameter",
+                local_file_path=phys_parquet,
+                snapshot_date=resolved_snapshot_date,
+                metadata=lineage_metadata,
+            )
+        except Exception as error:
+            logger.error(
+                "[%s] S3 upload sequence failed: %s",
+                run_id,
+                redact_api_key(str(error)),
+            )
+            return 1
 
     elapsed = time.perf_counter() - start_time
     if len(resolved_targets) == 1:
@@ -1060,5 +1106,6 @@ if __name__ == "__main__":
         targets=args.targets,
         targets_file=args.targets_file,
         summary_filename=args.summary_file,
+        skip_s3_upload=args.skip_s3_upload,
     )
     sys.exit(exit_code)

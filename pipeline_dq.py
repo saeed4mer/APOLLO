@@ -475,12 +475,15 @@ def check_sbdb_ingestion(
     total_targets = summary_data.get("total_targets", 0)
     successful_targets = summary_data.get("successful_targets_count", 0)
     failed_targets = summary_data.get("failed_targets_count", 0)
+    # Targets resolving to an SPK-ID already ingested in the same run (written once, neither a
+    # success row nor a failure). Absent in older summaries: 0.
+    duplicate_targets = summary_data.get("duplicate_targets_count", 0)
     failure_rate_pct = summary_data.get("failure_rate_pct", 100.0)
     circuit_breaker_passed = summary_data.get("circuit_breaker_passed", False)
 
     math_expected_pct = round((failed_targets / total_targets * 100.0), 2) if total_targets > 0 else 100.0
     math_valid = abs(failure_rate_pct - math_expected_pct) <= 0.05
-    sum_valid = (successful_targets + failed_targets) == total_targets
+    sum_valid = (successful_targets + failed_targets + duplicate_targets) == total_targets
 
     cb_ok = circuit_breaker_passed and (successful_targets > 0) and (failure_rate_pct < 25.0) and math_valid and sum_valid
 
@@ -500,6 +503,7 @@ def check_sbdb_ingestion(
             "total_targets": total_targets,
             "successful_targets_count": successful_targets,
             "failed_targets_count": failed_targets,
+            "duplicate_targets_count": duplicate_targets,
             "failure_rate_pct": failure_rate_pct,
             "circuit_breaker_passed": circuit_breaker_passed,
             "math_valid": math_valid,
