@@ -1,0 +1,205 @@
+{
+    "phys_par": [
+        {
+            "ref": "MPO698600",
+            "sigma": null,
+            "notes": null,
+            "desc": "absolute magnitude (magnitude at 1 au from Sun and observer)",
+            "units": null,
+            "name": "H",
+            "value": "19.61",
+            "title": "absolute magnitude"
+        }
+    ],
+    "object": {
+        "pha": false,
+        "prefix": null,
+        "des": "376848",
+        "neo": true,
+        "fullname": "376848 (2001 RY47)",
+        "kind": "an",
+        "spkid": "20376848",
+        "orbit_id": "88",
+        "orbit_class": {
+            "code": "ATE",
+            "name": "Aten"
+        },
+        "des_alt": [
+            {
+                "pri": "2001 RY47"
+            }
+        ]
+    },
+    "orbit": {
+        "not_valid_after": null,
+        "epoch": "2461200.5",
+        "first_obs": "2001-09-15",
+        "data_arc": "9145",
+        "not_valid_before": null,
+        "n_dop_obs_used": null,
+        "rms": ".3707",
+        "producer": "Otto Matic",
+        "elements": [
+            {
+                "value": ".3928491975013246",
+                "title": "eccentricity",
+                "units": null,
+                "name": "e",
+                "label": "e",
+                "sigma": "9.2795E-8"
+            },
+            {
+                "title": "semi-major axis",
+                "value": ".9064268556404544",
+                "label": "a",
+                "sigma": "3.8023E-9",
+                "units": "au",
+                "name": "a"
+            },
+            {
+                "label": "q",
+                "sigma": "8.341E-8",
+                "units": "au",
+                "name": "q",
+                "title": "perihelion distance",
+                "value": ".5503377928084529"
+            },
+            {
+                "name": "i",
+                "units": "deg",
+                "sigma": "9.1166E-6",
+                "label": "i",
+                "value": "17.60807780585882",
+                "title": "inclination; angle with respect to x-y ecliptic plane"
+            },
+            {
+                "sigma": "1.046E-5",
+                "label": "node",
+                "name": "om",
+                "units": "deg",
+                "title": "longitude of the ascending node",
+                "value": "11.18075313545821"
+            },
+            {
+                "units": "deg",
+                "name": "w",
+                "label": "peri",
+                "sigma": "1.6762E-5",
+                "value": "214.1094725402978",
+                "title": "argument of perihelion"
+            },
+            {
+                "sigma": "2.562E-5",
+                "label": "M",
+                "name": "ma",
+                "units": "deg",
+                "title": "mean anomaly",
+                "value": "340.8768935961759"
+            },
+            {
+                "value": "2461217.243780194471",
+                "title": "time of perihelion passage",
+                "units": "TDB",
+                "name": "tp",
+                "sigma": "2.2486E-5",
+                "label": "tp"
+            },
+            {
+                "title": "sidereal orbital period",
+                "value": "315.208248216628",
+                "sigma": "1.9834E-6",
+                "label": "period",
+                "name": "per",
+                "units": "d"
+            },
+            {
+                "value": "1.142102092939487",
+                "title": "mean motion",
+                "name": "n",
+                "units": "deg/d",
+                "label": "n",
+                "sigma": "7.1865E-9"
+            },
+            {
+                "title": "aphelion distance",
+                "value": "1.262515918472456",
+                "label": "Q",
+                "sigma": "5.2961E-9",
+                "units": "au",
+                "name": "ad"
+            }
+        ],
+        "moid_jup": "3.73567",
+        "n_del_obs_used": null,
+        "sb_used": "SB441-N16",
+        "last_obs": "2026-09-29",
+        "moid": ".0812277",
+        "cov_epoch": "2457966.5",
+        "t_jup": "6.472",
+        "n_obs_used": 406,
+        "orbit_id": "88",
+        "comment": "Nongravitational accels. using nonstandard g(r) = (1 au/ r)^2",
+        "condition_code": "0",
+        "model_pars": [
+            {
+                "kind": "EST",
+                "sigma": "6.314E-15",
+                "desc": "non-gravitational transverse acceleration parameter",
+                "units": "au/d^2",
+                "name": "A2",
+                "title": "non-grav. transverse accel.",
+                "n": 1,
+                "value": "4.363807108360128E-14"
+            },
+            {
+                "title": "normalizing factor",
+                "value": "1.",
+                "n": 0,
+                "name": "ALN",
+                "units": null,
+                "desc": "normalizing factor [default 0.1112620426]",
+                "kind": "SET",
+                "sigma": null
+            },
+            {
+                "n": 0,
+                "value": "0.",
+                "title": "non-grav. model exp. k",
+                "name": "NK",
+                "units": null,
+                "desc": "non-grav. model constant, exponent k [default 4.6142]",
+                "kind": "SET",
+                "sigma": null
+            },
+            {
+                "title": "non-grav. model exp. m",
+                "n": 0,
+                "value": "2.",
+                "name": "NM",
+                "units": null,
+                "desc": "non-grav. model constant, exponent m [default 2.15]",
+                "sigma": null,
+                "kind": "SET"
+            },
+            {
+                "sigma": null,
+                "kind": "SET",
+                "desc": "normalizing distance, au [default 2.808 au]",
+                "name": "R0",
+                "units": "au",
+                "n": 0,
+                "value": "1.",
+                "title": "normalizing distance"
+            }
+        ],
+        "pe_used": "DE441",
+        "two_body": null,
+        "equinox": "J2000",
+        "source": "JPL",
+        "soln_date": "2026-09-30 06:18:08"
+    },
+    "signature": {
+        "version": "1.3",
+        "source": "NASA/JPL Small-Body Database (SBDB) API"
+    }
+}

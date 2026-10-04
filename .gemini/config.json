@@ -1,0 +1,6 @@
+{
+  "project": "apollo-planetary-defense",
+  "version": "1.0.0",
+  "rules_directory": "rules",
+  "prompts_directory": "prompts"
+}

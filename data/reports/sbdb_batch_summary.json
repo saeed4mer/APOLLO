@@ -1,0 +1,61 @@
+{
+    "run_id": "0c3a5360819b",
+    "snapshot_key": "2026-10-02",
+    "snapshot_time": "2026-10-02T13:19:57.729114+00:00",
+    "total_targets": 35,
+    "successful_targets_count": 34,
+    "failed_targets_count": 0,
+    "successful_targets": [
+        "2138971",
+        "2376848",
+        "2499496",
+        "2523934",
+        "3092330",
+        "3132507",
+        "3256319",
+        "3291224",
+        "3427460",
+        "3430304",
+        "3448110",
+        "3548666",
+        "3616702",
+        "3648745",
+        "3666677",
+        "3682467",
+        "3689018",
+        "3691093",
+        "3692560",
+        "3713318",
+        "3717039",
+        "3747498",
+        "3748418",
+        "3753791",
+        "3773752",
+        "3803909",
+        "3824978",
+        "3825100",
+        "3830851",
+        "3830890",
+        "3838859",
+        "3843612",
+        "3869353",
+        "3872621"
+    ],
+    "failed_targets": [],
+    "duplicate_targets_count": 1,
+    "duplicate_targets": [
+        {
+            "target": "3629117",
+            "spkid": "50092353"
+        }
+    ],
+    "failure_rate_pct": 0.0,
+    "circuit_breaker_threshold_pct": 25.0,
+    "circuit_breaker_passed": true,
+    "output_tables": [
+        "fact_sbdb_object_snapshot.parquet",
+        "fact_sbdb_orbit.parquet",
+        "fact_sbdb_orbit_element.parquet",
+        "fact_sbdb_physical_parameter.parquet"
+    ]
+}

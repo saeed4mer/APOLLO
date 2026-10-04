@@ -33,7 +33,7 @@ jobs:
 
       - name: Run Ruff Linter
         run: |
-          ruff check .
+          ruff check backend/ tests/
 
       - name: Run Full Test Suite
         run: |

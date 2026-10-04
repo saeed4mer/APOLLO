@@ -1,0 +1,12 @@
+{
+    "run_id": "504e1c852c3f",
+    "start_date": "2026-10-01",
+    "end_date": "2026-10-07",
+    "records_received": 1,
+    "valid_records": 1,
+    "skipped_records": 0,
+    "rejection_pct": 0.0,
+    "rejection_threshold_pct": 20.0,
+    "gate_passed": true,
+    "created_at": "2026-10-01T12:31:49.071240+00:00"
+}
