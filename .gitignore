@@ -1,15 +1,20 @@
+# Environment & Virtual Environments
 .env
+.venv/
+venv/
 __pycache__/
+*.pyc
 .pytest_cache/
 .ruff_cache/
-*.db
-*.parquet
-asteroids_raw.json
-asteroids.csv
-*_summary.json
-sbdb_raw_*.json
-sentry_risk_snapshot_raw.json
-dq_*.json
+.vscode/
+.idea/
+
+# Dynamic Transient Data Outputs
+data/exports/*.db
 run_manifest.json
 sbdb_targets.txt
 crosswalk_out/
+
+# Node & Frontend
+frontend/node_modules/
+frontend/dist/

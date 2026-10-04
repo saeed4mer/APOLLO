@@ -1,0 +1,50 @@
+{
+  "dq_run_id": "29e3ef485ccb",
+  "timestamp": "2026-10-02T14:34:52.813344+00:00",
+  "stage": "check-outputs",
+  "execution_mode": "CURRENT_PRODUCTION",
+  "overall_status": "FAILED",
+  "summary": {
+    "total_checks": 3,
+    "passed": 2,
+    "failed": 1,
+    "warnings": 0,
+    "blocked": 0,
+    "not_applicable": 0
+  },
+  "checks": [
+    {
+      "check_name": "pre_resolution_output_accounting",
+      "dataset": "pipeline_outputs",
+      "status": "PASSED",
+      "diagnostic": "Pre-resolution output accounting verified: 8/8 artifacts co-present (mode: CURRENT_PRODUCTION, 0 orphan SBDB tables, non-empty)",
+      "metrics": {
+        "execution_mode": "CURRENT_PRODUCTION",
+        "expected_artifacts_count": 8,
+        "found_artifacts_count": 8,
+        "missing_artifacts": [],
+        "empty_artifacts": [],
+        "orphan_sbdb_tables": false
+      }
+    },
+    {
+      "check_name": "sbdb_structural_integrity",
+      "dataset": "sbdb",
+      "status": "PASSED",
+      "diagnostic": "SBDB structural integrity verified (34 objects, grain unique, ref integrity intact)",
+      "metrics": {
+        "grain_unique": true,
+        "referential_integrity": true
+      }
+    },
+    {
+      "check_name": "source_partition_dates",
+      "dataset": "pipeline_outputs",
+      "status": "FAILED",
+      "diagnostic": "NeoWs approach dates outside window [2026-10-01, 2026-10-07]: ['2026-09-29', '2026-09-29', '2026-09-29', '2026-09-29', '2026-09-30']",
+      "metrics": {
+        "partition_dates_valid": false
+      }
+    }
+  ]
+}

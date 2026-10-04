@@ -1,0 +1,125 @@
+"""FastAPI application entry point for the NASA Planetary Defense Platform.
+
+Provides clean importable `app` object and factory `create_app` for local serving and deployment.
+"""
+
+from __future__ import annotations
+
+import atexit
+import logging
+import os
+from pathlib import Path
+import shutil
+import tempfile
+
+import pyarrow as pa
+import pyarrow.parquet as pq
+from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
+
+try:
+    from backend.api.routes.asteroids import router as asteroids_router
+    from backend.api.routes.health import router as health_router
+    from backend.api.service import PROJECT_ROOT, REQUIRED_PARQUET_ASSETS
+except ImportError:
+    from api.routes.asteroids import router as asteroids_router
+    from api.routes.health import router as health_router
+    from api.service import PROJECT_ROOT, REQUIRED_PARQUET_ASSETS
+
+try:
+    from backend.storage.dashboard_data import DashboardDataProvider
+    from backend.pipelines.resolution.entity_resolution import BRIDGE_ASTEROID_IDENTIFIER_SCHEMA
+    from backend.pipelines.ingestion.nasa_asteroids import ASTEROID_SCHEMA
+    from backend.pipelines.ingestion.nasa_sbdb import SBDB_OBJECT_SCHEMA
+    from backend.pipelines.ingestion.nasa_sentry import SENTRY_RISK_SNAPSHOT_SCHEMA
+except ImportError:
+    from dashboard_data import DashboardDataProvider
+    from entity_resolution import BRIDGE_ASTEROID_IDENTIFIER_SCHEMA
+    from nasa_asteroids import ASTEROID_SCHEMA
+    from nasa_sbdb import SBDB_OBJECT_SCHEMA
+    from nasa_sentry import SENTRY_RISK_SNAPSHOT_SCHEMA
+
+logger = logging.getLogger(__name__)
+
+_PLACEHOLDER_SCHEMAS = {
+    "asteroids.parquet": ASTEROID_SCHEMA,
+    "bridge_asteroid_identifier.parquet": BRIDGE_ASTEROID_IDENTIFIER_SCHEMA,
+    "fact_sentry_risk_snapshot.parquet": SENTRY_RISK_SNAPSHOT_SCHEMA,
+    "fact_sbdb_object_snapshot.parquet": SBDB_OBJECT_SCHEMA,
+}
+if set(_PLACEHOLDER_SCHEMAS) != set(REQUIRED_PARQUET_ASSETS):
+    raise RuntimeError("placeholder lakehouse tables must match the health probe's required assets")
+
+
+def resolve_default_lakehouse(project_root: Path | str = PROJECT_ROOT) -> Path:
+    """Return the lakehouse directory the module-level app serves.
+
+    Checks data/lakehouse first, then project root, and falls back to a clean
+    in-memory temporary placeholder lakehouse if no data exists.
+    """
+    root = Path(project_root).resolve()
+    lakehouse = root / "data" / "lakehouse"
+    target_dir = lakehouse if (lakehouse.exists() and any((lakehouse / name).exists() for name in REQUIRED_PARQUET_ASSETS)) else root
+
+    if any((target_dir / name).exists() for name in REQUIRED_PARQUET_ASSETS):
+        return target_dir
+
+    placeholder = Path(tempfile.mkdtemp(prefix="apollo-empty-lakehouse-"))
+    atexit.register(shutil.rmtree, placeholder, ignore_errors=True)
+    for filename, schema in _PLACEHOLDER_SCHEMAS.items():
+        columns = [pa.array([], type=field.type) for field in schema]
+        pq.write_table(pa.Table.from_arrays(columns, schema=schema), placeholder / filename)
+    logger.warning(
+        "No local lakehouse found in %s or %s; serving an empty placeholder lakehouse from %s. "
+        "Run the ingestion pipeline to populate real data.",
+        target_dir,
+        root,
+        placeholder,
+    )
+    return placeholder
+
+
+def create_app(provider: DashboardDataProvider | None = None) -> FastAPI:
+    """Create and configure the FastAPI application instance."""
+    application = FastAPI(
+        title="NASA Planetary Defense Platform API",
+        description="Data serving API for Near-Earth Object intelligence, SBDB physical parameters, and Sentry risk data.",
+        version="1.0.0",
+        docs_url="/docs",
+        redoc_url="/redoc",
+    )
+
+    allowed_origins_env = os.getenv("CORS_ORIGINS", "*").strip()
+    allowed_origins = [o.strip() for o in allowed_origins_env.split(",") if o.strip()]
+    if not allowed_origins or "*" in allowed_origins:
+        allowed_origins = ["*"]
+    else:
+        for dev_origin in ("http://localhost:5173", "http://127.0.0.1:5173"):
+            if dev_origin not in allowed_origins:
+                allowed_origins.append(dev_origin)
+
+    application.add_middleware(
+        CORSMiddleware,
+        allow_origins=allowed_origins,
+        allow_credentials=True,
+        allow_methods=["GET", "OPTIONS"],
+        allow_headers=["*"],
+    )
+
+    if provider is not None:
+        application.state.provider = provider
+
+    application.include_router(health_router)
+    application.include_router(asteroids_router)
+
+    return application
+
+
+app = create_app(
+    provider=DashboardDataProvider(base_dir=resolve_default_lakehouse(), execution_mode="LOCAL")
+)
+
+if __name__ == "__main__":
+    import uvicorn
+
+    uvicorn.run("backend.api.main:app", host="127.0.0.1", port=8000, reload=True)
