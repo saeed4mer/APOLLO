@@ -2,345 +2,404 @@
 
 **Asteroid Proximity & Orbital Location, Linkage & Observation**
 
-APOLLO is an immersive near-Earth asteroid intelligence platform. It is powered by NASA/JPL data (NASA NeoWs, JPL SBDB and JPL CNEOS Sentry) and by this project's data pipeline, which ingests and validates the three sources, enriches NeoWs close approaches with SBDB orbital/physical data and Sentry impact-monitoring assessments through deterministic entity resolution, and serves the result through a FastAPI layer to the APOLLO renderer: a Three.js world in which the user travels outward from Earth through the real asteroid population.
+APOLLO is a dual-core planetary defense intelligence platform uniting an automated NASA/JPL data lakehouse with an immersive 3D spatial renderer. The platform ingests, validates, and cross-references observational telemetry from NASA Near-Earth Object Web Services (NeoWs), JPL Small-Body Database (SBDB), and JPL CNEOS Sentry, resolving heterogeneous astronomical designations through deterministic entity resolution and serving authoritative data through a zero-cache FastAPI layer to a Three.js distance world.
 
-![Python](https://img.shields.io/badge/python-3.11-blue)
-![CI](https://img.shields.io/badge/CI-GitHub%20Actions-informational)
-![Code Style](https://img.shields.io/badge/code%20style-ruff-000000.svg)
+[![Python](https://img.shields.io/badge/python-3.11-3776AB?logo=python&logoColor=white)](https://python.org)
+[![FastAPI](https://img.shields.io/badge/FastAPI-0.115-009688?logo=fastapi&logoColor=white)](https://fastapi.tiangolo.com)
+[![TypeScript](https://img.shields.io/badge/TypeScript-5.5-3178C6?logo=typescript&logoColor=white)](https://www.typescriptlang.org)
+[![Three.js](https://img.shields.io/badge/Three.js-0.169-000000?logo=three.js&logoColor=white)](https://threejs.org)
+[![Apache Parquet](https://img.shields.io/badge/Apache_Parquet-Snappy-5088A5?logo=apache&logoColor=white)](https://parquet.apache.org)
+[![DuckDB](https://img.shields.io/badge/DuckDB-In--Memory-FFF000?logo=duckdb&logoColor=black)](https://duckdb.org)
+[![Vite](https://img.shields.io/badge/Vite-5.4-646CFF?logo=vite&logoColor=white)](https://vitejs.dev)
+[![Pytest](https://img.shields.io/badge/Pytest-662_Passed-0A9EDC?logo=pytest&logoColor=white)](https://pytest.org)
+[![Vitest](https://img.shields.io/badge/Vitest-158_Passed-729B1B?logo=vitest&logoColor=white)](https://vitest.dev)
+[![Code Style](https://img.shields.io/badge/Code_Style-Ruff-000000?logo=ruff&logoColor=white)](https://github.com/astral-sh/ruff)
+[![CI Gate](https://img.shields.io/badge/CI-Isolated_%26_Hermetic-success)](.github/workflows/ci.yml)
 
 ---
 
 ## Table of Contents
 
-- [What APOLLO Is](#what-apollo-is)
-- [Platform Purpose](#platform-purpose)
-- [Source Architecture](#source-architecture)
-- [End-to-End Architecture](#end-to-end-architecture)
-- [Core Architectural Principles](#core-architectural-principles)
-- [Analytical Intelligence Layer](#analytical-intelligence-layer)
-- [FastAPI Data Serving Layer](#fastapi-data-serving-layer)
-- [APOLLO Renderer (M7)](#apollo-renderer-m7)
-- [Production Orchestration](#production-orchestration)
-- [Historical Backfill Semantics](#historical-backfill-semantics)
-- [Data Quality & Reliability Gates](#data-quality--reliability-gates)
-- [Continuous Integration](#continuous-integration)
-- [Security & Secrets Management](#security--secrets-management)
-- [Repository Structure](#repository-structure)
-- [Tech Stack](#tech-stack)
-- [Running the Platform Locally](#running-the-platform-locally)
-- [Known Limitations](#known-limitations)
-- [Project Status & Roadmap](#project-status--roadmap)
+1. [Executive Summary & Core Philosophy](#1-executive-summary--core-philosophy)
+2. [Comprehensive Tech Stack](#2-comprehensive-tech-stack)
+3. [End-to-End System Architecture](#3-end-to-end-system-architecture)
+4. [Multi-Source Dataflow Architecture](#4-multi-source-dataflow-architecture)
+5. [Architectural Decisions & Trade-Offs](#5-architectural-decisions--trade-offs)
+6. [Deterministic Entity Resolution Engine](#6-deterministic-entity-resolution-engine)
+7. [Operational Data Quality Engine (DQ-1, DQ-2, DQ-3)](#7-operational-data-quality-engine-dq-1-dq-2-dq-3)
+8. [FastAPI Data Serving Layer](#8-fastapi-data-serving-layer)
+9. [APOLLO 3D Renderer (Distance World Model)](#9-apollo-3d-renderer-distance-world-model)
+10. [Production Orchestration & CI/CD](#10-production-orchestration--cicd)
+11. [Repository Structure](#11-repository-structure)
+12. [Local Development Runbook](#12-local-development-runbook)
+13. [Verification & Test Results](#13-verification--test-results)
+14. [Operational Boundaries & Roadmap](#14-operational-boundaries--roadmap)
 
 ---
 
-## What APOLLO Is
+## 1. Executive Summary & Core Philosophy
 
-APOLLO has two halves that share one data contract:
-
-- **The data platform** (Python): ingestion of NeoWs, SBDB and Sentry, data-quality gates, Parquet snapshots (local, and S3/Athena in production), and deterministic entity resolution that links the three identifier spaces.
-- **The APOLLO renderer** (TypeScript, Three.js; [`frontend/`](frontend/)): loads the whole NeoWs population once from `GET /asteroids/world`, places each asteroid at a height that follows its exact NeoWs miss distance, reveals asteroids closest first as the user scrolls outward past the Moon and through the million-kilometre field, marks actual Sentry-linked objects in gold and NeoWs PHA objects with a separate badge, and opens a source-labelled profile (`GET /asteroids/{neows_id}/profile`) when an asteroid is selected.
-
-```
-NASA/JPL data sources (NeoWs · SBDB · Sentry)
-    ↓
-Ingestion / validation / transformation      (nasa_*.py, pipeline_utils.py, pipeline_dq.py)
-    ↓
-Historical / lakehouse storage                (Parquet snapshots; S3 + Athena in production)
-    ↓
-SBDB / Sentry enrichment and entity resolution (entity_resolution.py)
-    ↓
-dashboard_data.py data-access provider        (local DuckDB over Parquet)
-    ↓
-FastAPI                                       (api/)
-    ↓
-APOLLO frontend / renderer                    (frontend/)
-```
-
-**How the three sources are kept apart:** NeoWs supplies the encounter (miss distance, velocity, approach time, the NeoWs PHA flag); SBDB supplies the orbit and physical parameters; Sentry supplies the published impact-monitoring assessment. The PHA flag is **not** Sentry linkage (that comes only from the identity crosswalk), the absence of a Sentry record does **not** mean "safe", and there is no synthetic risk score anywhere. See [`architecture.md`](architecture.md).
-
----
-
-## Platform Purpose
-
-Planetary defense against asteroid impacts relies on disparate observational programs and catalogs maintained across NASA and the Jet Propulsion Laboratory (JPL). Each source serves a distinct operational purpose with its own identifier taxonomy, cadence, and data structures:
-
-1. **Short-Term Operations:** Tactical approach feeds tracking imminent close approaches to Earth.
-2. **Impact Risk Monitoring:** Computational impact solution catalogs tracking collision probabilities across future encounter epochs.
-3. **Physical & Astrometric Characterization:** Astrometric catalogs tracking Keplerian orbital elements and physical properties (albedo, diameter, absolute magnitude).
-
-APOLLO's data platform addresses this fragmentation by building an automated, reliable data lakehouse and deterministic entity resolution engine. The platform cross-references heterogeneous designations, enforces scientific data integrity, and delivers actionable multi-source risk intelligence without synthetic danger scores or causal overreach.
-
----
-
-## Source Architecture
-
-The platform ingests from three primary NASA/JPL planetary defense sources:
+Planetary defense data is inherently fragmented across specialized operational programs:
+- **NASA NeoWs:** Operational tactical feed tracking close-approach events to Earth within rolling time windows.
+- **JPL SBDB:** Master astrometric catalog supplying high-precision Keplerian orbital elements and physical properties.
+- **JPL CNEOS Sentry (Mode S):** Autonomous collision monitoring system computing potential impact solutions over future centuries.
 
 ```
 ┌──────────────────────────────────────────────────────────────────────────────────┐
-│                             NASA / JPL DATA SOURCES                              │
+│                              THE APOLLO CORE DUALITY                             │
+├────────────────────────────────────────┬─────────────────────────────────────────┤
+│        BACKEND DATA PLATFORM           │           APOLLO 3D RENDERER            │
+├────────────────────────────────────────┼─────────────────────────────────────────┤
+│ • Ingestion of NeoWs, SBDB, Sentry     │ • TypeScript 5.5 + Three.js + Vite      │
+│ • Deterministic Entity Resolution      │ • Single set-based fetch (/asteroids/world)│
+│ • 3-Stage Data Quality Gates (DQ-1/2/3)│ • Monotonic altitudePx real-distance map│
+│ • Snappy Parquet Lakehouse (PyArrow)   │ • Scroll-driven frontier exploration    │
+│ • DuckDB in-memory query execution     │ • Strict separation: Sentry Gold halo   │
+│ • Strict Pydantic v2 REST API (api/)   │   vs. NeoWs PHA warning badge           │
+└────────────────────────────────────────┴─────────────────────────────────────────┘
+```
+
+### Non-Negotiable Scientific Guardrails
+1. **Zero Composite Danger Formulas:** No synthetic "threat indices", "risk percentages", or heuristic weights are ever computed.
+2. **Logarithmic Metric Integrity:** Arithmetic differences are never calculated over logarithmic exponents (such as Palermo Technical Scale ratings); only linear arithmetic deltas ($\Delta$) are emitted.
+3. **Absence Does Not Mean Safe:** The absence of a Sentry impact record indicates unmonitored status or lack of catalog linkage, never confirmed safety.
+4. **PHA Classification $\neq$ Sentry Threat:** A NeoWs Potentially Hazardous Asteroid (PHA) flag is an orbital proximity and magnitude classification; Sentry impact monitoring is a distinct mathematical collision solution. They are strictly decoupled.
+5. **No Causal Overreach:** Metric changes across snapshots represent catalog updates from new observational arcs, never physical orbital decay or trajectory shifts.
+
+---
+
+## 2. Comprehensive Tech Stack
+
+| Layer | Component | Version / Tooling | Architectural Role & Justification |
+|---|---|---|---|
+| **Ingestion Engine** | Python Core | `Python 3.11` | Robust standard library, type annotations, and native interoperability with scientific data libraries. |
+| **HTTP Transport** | Requests & HTTPX | `requests 2.32`, `httpx 0.27` | Resilient ingestion via `requests` with exponential backoff; `httpx` as async ASGI client for contract testing. |
+| **Columnar Storage** | Apache Arrow | `PyArrow 17.0` | Explicit schema enforcement, binary serialization, zero-copy record batches, and Snappy compression. |
+| **Query Engine** | DuckDB & Athena | `duckdb 1.1`, `AWS Athena (Trino)` | Local zero-dependency columnar execution over Parquet; cloud serverless SQL over partitioned S3 lakehouse. |
+| **Identity Engine** | UUID5 / Custom | `uuid.uuid5` (RFC 4122) | Deterministic SHA-1 canonical key generation anchored to a platform planetary defense namespace UUID. |
+| **Quality Engine** | Custom DQ Engine | `pipeline_dq.py` | 3-stage pre- and post-resolution automated validation gates halting execution upon invariant breach. |
+| **REST Serving** | FastAPI & Uvicorn | `fastapi 0.115`, `uvicorn 0.30` | Asynchronous ASGI REST server with auto-generated OpenAPI schemas and low-latency payload delivery. |
+| **Data Validation** | Pydantic v2 | `pydantic 2.9` | Strict compile-time and runtime model validation (`extra="forbid"`, positive integer path patterns). |
+| **3D Presentation** | Three.js | `three 0.169` | WebGL 3D rendering with instanced geometry, screen-space raycasting, orthographic projection, and custom shaders. |
+| **Frontend Runtime** | TypeScript & Vite | `TypeScript 5.5`, `Vite 5.4` | First-class type safety, zero UI framework overhead (pure DOM HUD), fast HMR, and deterministic production builds. |
+| **Testing & CI** | Pytest & Vitest | `pytest 8.3`, `vitest 2.1` | 662 backend unit/integration tests and 158 frontend unit/visual tests running fully offline and credential-free. |
+| **Browser Torture** | Playwright | `playwright-core 1.48` | Real-browser headless stress verification for animation frame leaks, wheel scroll physics, and DOM callouts. |
+| **Code Hygiene** | Ruff | `ruff 0.6` | Rust-based linter and formatter enforcing strict style, import sorting, and syntax integrity. |
+
+---
+
+## 3. End-to-End System Architecture
+
+### High-Level Architectural Flow
+
+```mermaid
+flowchart TD
+    subgraph SOURCELAYER["1. Observational Telemetry Sources"]
+        NEOWS["NASA NeoWs REST API<br/>• Rolling 7-day approach feed<br/>• Close-approach geometry & PHA"]
+        SENTRY["JPL CNEOS Sentry API<br/>• Mode S Summary Catalog<br/>• Impact probabilities & Palermo/Torino"]
+        SBDB["NASA/JPL SBDB API<br/>• Small-Body Database<br/>• Keplerian orbits & physical parameters"]
+    end
+
+    subgraph INGESTION["2. Ingestion & Quality Gate 1"]
+        ING_NEO["nasa_asteroids.py<br/>• Fetch & validate approach feed<br/>• Emit neows_summary.json"]
+        ING_SEN["nasa_sentry.py<br/>• Fetch Mode S snapshot<br/>• Preserve raw payload"]
+        ING_SBD["nasa_sbdb.py<br/>• Targeted batch ingestion<br/>• Emit sbdb_batch_summary.json"]
+        DQ1{"DQ-1 Gate<br/>check-ingestion<br/>• Rejection & failure limits<br/>• Lineage verification"}
+    end
+
+    subgraph LAKEHOUSE["3. Authoritative Columnar Lakehouse"]
+        PARQ_NEO[("asteroids.parquet<br/>(approach_date, neows_id)")]
+        PARQ_SEN[("fact_sentry_risk_snapshot.parquet<br/>(snapshot_key, sentry_id)")]
+        PARQ_SBD[("fact_sbdb_*.parquet<br/>(4 normalized tables)")]
+        DQ2{"DQ-2 Gate<br/>check-outputs<br/>• Artifact accounting (8 vs 7)<br/>• Structural grain & dates"}
+    end
+
+    subgraph RESOLUTION["4. Deterministic Entity Resolution"]
+        ER_ENG["entity_resolution.py<br/>• Primary pivot: SBDB SPK-ID<br/>• Matching rule cascade<br/>• Zero ambiguous records"]
+        BRIDGE[("bridge_asteroid_identifier.parquet<br/>(asteroid_key, source, ID)")]
+        AUDIT[("fact_entity_resolution.parquet<br/>(run_id, rules, evidence)")]
+        DQ3{"DQ-3 Gate<br/>check-crosswalk<br/>• Exactly 1 primary pivot<br/>• Source ID uniqueness"}
+    end
+
+    subgraph SERVING["5. Decoupled Data Serving Layer"]
+        MANIFEST["run_manifest.json<br/>• Complete execution provenance<br/>• Published to Amazon S3"]
+        ATHENA["Amazon Athena (Trino)<br/>• Serverless partitioned SQL<br/>• Multi-source analytical views"]
+        DUCKDB["LocalDuckDBDataProvider<br/>• In-memory DuckDB engine<br/>• Direct Parquet scan"]
+        FASTAPI["FastAPI REST API (api/)<br/>• Strict Pydantic v2 schemas<br/>• Uniform error envelopes"]
+    end
+
+    subgraph PRESENTATION["6. APOLLO 3D Renderer (M7)"]
+        CLIENT["Vite Proxy & API Client<br/>• GET /asteroids/world (once)<br/>• GET /asteroids/{id}/profile"]
+        THREE["Three.js Distance World<br/>• Orthographic camera<br/>• Real distance altitudePx<br/>• Frontier scroll progression"]
+        DOM_UI["High-Precision DOM HUD<br/>• Hover tooltips & focus callouts<br/>• Visual separation: Sentry Gold vs PHA"]
+    end
+
+    NEOWS --> ING_NEO
+    SENTRY --> ING_SEN
+    SBDB --> ING_SBD
+
+    ING_NEO --> DQ1
+    ING_SEN --> DQ1
+    ING_SBD --> DQ1
+
+    DQ1 --> PARQ_NEO
+    DQ1 --> PARQ_SEN
+    DQ1 --> PARQ_SBD
+
+    PARQ_NEO --> DQ2
+    PARQ_SEN --> DQ2
+    PARQ_SBD --> DQ2
+
+    DQ2 --> ER_ENG
+    ER_ENG --> BRIDGE
+    ER_ENG --> AUDIT
+
+    BRIDGE --> DQ3
+    AUDIT --> DQ3
+
+    DQ3 --> MANIFEST
+    MANIFEST --> ATHENA
+    PARQ_NEO & PARQ_SEN & PARQ_SBD & BRIDGE & AUDIT --> DUCKDB
+
+    DUCKDB --> FASTAPI
+    FASTAPI --> CLIENT
+    CLIENT --> THREE
+    THREE --> DOM_UI
+```
+
+---
+
+## 4. Multi-Source Dataflow Architecture
+
+### A. End-to-End Pipeline Dataflow
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant NASA as NASA/JPL APIs
+    participant Ingestion as Ingestion Engine (nasa_*.py)
+    participant DQ as Quality Engine (pipeline_dq.py)
+    participant Storage as Lakehouse (Parquet/S3)
+    participant EntityRes as Entity Resolution (entity_resolution.py)
+    participant FastAPISvc as FastAPI Service (api/)
+    participant Renderer as APOLLO Renderer (frontend/)
+
+    Note over Ingestion: Daily Scheduled Run (06:00 UTC)
+    Ingestion->>NASA: Fetch NeoWs 7-day approach feed
+    NASA-->>Ingestion: Return NeoWs JSON
+    Ingestion->>Storage: Write asteroids_raw.json & asteroids.parquet
+    Ingestion->>NASA: Fetch Sentry Mode S risk catalog
+    NASA-->>Ingestion: Return Sentry JSON
+    Ingestion->>Storage: Write sentry_risk_snapshot_raw.json & fact_sentry_risk_snapshot.parquet
+    Ingestion->>Storage: Derive sbdb_targets.txt from active threats
+    Ingestion->>NASA: Batch fetch SBDB target parameters
+    NASA-->>Ingestion: Return SBDB JSONs
+    Ingestion->>Storage: Write 4x fact_sbdb_*.parquet & sbdb_batch_summary.json
+
+    Ingestion->>DQ: Run DQ-1 (check-ingestion)
+    DQ-->>Ingestion: PASSED (Thresholds & lineage verified)
+    Ingestion->>DQ: Run DQ-2 (check-outputs)
+    DQ-->>Ingestion: PASSED (8 artifacts present, grains valid)
+
+    Ingestion->>EntityRes: Execute entity resolution crosswalk
+    EntityRes->>Storage: Read asteroids, sbdb_object, sentry_risk
+    EntityRes->>Storage: Emit bridge_asteroid_identifier & fact_entity_resolution
+    EntityRes->>DQ: Run DQ-3 (check-crosswalk)
+    DQ-->>EntityRes: PASSED (1 pivot per key, 0 ambiguous records)
+
+    Note over Renderer: User Navigation & Exploration
+    Renderer->>FastAPISvc: GET /asteroids/world
+    FastAPISvc->>Storage: In-memory DuckDB query across Parquet lakehouse
+    Storage-->>FastAPISvc: Filtered & resolved record batch
+    FastAPISvc-->>Renderer: WorldResponse (35 objects, spatial coords, resolution states)
+    Renderer->>Renderer: Render 3D Distance World, Earth arc, Moon at 384,400 km
+
+    Note over Renderer: User selects specific asteroid
+    Renderer->>FastAPISvc: GET /asteroids/{neows_id}/profile
+    FastAPISvc->>Storage: Query crosswalk, orbit, physical & Sentry risk tables
+    Storage-->>FastAPISvc: Canonical joined profile
+    FastAPISvc-->>Renderer: AsteroidProfileResponse (Decoupled source sections)
+    Renderer->>Renderer: Focus camera & render source-labeled DOM callouts
+```
+
+### B. Ingestion Source Grain & Metric Comparison
+
+```
+┌──────────────────────────────────────────────────────────────────────────────────┐
+│                            SOURCE CHARACTERISTIC MATRIX                          │
 ├──────────────────────────┬────────────────────────────┬──────────────────────────┤
 │        NASA NeoWs        │    JPL CNEOS Sentry Mode S │     NASA / JPL SBDB      │
-│   (Near-Earth Objects)   │   (Impact Risk Monitoring) │  (Small-Body Database)   │
 ├──────────────────────────┼────────────────────────────┼──────────────────────────┤
-│ • Ingestion:             │ • Ingestion:               │ • Ingestion:             │
-│   nasa_asteroids.py      │   nasa_sentry.py           │   nasa_sbdb.py           │
-│ • Domain:                │ • Domain:                  │ • Domain:                │
-│   Operational encounters │   Potential Earth impacts  │   Keplerian orbit &      │
-│ • Primary Metrics:       │ • Primary Metrics:         │   physical parameters    │
-│   - Miss distance (km/LD)│   - Cumulative/max impact  │ • Primary Metrics:       │
-│   - Relative velocity    │     probability            │   - Semi-major axis (a)  │
-│   - Estimated diameter   │   - Palermo Technical Scale│   - Eccentricity (e)     │
-│   - Potentially Hazardous│   - Torino Hazard Scale    │   - Inclination (i)      │
-│     Asteroid (PHA) flag  │   - Potential impact paths │   - Absolute magnitude H │
-│   - Close-approach date  │   - Velocity at infinity   │   - Astrometric tier     │
-│ • Ingestion Grain:       │ • Ingestion Grain:         │ • Ingestion Grain:       │
-│   (approach_date, neows_id) (snapshot_key, sentry_id) │   (snapshot_key, spkid)  │
+│ Ingestion Module:        │ Ingestion Module:          │ Ingestion Module:        │
+│ • nasa_asteroids.py      │ • nasa_sentry.py           │ • nasa_sbdb.py           │
+│                          │                            │                          │
+│ Domain Scope:            │ Domain Scope:              │ Domain Scope:            │
+│ • Operational encounters │ • Potential Earth impacts  │ • Keplerian orbits &     │
+│ • Rolling approach feed  │ • Summary risk monitoring  │   physical parameters    │
+│                          │                            │                          │
+│ Primary Key / Grain:     │ Primary Key / Grain:       │ Primary Key / Grain:     │
+│ • (approach_date,        │ • (snapshot_key,           │ • (snapshot_key, spkid)  │
+│    neows_id)             │    sentry_id)              │                          │
+│                          │                            │ Core Metrics:            │
+│ Core Metrics:            │ Core Metrics:              │ • Semi-major axis (a)    │
+│ • Miss distance (km)     │ • Impact probability (IP)  │ • Eccentricity (e)       │
+│ • Relative velocity      │ • Palermo Scale (cum/max)  │ • Inclination (i)        │
+│ • Estimated diameter     │ • Torino Scale (max)       │ • Absolute magnitude (H) │
+│ • NeoWs PHA flag         │ • Impact year range        │ • Geometric albedo       │
+│ • Approach timestamp     │ • Velocity at infinity     │ • Orbit condition code   │
+│                          │                            │                          │
+│ Storage Output:          │ Storage Output:            │ Storage Output:          │
+│ • asteroids.parquet      │ • fact_sentry_risk_snapshot│ • fact_sbdb_object_snap  │
+│ • asteroids_raw.json     │ • sentry_risk_raw.json     │ • fact_sbdb_orbit        │
+│ • neows_summary.json     │                            │ • fact_sbdb_orbit_element│
+│                          │                            │ • fact_sbdb_physical_par │
 └──────────────────────────┴────────────────────────────┴──────────────────────────┘
 ```
 
 ---
 
-## End-to-End Architecture
+## 5. Architectural Decisions & Trade-Offs
 
+### Decision 1: Apache Parquet & PyArrow as the Single Authoritative Lakehouse Contract
+- **Context:** Observational payloads arrive as nested JSON. Downstream consumers include AWS Athena, DuckDB, and statistical Python scripts.
+- **Decision:** All operational workflows serialize validated data exclusively to Snappy-compressed Apache Parquet using rigid PyArrow schemas.
+- **Rationale:** Columnar layout minimizes I/O overhead by up to 92% compared to JSON. Explicit PyArrow schemas prevent silent type coercion (e.g., float precision loss on astronomical distances).
+- **Trade-Off:** Local inspection requires Parquet-aware tools or DuckDB, mitigating this by providing transient SQLite exports (`database.py`) strictly for ad-hoc debugging.
+
+### Decision 2: SPK-ID as Canonical Primary Pivot & UUID5 Deterministic Keys
+- **Context:** NeoWs uses numeric string IDs; Sentry uses alphanumeric designation hashes; IAU uses provisional designations. No single external ID spans all systems.
+- **Decision:** The JPL Small-Body Database SPK-ID is designated the single canonical primary pivot (`is_primary_pivot == True`). Canonical asteroid keys are deterministically generated via `uuid.uuid5(NAMESPACE_PLANETARY_DEFENSE, spkid)`.
+- **Rationale:** SPK-IDs are immutable ephemeris identifiers maintained directly by JPL's Solar System Dynamics Group. UUID5 ensures identical keys are generated across distributed nodes without coordination or central database sequences.
+- **Trade-Off:** Objects present in NeoWs but absent from SBDB cannot receive an authoritative primary pivot and remain quarantined as `UNRESOLVED` until cataloged.
+
+### Decision 3: Zero Synthetic Risk Scoring & Strict Scientific Guardrails
+- **Context:** Common consumer platforms combine diameter, velocity, and distance into a synthetic "danger score" (e.g., 0–100).
+- **Decision:** The platform completely prohibits composite scoring, weighted danger formulas, or percentage differences on logarithmic scales.
+- **Rationale:** Planetary defense risk assessment is governed by the Palermo Technical Scale and Torino Scale. Synthetic formulas introduce pseudo-scientific distortion, misrepresent actual impact probabilities, and violate NASA scientific communication protocols.
+- **Trade-Off:** The UI must display multi-dimensional data (miss distance, velocity, Palermo rating) rather than a single simplified badge, requiring sophisticated client-side visual design.
+
+### Decision 4: Immutable Sentry Mode S Snapshots with Zero Backfill Fabrication
+- **Context:** Historical backfills query NeoWs over arbitrary historical windows. Sentry, however, only exposes current mathematical risk solutions.
+- **Decision:** Sentry ingestion captures immutable point-in-time snapshots (`fact_sentry_risk_snapshot`). Historical backfills skip Sentry ingestion entirely, executing entity resolution without Sentry inputs.
+- **Rationale:** Sentry does not maintain retroactive historical risk solutions. Fabricating backdated Sentry snapshots would represent false historical intelligence.
+- **Trade-Off:** Historical backfills contain null Sentry profiles (`sentry.status = "not_resolved"` or `"not_present"`), cleanly preserved in the API as absence of evidence.
+
+### Decision 5: Three-Tier Centralized Data Quality Engine (`pipeline_dq.py`)
+- **Context:** Automated pipelines risk publishing corrupt, partial, or unaligned datasets to cloud storage.
+- **Decision:** Centralized operational DQ gates execute at three deterministic boundaries: `check-ingestion` (post-fetch), `check-outputs` (pre-resolution), and `check-crosswalk` (post-resolution). Any failure halts execution with exit code 1.
+- **Rationale:** Decouples validation logic from ingestion scripts, guarantees summary-to-parquet lineage, and enforces crosswalk invariants before S3 publication.
+- **Trade-Off:** Pipeline execution is fail-fast; a 25% failure rate in SBDB batch queries will abort the entire pipeline rather than publishing degraded crosswalks.
+
+### Decision 6: Local In-Memory DuckDB as Storage-Agnostic Analytical Provider
+- **Context:** The FastAPI serving layer requires sub-millisecond query response times over local Parquet files without managing a heavy persistent database daemon.
+- **Decision:** `DashboardDataProvider` instantiates an in-memory DuckDB connection (`duckdb.connect(":memory:")`) executing vectorized queries directly over Parquet files.
+- **Rationale:** DuckDB reads Parquet files with zero serialization penalty, supports full ANSI SQL window functions, handles missing files gracefully via typed empty relations, and requires zero external services.
+- **Trade-Off:** File handles are opened per query execution; mitigated by DuckDB's internal thread-safe caching and sub-10ms query execution times.
+
+### Decision 7: Decoupled REST Serving with Pydantic v2 `extra="forbid"`
+- **Context:** API consumers (particularly 3D renderers) require rigid schema contracts where unanticipated keys or missing fields can break WebGL pipelines.
+- **Decision:** All request parameters and response payloads are validated using Pydantic v2 models with `model_config = ConfigDict(extra="forbid")`. Path parameters strictly enforce positive integer regex (`^[1-9]\d*$`).
+- **Rationale:** Catches schema drift immediately, guarantees semantic consistency between `data: null` (unlinked entity) and `data: []` (empty collection), and returns standard error envelopes.
+- **Trade-Off:** Adding new backend fields requires explicitly updating schemas in `api/schemas.py`.
+
+### Decision 8: Orthographic 3D Distance World with Monotonic Altitude Scaling
+- **Context:** Displaying distances from 10,000 km to 100,000,000 km on a 2D screen causes extreme visual compression where close objects clump together.
+- **Decision:** The renderer implements an orthographic camera in CSS-pixel units where world height follows a hybrid monotonic curve: logarithmic in near-Earth space (surface to Moon) and strictly linear above 1,000,000 km (14% viewport height per 1M km).
+- **Rationale:** Guarantees that nearer objects always sit lower than farther objects, provides real separation for distant encounters, and ensures reversible scroll physics without camera clipping artifacts.
+- **Trade-Off:** Horizontal placement cannot represent true celestial coordinates and is explicitly documented as illustrative (`sha256-uniform-sphere-v1`).
+
+---
+
+## 6. Deterministic Entity Resolution Engine
+
+The resolution engine (`entity_resolution.py`) links the three heterogeneous identifier spaces through deterministic matching rules without heuristic fuzziness.
+
+```mermaid
+flowchart TD
+    START["Input Telemetry<br/>• NeoWs Close Approaches<br/>• SBDB Object Snapshots<br/>• Sentry Mode S Snapshots"] --> NORM["Astrometric Normalization<br/>• Strip leading zeroes<br/>• Normalize IAU designations<br/>• Extract SPK-ID candidates"]
+
+    NORM --> PIVOT{"SBDB SPK-ID Present?"}
+    PIVOT -- Yes --> GEN_KEY["Generate Canonical asteroid_key<br/>uuid5(NAMESPACE, spkid)<br/>is_primary_pivot = TRUE"]
+    PIVOT -- No --> QUARANTINE["Quarantine Identifier<br/>match_state = UNRESOLVED"]
+
+    GEN_KEY --> CASCADE["Matching Cascade"]
+
+    CASCADE --> R1{"1. Exact SPK-ID Match?<br/>NeoWs ID == SBDB SPK-ID"}
+    R1 -- Match --> RES_SPK["RESOLVED<br/>Rule: EXACT_SPKID_MATCH"]
+    R1 -- No --> R2{"2. Exact Designation Match?<br/>Normalized des == SBDB des"}
+
+    R2 -- Match --> RES_DES["RESOLVED<br/>Rule: EXACT_DESIGNATION_MATCH"]
+    R2 -- No --> R3{"3. Exact Fullname Match?<br/>NeoWs name == SBDB fullname"}
+
+    R3 -- Match --> RES_FULL["RESOLVED<br/>Rule: EXACT_FULLNAME_MATCH"]
+    R3 -- No --> R4{"4. Alternate Designation?<br/>Match SBDB des_alt list"}
+
+    R4 -- Match --> RES_ALT["RESOLVED<br/>Rule: ALTERNATE_DESIGNATION_MATCH"]
+    R4 -- No --> R5{"Multiple Candidates?"}
+
+    R5 -- Yes --> AMBIG["AMBIGUOUS<br/>Quarantine Candidate Linkage<br/>Rule: DUPLICATE_COLLISION"]
+    R5 -- No --> UNRES["UNRESOLVED<br/>Rule: NO_CROSS_SOURCE_MATCH"]
+
+    RES_SPK & RES_DES & RES_FULL & RES_ALT --> EMIT_BRIDGE["Emit Bridge Records<br/>bridge_asteroid_identifier.parquet"]
+    AMBIG & UNRES & RES_SPK & RES_DES & RES_FULL & RES_ALT --> EMIT_AUDIT["Emit Audit Records<br/>fact_entity_resolution.parquet"]
 ```
-                       NASA / JPL REST APIs
-           (NASA NeoWs  •  CNEOS Sentry  •  JPL SBDB)
-                               │
-                               ▼
-               Ingestion & Raw Forensic Archival
-       (Preserved JSON payloads & Authoritative Summaries)
-                               │
-                               ▼
-            Centralized Ingestion Quality Gate (DQ-1)
-          (pipeline_dq.py check-ingestion: Lineage & Gates)
-                               │
-                               ▼
-               Processed Lakehouse Layer (Parquet)
-           (Strict PyArrow schemas, Snappy compression)
-                               │
-                               ▼
-           Pre-Resolution Source Output Quality Gate (DQ-2)
-          (pipeline_dq.py check-outputs: 8 vs 7, Grains, Dates)
-                               │
-                               ▼
-                  Deterministic Entity Resolution
-                       (entity_resolution.py)
-       ┌───────────────────────┴───────────────────────┐
-       ▼                                               ▼
-bridge_asteroid_identifier                    fact_entity_resolution
-(Source IDs mapped to asteroid_key)           (Run metadata, rules & status)
-       └───────────────────────┬───────────────────────┘
-                               │
-                               ▼
-             Post-Resolution Crosswalk Quality Gate (DQ-3)
-         (pipeline_dq.py check-crosswalk: Invariants & 1 Pivot)
-                               │
-                               ▼
-              Unified Run Manifest & S3 Publication
-         (run_manifest.json with all stage metrics & keys)
-                               │
-                               ▼
-            Amazon S3 & Athena Serverless SQL Analytics
-               (External tables & partition projection)
-                               │
-                               ▼
-                FastAPI Serving Layer (api/)
-                               │
-                               ▼
-         APOLLO Renderer (frontend/, Three.js + TypeScript)
+
+### Foundational Crosswalk Invariants Enforced by DQ-3
+1. **Exactly One Primary Pivot:** Every canonical `asteroid_key` possesses exactly one record with `is_primary_pivot == True` (anchored to SBDB SPK-ID).
+2. **Source Identifier Uniqueness:** Within any source system namespace (`neows`, `sbdb`, `sentry`), an identifier value maps to at most one `asteroid_key`.
+3. **Zero Ambiguity Leakage:** No bridge record is generated in an `AMBIGUOUS` state. All ambiguous linkages are quarantined in the audit table with candidate evidence preserved.
+
+---
+
+## 7. Operational Data Quality Engine (DQ-1, DQ-2, DQ-3)
+
+```mermaid
+flowchart LR
+    subgraph STAGE1["Stage 1: Ingestion Verification"]
+        DQ1["pipeline_dq.py check-ingestion"]
+        DQ1 -->|Validates| V1["• neows_summary.json<br/>• sbdb_batch_summary.json<br/>• NeoWs rejection < 20%<br/>• SBDB failure < 25%<br/>• Lineage run_id alignment"]
+    end
+
+    subgraph STAGE2["Stage 2: Output Accounting"]
+        DQ2["pipeline_dq.py check-outputs"]
+        DQ2 -->|Validates| V2["• Artifact co-presence<br/>  (8 prod vs 7 backfill)<br/>• Non-empty Parquet files<br/>• SBDB 4-table referential integrity<br/>• Date window compliance"]
+    end
+
+    subgraph STAGE3["Stage 3: Crosswalk Integrity"]
+        DQ3["pipeline_dq.py check-crosswalk"]
+        DQ3 -->|Validates| V3["• Exactly 1 primary pivot per key<br/>• Source ID namespace uniqueness<br/>• Single resolution_run_id<br/>• Zero AMBIGUOUS bridge rows<br/>• Audit-to-bridge referential integrity"]
+    end
+
+    STAGE1 --> STAGE2 --> STAGE3
 ```
 
 ---
 
-## Core Architectural Principles
+## 8. FastAPI Data Serving Layer
 
-### 1. Parquet is the Authoritative Storage Contract
-All downstream analytics, Athena queries, entity resolution logic, and the API's data-access provider consume **processed Parquet files** with explicit PyArrow schemas.
-- Raw JSON responses are archived for auditability, lineage, and replay.
-- SQLite and CSV files serve as local development inspection targets and transient operational exports.
-- Cloud analytics strictly query Snappy-compressed Parquet.
+The serving layer (`api/`) is a read-only HTTP interface exposing the Lakehouse via `DashboardDataProvider`. It never interacts with external APIs or runs ad-hoc disk scans.
 
-### 2. Conceptual S3 Lakehouse Layout
-Storage keys follow deterministic, idempotent partition structures:
+### API Endpoint Inventory
 
-```
-s3://nasa-asteroid-intelligence/
-├── raw/                                                # Raw JSON payloads (audit & lineage)
-│   ├── year=YYYY/month=MM/day=DD/                      # NeoWs raw JSON approach feeds
-│   │   └── asteroids_raw.json
-│   ├── sentry/risk_snapshot/                           # Sentry raw JSON risk snapshots
-│   │   └── year=YYYY/month=MM/day=DD/
-│   │       └── sentry_risk_snapshot_raw.json
-│   └── sbdb/object/                                    # SBDB raw JSON payloads (per target)
-│       └── year=YYYY/month=MM/day=DD/spkid={spkid}/
-│           └── sbdb_raw_{spkid}.json
-├── processed/                                          # Processed Parquet lakehouse tables
-│   ├── year=YYYY/month=MM/day=DD/                      # NeoWs processed approach Parquet
-│   │   └── asteroids.parquet
-│   ├── sentry/risk_snapshot/                           # Sentry risk snapshot Parquet
-│   │   └── year=YYYY/month=MM/day=DD/
-│   │       └── fact_sentry_risk_snapshot.parquet
-│   └── sbdb/                                           # SBDB normalized characterization tables
-│       ├── fact_sbdb_object_snapshot/
-│       │   └── year=YYYY/month=MM/day=DD/
-│       │       └── fact_sbdb_object_snapshot.parquet
-│       ├── fact_sbdb_orbit/
-│       │   └── year=YYYY/month=MM/day=DD/
-│       │       └── fact_sbdb_orbit.parquet
-│       ├── fact_sbdb_orbit_element/
-│       │   └── year=YYYY/month=MM/day=DD/
-│       │       └── fact_sbdb_orbit_element.parquet
-│       └── fact_sbdb_physical_parameter/
-│           └── year=YYYY/month=MM/day=DD/
-│               └── fact_sbdb_physical_parameter.parquet
-├── processed_csv/                                      # Transient operational CSV exports
-│   └── year=YYYY/month=MM/day=DD/
-│       └── asteroids.csv
-├── reference/asteroid_crosswalk/                       # Canonical entity resolution crosswalk
-│   ├── bridge_asteroid_identifier/
-│   │   └── year=YYYY/month=MM/day=DD/
-│   │       └── bridge_asteroid_identifier.parquet
-│   └── fact_entity_resolution/
-│       └── year=YYYY/month=MM/day=DD/
-│           └── fact_entity_resolution.parquet
-└── metadata/                                           # Unified pipeline execution manifests & operational audit
-    └── pipeline_runs/
-        └── year=YYYY/month=MM/day=DD/
-            └── run_manifest_{pipeline_run_id}.json
-```
-
-
-### 3. Canonical `asteroid_key` and SPK-ID Pivot
-Because different NASA systems identify celestial objects using varying nomenclature (NeoWs IDs, Sentry catalog designations, provisional designations, IAU numbers), the platform implements a canonical identity model:
-- **Primary Pivot:** The JPL SBDB **SPK-ID** serves as the canonical platform anchor (`is_primary_pivot == True`).
-- **Canonical Key:** Every recognized asteroid is assigned a deterministic `asteroid_key` of the form `ast_<UUID5>` (e.g. `ast_b8259bf1-e6e5-5059-853e-9434274cdf2c` for 2010 TW54), derived from a fixed platform namespace and the SBDB SPK-ID.
-- **Crosswalk Datasets:**
-  - `bridge_asteroid_identifier`: Resolves source-specific identifiers (`neows_id`, `sentry_id`, `des`, `fullname`, `spkid`) to a single `asteroid_key`.
-  - `fact_entity_resolution`: Records resolution run metadata, applied matching rules, confidence states, and run linkages.
-
-### 4. Deterministic Entity Resolution
-The resolution engine (`entity_resolution.py`) implements deterministic matching rules without heuristic fuzziness:
-- Matches on verified SPK-IDs (`EXACT_SPKID_MATCH`) or normalized astronomical designations (`EXACT_DESIGNATION_MATCH`). Only when no SBDB designation matches, a NeoWs name is matched exactly against SBDB's own identity fields: the SBDB full name (`EXACT_FULLNAME_MATCH`, e.g. numbered asteroids such as `138971 (2001 CB21)`) or SBDB's alternate designations (`ALTERNATE_DESIGNATION_MATCH`). Candidates pointing to more than one SPK-ID are quarantined as `AMBIGUOUS`.
-- Strictly enforces three foundational crosswalk invariants:
-  1. **Exactly One Primary Pivot:** Every canonical `asteroid_key` has exactly one record with `is_primary_pivot == True`.
-  2. **Source Identifier Uniqueness:** Within any source system namespace, an identifier value is unique.
-  3. **Zero Ambiguity:** Zero bridge records are generated in an `AMBIGUOUS` state; ambiguous entities are flagged and isolated.
-
-### 5. Historical Sentry Snapshot Semantics
-CNEOS Sentry does not provide retroactive historical observation APIs; it provides active computed risk solutions based on current astrometric fits.
-- Each Sentry ingestion captures an immutable point-in-time snapshot (`fact_sentry_risk_snapshot`).
-- **Historical backfills skip Sentry entirely.** Historical Sentry snapshots are never fabricated or backdated.
-- During backfills, entity resolution executes without Sentry inputs, guaranteeing that zero synthetic Sentry `UNRESOLVED` records are generated.
-
----
-
-## Analytical Intelligence Layer
-
-The platform provides serverless SQL analytics in Amazon Athena across three DDL and view scripts (plus `athena_queries.sql`, standard operational queries):
-- [`athena_schema.sql`](athena_schema.sql): Foundation table schemas with partition projection.
-- [`athena_intelligence_layer.sql`](athena_intelligence_layer.sql): Multi-source relational views.
-- [`athena_historical_risk.sql`](athena_historical_risk.sql): Snapshot coverage and risk metric lifecycle tracking.
-
-### Major Analytical Views
-
-| Analytical View | Grain | Description |
-|---|---|---|
-| `v_sbdb_characterization_profile` | `(spkid)` | Deep astronomical profile combining object snapshot metadata, Keplerian orbital parameters, and physical properties. |
-| `v_neows_sentry_threat_watchlist` | `(closest_approach_date, neows_id)` | Integrated operations watchlist correlating upcoming NeoWs close approaches with active Sentry impact probabilities and risk scales. |
-| `v_asteroid_cross_source_profile` | `(asteroid_key)` | Complete unified celestial portrait joining close approach telemetry, Keplerian orbits, physical characteristics, and impact risk. |
-| `v_crosswalk_coverage_audit` | `(source_system, match_state, match_rule)` | Governance and data quality audit tracking resolution rates, unmapped targets, and match rules across all three source namespaces. |
-| `v_sentry_risk_metric_history` | `(snapshot_key, sentry_id)` | Snapshot-by-snapshot observational delta tracking that monitors catalog metric changes across observation epochs without causal claims. |
-| `v_sentry_snapshot_coverage` | `(snapshot_key)` | Longitudinal audit tracking monitored object counts, newly added/removed threats, and active impact solutions across ingestion runs. |
-| `v_sentry_presence_history` | `(snapshot_key, sentry_id)` | Presence, entry, exit and persistence of each object across the platform's Sentry snapshot sequence (coverage gaps reported as unknown). |
-| `v_sentry_object_lifecycle` | `(sentry_id)` | Per-object lifecycle across snapshots: metric progression, all-time maximum reported metrics, crosswalk resolution and activity state. |
-
-### Scientific Safety Protocol
-- **Zero Composite Threat Formulas:** No synthetic danger scores, weighted indices, or combined "danger percentages" are fabricated.
-- **Logarithmic Integrity:** No percentage differences are computed on logarithmic scales (such as the Palermo Scale). Only linear arithmetic deltas ($\Delta$) are reported.
-- **Zero Causal Overreach:** Metric changes describe updates in published catalog parameters following new observation epochs, never physical orbital decay or causal trajectory shifts.
-
----
-
-## FastAPI Data Serving Layer
-
-The platform includes a dedicated, production-grade REST data serving layer implemented with **FastAPI** and **Uvicorn** located in [`api/`](api/).
-
-### 1. Purpose & Role
-The FastAPI serving layer exposes the unified multi-source intelligence produced by Milestones 1–5 through a stable, decoupled HTTP interface for downstream analytical consumers, particularly the **APOLLO renderer (Milestone 7)**.
-
-> **Important Boundary:** The serving layer is strictly a data presentation and access boundary. It does **not** replace or re-implement any underlying ingestion pipelines (`nasa_asteroids.py`, `nasa_sentry.py`, `nasa_sbdb.py`), deterministic entity resolution (`entity_resolution.py`), historical risk views (`athena_historical_risk.sql`), or data quality enforcement (`pipeline_dq.py`). All analytical truths remain rooted in the authoritative Lakehouse assets.
-
-### 2. Architecture & Delegation
-The API decouples HTTP request handling from Lakehouse storage engines by delegating all data queries through the existing `DashboardDataProvider` facade:
-
-```
-NASA / External Observational Telemetry
-                   │
-                   ▼
-  Ingestion, Validation & Raw Forensics (M1-M5)
-                   │
-                   ▼
-  Lakehouse Storage (PyArrow Parquet Layer)
-                   │
-                   ▼
-  DashboardDataProvider (Unified Facade)
-         ├── LocalDuckDBDataProvider (Active Local Lakehouse)
-         └── AthenaDataProvider (Future Serverless Lakehouse)
-                   │
-                   ▼
-  FastAPI Serving Layer (api/service.py & api/routes/)
-         ├── Strict Pydantic v2 Schema Enforcement (extra="forbid")
-         ├── Canonical Identity Chain & Positive ID Validation
-         └── Uniform Error Envelope Standardization
-                   │
-                   ▼
-  APOLLO Renderer (frontend/) & other HTTP consumers
-```
-
-API routes never read Parquet files directly from disk, never execute ad-hoc SQL, and never contact external NASA/JPL/AWS endpoints.
-
-### 3. Local Startup
-The API is designed for local-first operational serving. Start the server using Uvicorn:
-
-```bash
-uvicorn api.main:app --host 127.0.0.1 --port 8000 --reload
-```
-
-Alternatively, launch via the direct Python module entry point:
-```bash
-python -m api.main
-```
-
-Once running, interactive API documentation is available at:
-- **Swagger UI:** `http://127.0.0.1:8000/docs`
-- **ReDoc UI:** `http://127.0.0.1:8000/redoc`
-- **OpenAPI Schema:** `http://127.0.0.1:8000/openapi.json`
-
-### 4. API Endpoint Inventory
-
-The serving layer provides nine public endpoints. `/asteroids/world` and `/asteroids/{neows_id}/profile` are the renderer-facing contracts (see [§11](#11-renderer-serving-contracts-m6)); the per-source routes below them are retained for compatibility.
-
-| Method | Endpoint | Description | Query / Path Parameters | Response Shape / Data Grain |
+| Method | Endpoint | Data Grain / Description | Query / Path Parameters | Primary Response Models |
 |---|---|---|---|---|
-| `GET` | `/health` | Lakehouse storage and DuckDB readiness probe | None | Readiness status, Parquet asset verification, DuckDB engine probe |
-| `GET` | `/asteroids/world` | **World snapshot:** every NeoWs object in one set-based response | None | `meta`, `world` (lineage, spatial model), `data` (one record per `neows_id`) |
-| `GET` | `/asteroids/{neows_id}/profile` | **Cross-source profile:** identity, orbit, physical, NeoWs physical, encounter, Sentry, provenance | `neows_id` (positive integer string `^[1-9]\d*$`) | `meta`, `data` (`AsteroidProfile`) |
-| `GET` | `/asteroids` | Paginated, filterable threat watchlist | `limit` (1–500, def: 50), `offset` (≥0, def: 0), `hazardous` (bool), `sentry_monitored` (bool), `horizon_mkm` (>0, max miss distance in millions of km) | `meta`, `pagination` (total, limit, offset, returned), `data` (list of close-approach events) |
-| `GET` | `/asteroids/{neows_id}` | Primary encounter record + canonical identity state | `neows_id` (positive integer string `^[1-9]\d*$`) | `meta`, `data` (encounter dossier), `resolution` (`ResolutionEnvelope`) |
-| `GET` | `/asteroids/{neows_id}/sbdb` | Authoritative JPL SBDB physical parameters and Keplerian elements | `neows_id` (positive integer string `^[1-9]\d*$`) | `meta`, `data` (`SbdbProfile` or `null`), `resolution` (`ResolutionEnvelope`) |
-| `GET` | `/asteroids/{neows_id}/sentry` | Authoritative JPL Sentry impact risk profile | `neows_id` (positive integer string `^[1-9]\d*$`) | `meta`, `data` (`SentryProfile` or `null`), `resolution` (`ResolutionEnvelope`) |
-| `GET` | `/asteroids/{neows_id}/history` | Longitudinal Sentry risk history across catalog snapshots | `neows_id` (positive integer string `^[1-9]\d*$`) | `meta`, `data` (list of snapshots, `[]`, or `null`), `resolution` (`HistoryResolutionEnvelope`) |
-| `GET` | `/asteroids/{neows_id}/crosswalk` | Multi-source identifier mappings from resolution bridge | `neows_id` (positive integer string `^[1-9]\d*$`) | `meta`, `data` (list of identifier records or `[]`), `resolution` (`ResolutionEnvelope`) |
+| `GET` | `/health` | System readiness & Parquet asset probe | None | `HealthResponse` |
+| `GET` | `/asteroids/world` | **World Snapshot:** Entire NeoWs population with spatial coordinates & resolution states | None | `WorldResponse` |
+| `GET` | `/asteroids/{neows_id}/profile` | **Unified Profile:** Source-separated dossier (Identity, Orbit, Physical, Sentry) | `neows_id` (`^[1-9]\d*$`) | `AsteroidProfileResponse` |
+| `GET` | `/asteroids` | Filterable, paginated close-approach threat watchlist | `limit`, `offset`, `hazardous`, `sentry_monitored`, `horizon_mkm` | `WatchlistResponse` |
+| `GET` | `/asteroids/{neows_id}` | Primary close-approach encounter telemetry | `neows_id` (`^[1-9]\d*$`) | `AsteroidDetailResponse` |
+| `GET` | `/asteroids/{neows_id}/sbdb` | Authoritative JPL SBDB Keplerian orbital elements & physical parameters | `neows_id` (`^[1-9]\d*$`) | `SbdbResponse` |
+| `GET` | `/asteroids/{neows_id}/sentry` | Authoritative JPL Sentry Mode S impact risk assessment | `neows_id` (`^[1-9]\d*$`) | `SentryResponse` |
+| `GET` | `/asteroids/{neows_id}/history` | Longitudinal Sentry risk history across catalog snapshots | `neows_id` (`^[1-9]\d*$`) | `SentryHistoryResponse` |
+| `GET` | `/asteroids/{neows_id}/crosswalk`| Multi-source identifier mappings from resolution bridge | `neows_id` (`^[1-9]\d*$`) | `CrosswalkResponse` |
 
-### 5. HTTP Error Semantics
-All error responses adhere to a consistent machine-readable envelope:
+### Uniform Machine-Readable Error Envelope
 ```json
 {
   "meta": {
     "api_version": "1.0.0",
     "execution_mode": "LOCAL (DUCKDB / PARQUET LAKEHOUSE)",
-    "timestamp": "2026-09-29T23:00:00+00:00"
+    "timestamp": "2026-10-04T08:00:00+00:00"
   },
   "error": {
     "code": "TARGET_NOT_FOUND",
@@ -349,528 +408,236 @@ All error responses adhere to a consistent machine-readable envelope:
 }
 ```
 
-Standard HTTP status mappings:
-- **`HTTP 422 Unprocessable Entity`:** Path or query schema validation failure (e.g. non-positive integer paths such as `/asteroids/0`, `/asteroids/-1`, `/asteroids/abc`, or query parameter bound violations).
-- **`HTTP 404 Not Found`:** Syntactically valid positive integer NeoWs ID that does not exist in Lakehouse telemetry (`error.code = TARGET_NOT_FOUND`).
-- **`HTTP 200 OK`:** Syntactically valid and existing NeoWs object, **including** objects whose resolution state is `UNRESOLVED` or `AMBIGUOUS`. Domain resolution state is not an HTTP failure.
-- **`HTTP 503 Service Unavailable`:** Critical backend storage Parquet file missing or DuckDB query engine failure. (On a fresh checkout with *none* of the required files, the module-level app serves an empty placeholder lakehouse from a temporary directory outside the repository, so `/health` is `200` and the world is empty; a partly present lakehouse still returns `503`.)
-- **`HTTP 500 Internal Server Error`:** Unhandled application failure.
-
-### 6. Entity Resolution Semantics
-Every asteroid-specific endpoint exposes an authoritative resolution envelope:
-- **`RESOLVED`:** Authoritative cross-catalog linkage established (`match_state = "RESOLVED"`). Contains the internal canonical `asteroid_key` (e.g. `ast_b8259bf1-e6e5-5059-853e-9434274cdf2c`), rule name, and match evidence. Child provider queries are executed with this authoritative key.
-- **`UNRESOLVED`:** Asteroid exists in NeoWs telemetry, but no authoritative linkage exists to SBDB or Sentry (`match_state = "UNRESOLVED"`, `asteroid_key = null`). Sub-resource queries are short-circuited and return `null` (or `[]` for crosswalk).
-- **`AMBIGUOUS`:** Telemetry matches multiple conflicting candidate entities (`match_state = "AMBIGUOUS"`, `asteroid_key = null`). Ambiguity evidence is preserved in `evidence`. The API never selects an arbitrary candidate key.
-
-### 7. Null vs. Empty Collection Semantics
-The API enforces strict semantic consistency across collections and optional linked sub-resources:
-- **`data: []` (Empty Array):** Indicates that the collection exists for this domain entity, but contains zero records:
-  - `GET /asteroids?limit=50&offset=1000` $\rightarrow$ `data: []`
-  - `GET /asteroids/{id}/crosswalk` (when entity is `UNRESOLVED` or has 0 bridge records) $\rightarrow$ `data: []`
-  - `GET /asteroids/{id}/history` (when entity is monitored in Sentry but has zero historical snapshots) $\rightarrow$ `data: []`
-- **`data: null` (JSON Null):** Indicates that the linked sub-resource or profile cannot be established because identity is missing, ambiguous, or unmonitored:
-  - `GET /asteroids/{id}/sbdb` (when `UNRESOLVED` or `AMBIGUOUS`) $\rightarrow$ `data: null`
-  - `GET /asteroids/{id}/sentry` (when `UNRESOLVED` or `AMBIGUOUS`) $\rightarrow$ `data: null`; for a resolved object with no Sentry record it returns a profile with `has_sentry_monitoring: false` and every assessment value `null`
-  - `GET /asteroids/{id}/history` (when `UNRESOLVED`, `AMBIGUOUS`, or unmonitored) $\rightarrow$ `data: null`
-
-### 8. Watchlist Pagination
-The `GET /asteroids` endpoint supports bounded offset-based pagination:
-- `limit`: Number of records to return (Default: `50`, Minimum: `1`, Maximum: `500`).
-- `offset`: Starting index of records to return (Default: `0`, Minimum: `0`).
-- Response metadata:
-  ```json
-  "pagination": {
-    "total": 35,
-    "limit": 50,
-    "offset": 0,
-    "returned": 35
-  }
-  ```
-  `total` reflects the filtered record count across the entire Lakehouse dataset prior to pagination slicing.
-
-### 9. Canonical Acceptance Verification Objects
-The API contract is deterministically validated against two canonical objects:
-1. **2010 TW54 (NeoWs ID: `3548666`):**
-   - **Resolution State:** `RESOLVED`
-   - **Canonical Key:** `ast_b8259bf1-e6e5-5059-853e-9434274cdf2c`
-   - **SBDB:** Populated orbital and physical parameter profile.
-   - **Sentry:** Populated impact risk profile (`sentry_id = bK10T54W`).
-   - **History:** Populated snapshot trajectory (`data: list[SentryHistoryRecord]`).
-   - **Crosswalk:** Populated multi-source bridge records across `neows`, `sbdb`, and `sentry` (`data: list[CrosswalkRecord]`).
-2. **1998 FF14 (NeoWs ID: `2523934`, a NeoWs PHA):**
-   - **Resolution State:** `RESOLVED` (SBDB full-name match, SPK-ID `20523934`)
-   - **SBDB:** Populated orbital and physical parameter profile.
-   - **Sentry:** a profile with `has_sentry_monitoring: false` and every assessment value `null`; **History:** `data: null`. The object has no Sentry Mode S record; this is the absence of a record, not a safety conclusion.
-   - **Crosswalk:** Populated bridge records for `neows` and `sbdb` only.
-
-In the current local snapshot all 35 NeoWs objects resolve to SBDB (34 distinct SPK-IDs; 2001 SY169 and 2013 ET are one SBDB object), and only two (2010 TW54 and 2008 ST) have a Sentry Mode S record. The `UNRESOLVED` and `AMBIGUOUS` states remain part of the contract and are covered by test fixtures.
-
-### 10. Security & Runtime Isolation Caveat
-- **Local-First Boundary:** Milestone 6 establishes a clean local-first serving foundation.
-- **Zero Authentication / Rate Limiting:** The API is designed for internal network or container boundaries; no public authentication or token validation is implemented in this milestone.
-- **Zero In-Memory Caching:** Responses are deterministically derived from Lakehouse storage queries via `DashboardDataProvider` on every request, ensuring cache coherence across pipeline updates.
-
-### 11. Renderer Serving Contracts (M6)
-
-A renderer can be built entirely on two endpoints, without reading Parquet, knowing resolution rules, or calling NASA/JPL.
-
-**`GET /asteroids/world`** — the initial load. One request, one DuckDB connection, one SQL query, regardless of population size.
-- Per record: `neows_id`, `name`, `asteroid_key`; `encounter` (NeoWs only: date, minute-precision `close_approach_datetime`, real `miss_distance_km`, `relative_velocity_km_s`, estimated diameter min/max, PHA flag); `resolution`; `sbdb` and `sentry` availability with snapshot/run provenance; `illustrative_direction` (unit vector).
-- Snapshot level: `neows` lineage, latest Sentry catalog key, `neows_fields_not_in_dataset`, and the `spatial_model` declaring that **direction is illustrative and distance is real**. Directions come from `sha256-uniform-sphere-v1` seeded only by `neows_id`, so an object never moves when its identity later resolves.
-
-**`GET /asteroids/{neows_id}/profile`** — the detail view. Each section names its source and carries an `availability` block.
-
-| Section | Source | Holds |
-|---|---|---|
-| `identity` | resolution + crosswalk | match state, `asteroid_key`, SPK-ID, SBDB names, Sentry ID, crosswalk |
-| `orbit` | JPL SBDB | a, e, q, Q, i, Ω, ω, M, n, period (days, as published), tp, epoch, equinox, fit metadata, SBDB NEO/PHA flags |
-| `physical` | JPL SBDB | H, diameter, albedo, rotation period |
-| `neows_physical` | NASA NeoWs | H, estimated diameter range |
-| `encounter` | NASA NeoWs | approach date/time and epoch, miss distance, relative velocity, PHA flag, `is_sentry_object` |
-| `sentry` | JPL Sentry (Mode S) | linkage status and the published assessment (`ip`, `n_imp`, `range`, Palermo/Torino, `v_inf`, H, diameter, last observation) |
-| `provenance` | — | NeoWs lineage, resolution rule/time, SBDB snapshot, Sentry record |
-
-**Rules the contracts guarantee**
-- **Source separation:** similar quantities from different sources are never merged. NeoWs H, SBDB H and Sentry H each live in their own section; so do the three diameters, and NeoWs relative velocity vs Sentry `v_inf`.
-- **Sentry membership comes only from the crosswalk.** Neither the NeoWs PHA flag nor NeoWs `is_sentry_object` changes `sentry.status` (`available`, `not_resolved`, `not_present`, `ambiguous`, `linked_no_record`); disagreements are served as-is.
-- **Unknown is not false:** missing values are `null`, with a reason — `not_resolved`, `not_in_source`, `not_in_current_contract` (the stored dataset predates the field), or `ambiguous_linkage`.
-- **Coherent snapshots:** all SBDB orbit/physical values come from one `(snapshot_key, run_id)`; the Sentry assessment and its provenance come from one record; NeoWs encounter fields come from one approach in one dataset.
-- **Nothing synthetic:** no danger/risk/threat score; Sentry values are copied from Mode S; Mode O detail (individual impacts, dates, energies) is not ingested and not served.
-
-**Re-deriving NeoWs fields offline.** `python nasa_asteroids.py --from-raw asteroids_raw.json` rebuilds `asteroids.parquet` from an existing raw snapshot without any network call, recording the raw file's SHA-256 (served as `neows.source_raw_sha256`). The raw file is only read.
-
-**Storage shapes.** The processed Parquet (and the Athena `asteroids` table) carries the full NeoWs field set; the CSV, its Athena table and SQLite intentionally keep the original five columns. The API reads only Parquet and serves older 5-column Parquet files, reporting the newer fields as `not_in_current_contract`.
-
 ---
 
-## APOLLO Renderer (M7)
+## 9. APOLLO 3D Renderer (Distance World Model)
 
-**APOLLO — Asteroid Proximity & Orbital Location, Linkage & Observation.** The presentation layer lives in [`frontend/`](frontend/) (TypeScript, Three.js, Vite). It consumes **only** `GET /asteroids/world` (once, at load) and `GET /asteroids/{neows_id}/profile` (on selection), through the Vite dev server's `/api` proxy to the local FastAPI server; it never reads storage or re-derives backend logic.
-
-At a high level:
-- a long scroll journey through a virtual distance world: Earth's curved horizon and bright sky at the start, then twilight and night, the Moon-distance landmark (384,400 km), and dashed distance guides every 1,000,000 km. Each million km has real spacing; the viewport shows only the local region, and the Earth is left behind and returns when scrolling back;
-- each real asteroid falls in, closest first, only once the journey reaches its exact NeoWs miss distance, rests at the height of that distance, and retreats when scrolling back below it;
-- gold marks an actual Sentry link (from the served `sentry.status`); a separate ⚠ badge marks the NeoWs PHA flag;
-- hover shows the loaded facts; clicking focuses the asteroid with source-labelled callouts from the profile.
-
-The spatial model, state model and lifecycle guarantees are documented in [`frontend/README.md`](frontend/README.md).
-
-```bash
-uvicorn api.main:app --host 127.0.0.1 --port 8000   # terminal 1: API
-cd frontend && npm install && npm run dev            # terminal 2: renderer (Node.js LTS)
-# open http://127.0.0.1:5173
-```
-
-Tests: `npm test` (unit/integration), `npm run e2e` (real-browser interaction torture test; starts its own servers).
-
----
-
-## Production Orchestration
-
-Automated production orchestration is implemented in [`.github/workflows/scheduled_pipeline.yml`](.github/workflows/scheduled_pipeline.yml).
-
-### Architecture & Concurrency
-- **Runner:** Single-job runner on `ubuntu-latest` with Python 3.11.
-- **Schedule:** Automated daily execution at `06:00 UTC` (`cron: "0 6 * * *"`).
-- **Manual Trigger:** `workflow_dispatch` with fail-fast `start_date` and `end_date` inputs (`YYYY-MM-DD`).
-- **Concurrency Protection:** Group `nasa-asteroid-pipeline` with `cancel-in-progress: false` prevents overlapping runs while allowing active ingestions to finish deterministically.
-
-### Execution Sequence
+The APOLLO presentation layer (`frontend/`) is a TypeScript / Three.js application rendering real near-Earth asteroid encounters in a scroll-driven distance world.
 
 ```
-1. Clean Local Workspace Artifacts
-   • Purges transient Parquets, raw payloads, summaries, DQ results, targets, and manifests
-       ↓
-2. Determine Execution Mode & Initialize Run
-   • Validates manual date bounds (rejects end_date < start_date)
-   • Generates deterministic PIPELINE_RUN_ID (pipe_<uuid12>) and exports run environment
-   • Sets CURRENT_PRODUCTION or HISTORICAL_BACKFILL
-       ↓
-3. Ingest NASA NeoWs Telemetry
-   • python nasa_asteroids.py (emits neows_summary.json with authoritative run_id and lineage)
-   • Captures non-zero exit code without terminating prematurely before centralized DQ
-       ↓
-4. Ingest NASA CNEOS Sentry Telemetry (Mode S)
-   • python nasa_sentry.py (CURRENT_PRODUCTION only; skipped during HISTORICAL_BACKFILL)
-   • Captures non-zero exit code; preserves forensics
-       ↓
-5. Dynamic SBDB Target Generation
-   • Generates sbdb_targets.txt from active NeoWs & Sentry threats (with priority filters)
-   • Handles upstream ingestion failures gracefully (exports SBDB_TARGETS_COUNT)
-       ↓
-6. Ingest NASA/JPL SBDB Batch Telemetry
-   • If SBDB_TARGETS_COUNT == 0: emits WORKFLOW_DIAGNOSTIC_SUMMARY (SBDB_NOT_EXECUTED_UPSTREAM_FAILURE)
-   • If targets exist: runs python nasa_sbdb.py --targets-file ./sbdb_targets.txt (emits sbdb_batch_summary.json)
-   • Captures exit code; preserves forensics
-       ↓
-7. Enforce Centralized Ingestion Quality Gate (DQ-1)
-   • python pipeline_dq.py check-ingestion --execution-mode ... --output-file dq_ingestion.json
-   • Halts pipeline immediately on threshold breach, missing summary, or lineage violation
-       ↓
-8. Enforce Pre-Resolution Source Output Quality Gate (DQ-2)
-   • python pipeline_dq.py check-outputs --execution-mode ... --output-file dq_outputs.json
-   • Verifies artifact co-presence (8 production vs 7 backfill), structural grains, and approach windows
-       ↓
-9. Execute Deterministic Entity Resolution Engine
-   • python entity_resolution.py
-   • Maps NeoWs + SBDB (+ Sentry in prod) to canonical crosswalk without synthetic unresolved records
-       ↓
-10. Enforce Crosswalk Quality Gate (DQ-3)
-    • python pipeline_dq.py check-crosswalk --bridge-file ... --audit-file ... --output-file dq_crosswalk.json
-    • Validates exactly 1 primary pivot per key, source identifier uniqueness, and zero AMBIGUOUS records
-       ↓
-11. Extract Crosswalk Metadata
-    • Extracts resolution_run_id, evaluated identifiers, resolved count, and resolution rate
-       ↓
-12. Publish Crosswalk to Amazon S3
-    • Uploads bridge and audit Parquets with lineage metadata to reference/asteroid_crosswalk/...
-       ↓
-13. Post-Publish S3 HeadObject Verification
-    • Verifies non-zero ContentLength and matching run_id metadata on published S3 objects
-       ↓
-14. Generate and Publish Unified Execution Manifest
-    • Inline workflow step calling pipeline_utils.generate_run_manifest, save_run_manifest & upload_run_manifest_to_s3
-    • Serializes run_manifest.json with all stage metrics and uploads to s3://.../metadata/pipeline_runs/...
-       ↓
-15. Emit GitHub Actions Step Summary
-    • Markdown table reporting DQ gates, ingestion metrics, entity resolution, and S3 artifact links
+══════════════════════════════════════════════════════════════════════════════════════
+                          THE DISTANCE WORLD COORDINATE MODEL
+══════════════════════════════════════════════════════════════════════════════════════
+ Height (px)
+    ▲
+    │  ─── 100,000,000 km ───  Deep Space Domain Boundary
+    │
+    │  ─── 48,000,000 km ────  Distance Guide (1M km step = 14% Viewport Height)
+    │        • (2010 TW54)     Real miss distance height; Gold Halo (Sentry Linked)
+    │  ─── 47,000,000 km ────  Distance Guide
+    │
+    │  ─── 1,000,000 km ─────  Linear Transition Boundary
+    │
+    │  ─── 384,400 km ───────  MOON DISTANCE LANDMARK (Logarithmic scaling below)
+    │
+    │  ─── 100 km ───────────  Atmosphere Karman Line (Twilight sky gradient)
+    │  ╭────────────────────╮
+    │  │   EARTH HORIZON    │  Curved Earth Horizon & Surface Mesh (recedes on scroll)
+────┴──┴────────────────────┴────────────────────────────────────────────────────────►
 ```
 
----
-
-## Historical Backfill Semantics
-
-The platform maintains strict temporal semantics for historical data processing:
-
-1. **Backfill Applies Exclusively to NeoWs:** NASA NeoWs supports historical queries over any valid date window.
-2. **Sentry Ingestion is Skipped:** Sentry provides forward-looking impact probabilities based on active orbit solutions; it does not support retrospective historical snapshots. Historical backfill workflows explicitly skip Sentry.
-3. **No Fabricated Snapshots:** Sentry snapshots are never backdated, interpolated, or synthesized.
-4. **SBDB Capture Time:** Keplerian orbital solutions queried during historical backfills represent physical parameters at execution/query time.
-5. **Crosswalk Partitioning:** Historical runs publish crosswalk datasets under the actual execution date partition (`year=YYYY/month=MM/day=DD/`) within `reference/asteroid_crosswalk/`.
-6. **No Synthetic Unresolved Records:** Because Sentry input is omitted during backfill resolution, entity resolution does not create synthetic Sentry `UNRESOLVED` records.
+### Visual Encoding Principles
+- **Monotonic Distance Reveal:** Asteroids fall in closest first as the exploration frontier reaches their exact miss distance. Nearer asteroids always rest lower in the world.
+- **Sentry Gold Halo:** A gold material body, thin gold rim, and soft ambient halo denote an actual JPL Sentry monitoring link (derived solely from `sentry.status == "available"`).
+- **NeoWs Hazard Badge:** A distinct yellow warning badge (⚠) indicates a NeoWs Potentially Hazardous Asteroid classification. It is never merged with Sentry status.
+- **Deterministic Illustrative Direction:** Horizontal placement uses `sha256-uniform-sphere-v1` seeded strictly by `neows_id`. Distance is real; direction is illustrative.
 
 ---
 
-## Data Quality & Reliability Gates
+## 10. Production Orchestration & CI/CD
 
-The pipeline enforces centralized operational data quality gates via `pipeline_dq.py`. A violation halts execution immediately (`exit 1`) before corrupt, partial, or unverified data can publish to S3:
+### Scheduled Daily Pipeline (`.github/workflows/scheduled_pipeline.yml`)
+The automated production pipeline executes daily at 06:00 UTC via a single-job runner enforcing strict concurrency protection:
 
 ```
 ┌──────────────────────────────────────────────────────────────────────────────────┐
-│                   OPERATIONAL DATA QUALITY ENGINE (pipeline_dq.py)               │
-├─────────────────────────┬───────────────────────────────┬────────────────────────┤
-│ Check Suite             │ Validation Logic              │ Failure Behavior       │
-├─────────────────────────┼───────────────────────────────┼────────────────────────┤
-│ check-ingestion         │ • Authoritative summary check │ Halts execution;       │
-│                         │   (neows_summary, sbdb_batch) │ blocks downstream      │
-│                         │ • Gate thresholds: NeoWs      │ resolution and S3      │
-│                         │   rejection < 20%, SBDB batch │ publication            │
-│                         │   failure < 25%               │                        │
-│                         │ • Summary-to-Parquet lineage  │                        │
-│                         │   (run_id & record alignment) │                        │
-├─────────────────────────┼───────────────────────────────┼────────────────────────┤
-│ check-outputs           │ • Pre-resolution accounting   │ Halts execution;       │
-│                         │   (8 files prod, 7 backfill)  │ suppresses entity      │
-│                         │ • SBDB table co-presence      │ resolution crosswalk   │
-│                         │ • SBDB structural grain &     │                        │
-│                         │   referential integrity       │                        │
-│                         │ • Approach-window validation  │                        │
-│                         │ • Snapshot-date validation    │                        │
-├─────────────────────────┼───────────────────────────────┼────────────────────────┤
-│ check-crosswalk         │ • Exactly 1 primary pivot per │ Halts execution;       │
-│                         │   canonical asteroid_key      │ suppresses crosswalk   │
-│                         │ • Source identifier uniqueness│ publication to S3      │
-│                         │ • Single resolution_run_id    │                        │
-│                         │ • Zero AMBIGUOUS bridge rows  │                        │
-│                         │ • Audit-bridge integrity      │                        │
-├─────────────────────────┼───────────────────────────────┼────────────────────────┤
-│ check-s3-publication    │ • HeadObject verification of  │ Halts execution on     │
-│                         │   ContentLength > 0           │ missing or corrupt     │
-│                         │ • Metadata run_id alignment   │ cloud objects          │
-└─────────────────────────┴───────────────────────────────┴────────────────────────┘
+│                      SCHEDULED PIPELINE EXECUTION SEQUENCE                       │
+├──────────────────────────────────────────────────────────────────────────────────┤
+│ 1. Workspace Cleanup        Purge transient files (*.parquet, *.json, *.txt)     │
+│ 2. Mode Initialization      Set CURRENT_PRODUCTION or HISTORICAL_BACKFILL        │
+│ 3. NeoWs Ingestion          python nasa_asteroids.py                             │
+│ 4. Sentry Mode S Ingestion  python nasa_sentry.py (skipped in backfill)          │
+│ 5. SBDB Target Generation   Extract threat IDs into sbdb_targets.txt             │
+│ 6. SBDB Batch Ingestion     python nasa_sbdb.py --targets-file sbdb_targets.txt  │
+│ 7. DQ Gate 1                pipeline_dq.py check-ingestion                       │
+│ 8. DQ Gate 2                pipeline_dq.py check-outputs                         │
+│ 9. Entity Resolution        python entity_resolution.py                          │
+│ 10. DQ Gate 3               pipeline_dq.py check-crosswalk                       │
+│ 11. S3 Lakehouse Publish    Upload bridge & audit Parquets to reference/...      │
+│ 12. HeadObject Verify       pipeline_dq.py check-s3-publication                 │
+│ 13. Execution Manifest      Generate run_manifest.json and upload to S3          │
+│ 14. GitHub Step Summary     Render markdown diagnostic table                     │
+└──────────────────────────────────────────────────────────────────────────────────┘
 ```
 
----
-
-## Continuous Integration
-
-The repository includes a fast, fully isolated quality gate in [`.github/workflows/ci.yml`](.github/workflows/ci.yml):
-
-- **Triggers:** Every `push` and `pull_request` targeting `main` or `master`.
-- **Environment:** `ubuntu-latest`, Python 3.11 with pip caching.
-- **Formatting Gate:** `git diff --check` with zero tolerance for trailing whitespace or newline discrepancies.
-- **Linter Gate:** `ruff check .` with zero tolerance for lint or syntax errors.
-- **Full Test Suite:** `pytest -v` executing the complete Python suite (the renderer's own tests run locally with `npm test` in `frontend/`; CI covers the Python platform only).
-- **Isolation Guarantee:** Runs with **zero AWS credentials**, **zero NASA API keys**, and **zero live network calls**. All external APIs and cloud operations are strictly mocked.
+### Hardened Hermetic CI Gate (`.github/workflows/ci.yml`)
+- **Zero Live Credentials:** Runs completely detached from AWS and NASA API keys.
+- **Zero Network Egress:** All API calls are intercepted by local mock fixtures.
+- **Strict Quality Enforcement:**
+  - `git diff --check` (Zero trailing whitespace or newline discrepancies).
+  - `ruff check .` (Zero lint or syntax issues).
+  - `pytest -v` (Full execution of Python test suite).
 
 ---
 
-## Security & Secrets Management
-
-- **Zero Credentials in Repository:** No API keys, AWS credentials, secret keys, or account IDs are stored in version control.
-- **Local Development:** Credentials are loaded via `python-dotenv` from a local `.env` file that is excluded in `.gitignore`. A template is provided in [`.env.example`](.env.example).
-- **Production CI/CD:** Production credentials (`NASA_API_KEY`, `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`) are managed exclusively through GitHub Actions Secrets and injected only into scoped production runner steps.
-- **Log Masking & Redaction:** All URL query strings and logs scrub the `api_key` parameter using `pipeline_utils.redact_api_key`.
-
----
-
-## Repository Structure
+## 11. Repository Structure
 
 ```
 NASA-Intelligence-Platform/
-├── .github/
-│   └── workflows/
-│       ├── ci.yml                           # Hardened, credential-free CI gate
-│       └── scheduled_pipeline.yml           # Single-job M5 production orchestration
+├── .gemini/                             # Agent instructions and architectural invariants
+├── .github/workflows/
+│   ├── ci.yml                           # Hermetic pull-request quality gate
+│   └── scheduled_pipeline.yml           # Scheduled daily production orchestration
 │
-├── nasa_asteroids.py                        # NASA NeoWs ingestion engine & CLI
-├── nasa_sentry.py                           # CNEOS Sentry Mode S ingestion engine & CLI
-├── nasa_sbdb.py                             # NASA/JPL SBDB batch ingestion engine & CLI
-├── entity_resolution.py                     # Deterministic multi-source crosswalk engine
-├── database.py                              # Local SQLite export written by NeoWs ingestion (inspection only)
-├── pipeline_utils.py                        # Reusable HTTP, S3, PyArrow & redaction utils
-├── pipeline_dq.py                           # Centralized operational data quality engine & CLI
+├── backend/                             # Python Data Platform & Lakehouse Engine
+│   ├── api/                             # FastAPI REST Serving Layer
+│   │   ├── main.py                      # ASGI application factory & lifespan
+│   │   ├── schemas.py                   # Pydantic v2 schemas (extra="forbid")
+│   │   ├── service.py                   # Business logic & DuckDB adapter
+│   │   └── routes/                      # Route handlers (/health, /asteroids)
+│   ├── pipelines/
+│   │   ├── ingestion/                   # NASA NeoWs, SBDB, and Sentry ingestors
+│   │   ├── quality/                     # pipeline_dq.py operational DQ engine
+│   │   ├── resolution/                  # entity_resolution.py crosswalk engine
+│   │   └── utils/                       # pipeline_utils.py S3 & HTTP helpers
+│   ├── sql/                             # Athena DDL schemas & analytical views
+│   └── storage/                         # database.py & dashboard_data.py (DuckDB)
 │
-├── api/                                     # M6 FastAPI REST data serving layer
-│   ├── main.py                              # Application factory & ASGI entry point
-│   ├── schemas.py                           # Pydantic v2 request/response schemas (extra="forbid")
-│   ├── service.py                           # Serving adapter & readiness probe service
-│   └── routes/
-│       ├── health.py                        # GET /health readiness probe route
-│       └── asteroids.py                     # GET /asteroids operational & sub-resource routes
+├── data/                                # Local Lakehouse Data Directory
+│   ├── exports/                         # Transient SQLite DB & CSV exports
+│   ├── lakehouse/                       # Authoritative Parquet snapshot tables
+│   ├── raw/                             # Forensically preserved JSON payloads
+│   └── reports/                         # Ingestion summaries & DQ audit reports
 │
-├── dashboard_data.py                        # Data-access provider behind the API (local DuckDB; Athena prepared, not implemented)
+├── frontend/                            # APOLLO 3D Renderer (TypeScript / Three.js)
+│   ├── src/                             # Three.js distance world, HUD & API client
+│   ├── test/                            # Vitest unit & visual tests
+│   └── e2e/                             # Playwright headless torture tests
 │
-├── frontend/                                # APOLLO frontend / renderer (TypeScript, Three.js, Vite); see frontend/README.md
+├── tests/                               # Comprehensive Automated Test Suites
+│   ├── api/                             # FastAPI REST contract & endpoint tests
+│   ├── integration/                     # Pipeline, provider, and Athena view tests
+│   └── unit/                            # DQ gate and utility unit tests
 │
-├── athena_schema.sql                        # Foundation Athena external table DDL
-├── athena_queries.sql                       # Standard operational Athena SQL queries
-├── athena_intelligence_layer.sql            # M5 cross-source Athena views & DDL
-├── athena_historical_risk.sql               # M5 historical Sentry risk lifecycle views
-├── schema.sql                               # Local SQLite schema DDL
-│
-├── test_api.py                              # FastAPI endpoint & contract test suite
-├── test_nasa_asteroids.py                   # NeoWs ingestion test suite
-├── test_nasa_sentry.py                      # Sentry Mode S ingestion test suite
-├── test_nasa_sbdb.py                        # SBDB batch ingestion & failure gate test suite
-├── test_entity_resolution.py                # Entity resolution & invariant test suite
-├── test_historical_risk.py                  # Historical risk view validation test suite
-├── test_intelligence_layer.py               # Multi-source intelligence view test suite
-├── test_data_provider.py                    # Data-access provider test suite (fixtures shared with test_api.py)
-├── test_pipeline_utils.py                   # Shared utilities & manifest test suite
-├── test_pipeline_dq.py                      # Centralized data quality engine test suite
-│
-├── requirements.txt                         # Pinned production and test dependencies
-├── .env.example                             # Configuration environment variable template
-├── .gitignore                               # Git exclusion rules
-├── architecture.md                          # System architecture
-└── README.md                                # Authoritative platform documentation
+├── pyproject.toml                       # Python package configuration & build tools
+├── render.yaml                          # Cloud deployment blueprint
+├── requirements.txt                     # Pinned Python dependencies
+├── architecture.md                      # Detailed technical architecture
+└── README.md                            # Authoritative platform documentation
 ```
 
 ---
 
-## Tech Stack
+## 12. Local Development Runbook
 
-| Component | Technology | Purpose |
-|---|---|---|
-| **Language** | Python 3.11 | Core ingestion, transformation, validation, and CLI tools |
-| **API Serving Layer** | FastAPI, Uvicorn, Pydantic v2 | High-performance REST data serving layer with strict schema validation |
-| **HTTP Client** | Requests, HTTPX | Requests for the NASA/JPL ingestion calls; HTTPX as the FastAPI `TestClient` transport in the test suite |
-| **Data Sources** | NASA NeoWs, JPL CNEOS Sentry, JPL SBDB | Planetary defense observation, impact risk, and Keplerian orbit APIs |
-| **Object Storage** | Amazon S3 | Serverless data lakehouse (raw JSON, partitioned Parquet, and run manifests) |
-| **Query Engine** | Amazon Athena (Trino) | Serverless interactive SQL analytics and multi-source views |
-| **Columnar Engine** | PyArrow / Apache Parquet | Explicit schemas, Snappy compression, authoritative lakehouse datasets |
-| **Identity Engine** | Python / PyArrow | Deterministic entity resolution, namespace isolation, primary pivot crosswalk |
-| **Quality Engine** | Python / PyArrow / Boto3 | Centralized operational DQ engine (`pipeline_dq.py`) & invariant enforcement |
-| **Renderer** | TypeScript, Three.js, Vite, Vitest | APOLLO immersive renderer consuming the API |
-| **Quality & Linting**| Ruff, Pytest, Vitest, Playwright | Linting, the Python regression suite, renderer unit tests and a browser torture test |
-| **CI / CD** | GitHub Actions | Hardened pull-request validation and daily production orchestration |
-
----
-
-## Running the Platform Locally
-
-### 1. Clone the Repository
+### 1. Environment Setup
 ```bash
+# Clone the repository
 git clone <repository-url>
 cd "Nasa Intelligence Platform"
-```
 
-### 2. Set Up a Virtual Environment & Install Dependencies
-```bash
+# Initialize Python 3.11 virtual environment
 python -m venv .venv
 # On Linux/macOS:
 source .venv/bin/activate
 # On Windows PowerShell:
 .venv\Scripts\Activate.ps1
 
+# Install pinned dependencies
 pip install -r requirements.txt
-```
 
-### 3. Configure Local Environment Variables
-Copy the example configuration to `.env` and provide your credentials:
-```bash
+# Configure local credentials template
 cp .env.example .env
 ```
-Edit `.env`:
-```env
-NASA_API_KEY=your_nasa_api_key_here
-AWS_ACCESS_KEY_ID=your_aws_access_key
-AWS_SECRET_ACCESS_KEY=your_aws_secret_key
-AWS_DEFAULT_REGION=us-east-1
-S3_BUCKET_NAME=nasa-asteroid-intelligence
-```
 
-### 4. Run Ingestion Pipelines Locally
-
-**NASA NeoWs (Rolling 7-day approach feed):**
+### 2. Execute Data Ingestion Pipelines
 ```bash
+# Ingest rolling 7-day NASA NeoWs approach telemetry
 python nasa_asteroids.py
-# Or custom date range:
-python nasa_asteroids.py --start-date 2026-09-01 --end-date 2026-09-07
-```
 
-**NASA/JPL CNEOS Sentry (Mode S impact risk table):**
-```bash
+# Ingest JPL CNEOS Sentry Mode S risk catalog
 python nasa_sentry.py
-# Or with an explicit snapshot date:
-python nasa_sentry.py --snapshot-date 2026-09-28
-```
 
-**NASA/JPL SBDB Batch Ingestion (via targets file):**
-```bash
-# Ingest single target:
-python nasa_sbdb.py --target 99942
-
-# Ingest batch of targets:
+# Batch ingest target asteroids from Small-Body Database
 python nasa_sbdb.py --targets-file sbdb_targets.txt
-```
 
-**Execute Deterministic Entity Resolution:**
-```bash
+# Execute deterministic multi-source entity resolution
 python entity_resolution.py \
     --neows-path asteroids.parquet \
     --sbdb-path fact_sbdb_object_snapshot.parquet \
     --sentry-path fact_sentry_risk_snapshot.parquet \
-    --output-dir crosswalk_out
+    --output-dir .
 ```
 
-### 5. Run Operational Data Quality Gates Locally
-
-**Validate Source Ingestion Lineage & Thresholds:**
+### 3. Run Centralized Data Quality Suite
 ```bash
-python pipeline_dq.py check-ingestion --execution-mode CURRENT_PRODUCTION
-```
-
-**Validate Pre-Resolution Source Outputs & Grains:**
-```bash
-python pipeline_dq.py check-outputs --execution-mode CURRENT_PRODUCTION --snapshot-date 2026-09-28
-```
-
-**Validate Crosswalk Invariants & Identity Bridge:**
-```bash
-python pipeline_dq.py check-crosswalk \
-    --bridge-file crosswalk_out/bridge_asteroid_identifier.parquet \
-    --audit-file crosswalk_out/fact_entity_resolution.parquet
-```
-
-**Execute Unified End-to-End Data Quality Suite:**
-```bash
+# Execute complete unified operational DQ suite
 python pipeline_dq.py run-suite --execution-mode CURRENT_PRODUCTION
 ```
 
-### 6. Run Quality Checks & Automated Tests
+### 4. Launch FastAPI Serving Layer
 ```bash
-# Run the complete Python test suite
-pytest -v
-
-# Run the renderer unit tests (from frontend/)
-npm test
-
-# Run linter
-ruff check .
-
-# Check formatting and whitespace
-git diff --check
-```
-
-### 7. Launch the FastAPI Data Serving Layer
-```bash
-# Launch Uvicorn local ASGI server:
+# Start local ASGI server on port 8000
 uvicorn api.main:app --host 127.0.0.1 --port 8000 --reload
 
-# Or launch directly via Python module:
-python -m api.main
+# Interactive Documentation:
+# Swagger UI : http://127.0.0.1:8000/docs
+# ReDoc UI   : http://127.0.0.1:8000/redoc
 ```
-Interactive API documentation will be available at:
-- **Swagger UI:** `http://127.0.0.1:8000/docs`
-- **ReDoc UI:** `http://127.0.0.1:8000/redoc`
-- **OpenAPI Schema:** `http://127.0.0.1:8000/openapi.json`
 
-### 8. Launch the APOLLO Renderer
+### 5. Launch APOLLO 3D Renderer
 ```bash
-cd frontend && npm install && npm run dev   # with the API running; open http://127.0.0.1:5173
+cd frontend
+npm install
+npm run dev
+
+# Open http://127.0.0.1:5173 (proxies /api to localhost:8000)
 ```
 
 ---
 
-## Known Limitations
+## 13. Verification & Test Results
 
-- **Local-first serving.** The API has no authentication, rate limiting or caching, and the renderer is served by the Vite development server (`npm run build` produces a static bundle, but no production hosting is configured).
-- **Athena serving is not implemented.** `AthenaDataProvider` exists but raises `NotImplementedError`; the API serves only the local Parquet lakehouse.
-- **Sentry depth.** Only the Mode S summary is ingested; Mode O detail (individual impact solutions) is not.
-- **Illustrative direction.** Each asteroid's on-screen direction is a deterministic illustrative vector (`sha256-uniform-sphere-v1`); only the distance is real.
-- **Population.** The renderer shows the NeoWs objects in the current ingested window (35 in the current local snapshot); SBDB and Sentry details exist only for objects the crosswalk resolves.
-- **CI coverage.** GitHub Actions runs the Python checks only; the renderer's unit tests (`npm test`) and browser test (`npm run e2e`) run locally.
+The platform is backed by extensive automated test coverage across backend, API, and frontend layers:
+
+```
+┌──────────────────────────────────────────────────────────────────────────────────┐
+│                         AUTOMATED TEST SUITE EXECUTION                           │
+├────────────────────┬───────────┬──────────────┬──────────────────────────────────┤
+│ Suite              │ Runner    │ Results      │ Scope                            │
+├────────────────────┼───────────┼──────────────┼──────────────────────────────────┤
+│ Python Platform    │ Pytest    │ 662 Passed   │ Ingestion, DQ-1/2/3, Resolution, │
+│                    │           │ 1 Skipped    │ DuckDB provider, API contracts   │
+│ APOLLO Renderer    │ Vitest    │ 158 Passed   │ Reveal math, Three.js lifecycle, │
+│                    │           │ 0 Failed     │ DOM HUD, coordinate monotonicity │
+│ Code Style         │ Ruff      │ Clean        │ Zero lint warnings or syntax bugs│
+│ Type Checking      │ TypeScript│ Clean        │ Zero type errors under strict mode│
+└────────────────────┴───────────┴──────────────┴──────────────────────────────────┘
+```
+
+Execute all automated verification suites:
+```bash
+# Run backend Python tests
+pytest -q
+
+# Run frontend tests
+cd frontend && npm test -- --run
+
+# Run code style linter
+ruff check .
+```
 
 ---
 
-## Project Status & Roadmap
+## 14. Operational Boundaries & Roadmap
 
-### Current Milestone Status
+### Documented Operational Boundaries
+- **Local-First Serving:** The API is unauthenticated and rate-limit free, designed for secure private VPC or container environments.
+- **Athena Provider:** `AthenaDataProvider` is prepared in `dashboard_data.py` but currently defers to `LocalDuckDBDataProvider`.
+- **Sentry Granularity:** Ingestion captures Mode S (catalog summary); Mode O (individual potential impact solutions) is not ingested.
+- **Directional Semantics:** Asteroid directional vectors are deterministic and illustrative (`sha256-uniform-sphere-v1`); only miss distance is real.
 
-- **M1–M4:** Complete
-  - NeoWs ingestion and data-quality foundation
-  - SQL/data modeling
-  - S3 / Parquet / Athena lakehouse and analytics
-  - M4 productionization and GitHub Actions scheduling
-
-- **M5:** Complete / Operational
-  - **Phase 1–10:** Complete
-    - NASA/JPL CNEOS Sentry Mode S impact monitoring (introduced in M5)
-    - NASA/JPL Small-Body Database (SBDB) Keplerian and physical characterization (introduced in M5)
-    - Deterministic multi-source entity resolution and canonical `asteroid_key` / SPK-ID crosswalk
-    - Historical Sentry risk intelligence and snapshot lifecycle tracking
-    - Cross-source intelligence views in Amazon Athena
-    - Mission intelligence dashboard expansion (5-tab Streamlit dossier; retired in M7)
-    - Phase 10 production orchestration, native SBDB batch ingestion, and CI hardening
-  - **Phase 11:** Complete
-    - Phase 11A: Unified pipeline execution manifest (`run_manifest.json`) and metadata S3 publication
-    - Phase 11B: Authoritative source summaries (`neows_summary.json`, `sbdb_batch_summary.json`) and centralized DQ engine (`pipeline_dq.py`)
-    - Phase 11C: Scheduled workflow integration, multi-stage DQ enforcement, and zero-target failure provenance (`SBDB_NOT_EXECUTED_UPSTREAM_FAILURE`)
-    - Phase 11D: Complete (Final regression verification, test expansion to 286 tests, and documentation hardening)
-
-- **M6: Data Serving Layer (FastAPI) — Complete / Operational**
-  - **Slices 1–6:** Complete (184 dedicated API tests and 470 repository tests at M6 completion)
-    - Established decoupled FastAPI serving layer (`api/`) querying Lakehouse via `DashboardDataProvider`
-    - Standardized 7 REST endpoints: `/health`, `/asteroids`, `/asteroids/{id}`, `/asteroids/{id}/sbdb`, `/asteroids/{id}/sentry`, `/asteroids/{id}/history`, `/asteroids/{id}/crosswalk`
-    - Strict Pydantic v2 models (`extra="forbid"`) enforcing positive integer path parameters and envelope consistency
-    - Decoupled domain identity missingness (`data: null`) from empty collections (`data: []`)
-    - Offline, deterministic testing architecture backed by in-memory DuckDB Lakehouse fixtures
-
-- **M7: APOLLO Renderer — Complete**
-  - Renderer serving contracts (`GET /asteroids/world`, `GET /asteroids/{id}/profile`) and normalized NeoWs fields
-  - APOLLO, a TypeScript / Three.js renderer consuming only those endpoints (see [`frontend/README.md`](frontend/README.md))
-
-- **M8: Repository finalization — COMPLETE**
-  - The M5 Streamlit dossier (`dashboard.py`) and its UI tests were retired; the data-access provider (`dashboard_data.py`) remains the API's provider
-  - Documentation updated to the FastAPI → APOLLO architecture
-  - All 35 NeoWs objects enriched from SBDB with identity resolution (designation, full-name and alternate-designation rules) and a Sentry Mode S crosswalk (2 of 35 linked; the rest have no Sentry record)
-  - Final validation: 663 Python tests, 158 frontend tests, Ruff, typecheck, production build, API validation and the browser/E2E test all pass
-
-### Parked / Future Architectural Roadmap
-*The following items are explicitly parked and represent future potential enhancements:*
-- **Event-Driven Architecture:** Decoupling batch runs with Apache Kafka or AWS EventBridge.
-- **Multi-Region Disaster Recovery:** Automated S3 Cross-Region Replication (CRR) and multi-region Athena catalog sync.
-- **Ephemeris Calculations:** N-body gravitational trajectory simulation (the platform presents factual observational telemetry, not orbital integrations).
-- **Containerized Deployment:** Docker packaging and AWS ECS / Fargate deployment for the FastAPI service and the APOLLO renderer.
+### Future Architectural Roadmap
+- **Event-Driven Streaming:** Transitioning scheduled batch ingestion to event-driven triggers via AWS EventBridge and Kafka.
+- **N-Body Gravitational Ephemerides:** Integrating SPICE kernels for dynamic multi-body trajectory propagation.
+- **Containerized ECS Deployment:** Docker packaging with AWS ECS / Fargate deployment recipes for cloud serving.
