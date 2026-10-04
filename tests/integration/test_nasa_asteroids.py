@@ -17,7 +17,23 @@ from botocore.exceptions import ClientError
 import database
 import nasa_asteroids
 
-REPO_DIR = os.path.dirname(os.path.abspath(__file__))
+# Project root directory (two levels up from tests/integration)
+REPO_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
+
+# Locate target script - check modern path first, fallback to repo root
+TARGET_SCRIPT = os.path.join(REPO_DIR, "backend", "pipelines", "ingestion", "nasa_asteroids.py")
+if not os.path.exists(TARGET_SCRIPT):
+    TARGET_SCRIPT = os.path.join(REPO_DIR, "nasa_asteroids.py")
+
+# Ensure all subsystem paths are available to child subprocesses
+_SUBPROCESS_PATHS = [
+    REPO_DIR,
+    os.path.join(REPO_DIR, "backend"),
+    os.path.join(REPO_DIR, "backend", "pipelines", "ingestion"),
+    os.path.join(REPO_DIR, "backend", "pipelines", "utils"),
+    os.path.join(REPO_DIR, "backend", "storage"),
+]
+SUBPROCESS_PYTHONPATH = os.pathsep.join(_SUBPROCESS_PATHS)
 
 
 @pytest.fixture(autouse=True)
@@ -601,10 +617,9 @@ def test_main_returns_1_when_end_date_precedes_start_date(monkeypatch):
 
 
 def test_cli_exits_code_1_when_fetch_data_raises_http_error(tmp_path):
-    repo_dir = os.path.dirname(os.path.abspath(__file__))
-    target_script = os.path.join(repo_dir, "nasa_asteroids.py")
+    target_script = TARGET_SCRIPT
     env = os.environ.copy()
-    env["PYTHONPATH"] = repo_dir
+    env["PYTHONPATH"] = SUBPROCESS_PYTHONPATH
     env["NASA_API_KEY"] = "TEST_KEY"
 
     script = (
@@ -626,10 +641,9 @@ def test_cli_exits_code_1_when_fetch_data_raises_http_error(tmp_path):
 
 
 def test_cli_exits_code_1_and_logs_response_body_on_http_error(tmp_path):
-    repo_dir = os.path.dirname(os.path.abspath(__file__))
-    target_script = os.path.join(repo_dir, "nasa_asteroids.py")
+    target_script = TARGET_SCRIPT
     env = os.environ.copy()
-    env["PYTHONPATH"] = repo_dir
+    env["PYTHONPATH"] = SUBPROCESS_PYTHONPATH
     env["NASA_API_KEY"] = "TEST_KEY"
 
     script = (
@@ -658,10 +672,9 @@ def test_cli_exits_code_1_and_logs_response_body_on_http_error(tmp_path):
 
 
 def test_cli_exits_code_1_when_fetch_data_raises_request_exception(tmp_path):
-    repo_dir = os.path.dirname(os.path.abspath(__file__))
-    target_script = os.path.join(repo_dir, "nasa_asteroids.py")
+    target_script = TARGET_SCRIPT
     env = os.environ.copy()
-    env["PYTHONPATH"] = repo_dir
+    env["PYTHONPATH"] = SUBPROCESS_PYTHONPATH
     env["NASA_API_KEY"] = "TEST_KEY"
 
     script = (
@@ -686,10 +699,9 @@ def test_cli_exits_code_1_when_fetch_data_raises_request_exception(tmp_path):
 
 
 def test_cli_exits_code_1_when_unexpected_pipeline_exception_occurs(tmp_path):
-    repo_dir = os.path.dirname(os.path.abspath(__file__))
-    target_script = os.path.join(repo_dir, "nasa_asteroids.py")
+    target_script = TARGET_SCRIPT
     env = os.environ.copy()
-    env["PYTHONPATH"] = repo_dir
+    env["PYTHONPATH"] = SUBPROCESS_PYTHONPATH
     env["DB_PATH"] = str(tmp_path / "subprocess.db")
     env["NASA_API_KEY"] = "TEST_KEY"
 
@@ -804,10 +816,9 @@ def test_upload_processed_to_s3_handles_partial_failure():
 
 
 def test_main_exits_code_1_on_s3_failure(tmp_path):
-    repo_dir = os.path.dirname(os.path.abspath(__file__))
-    target_script = os.path.join(repo_dir, "nasa_asteroids.py")
+    target_script = TARGET_SCRIPT
     env = os.environ.copy()
-    env["PYTHONPATH"] = repo_dir
+    env["PYTHONPATH"] = SUBPROCESS_PYTHONPATH
     env["NASA_API_KEY"] = "TEST_KEY"
 
     script = (
@@ -1444,10 +1455,9 @@ def test_main_logs_api_success_immediately_after_fetch(monkeypatch, caplog):
 
 
 def test_top_level_error_logging_includes_run_id(tmp_path):
-    repo_dir = os.path.dirname(os.path.abspath(__file__))
-    target_script = os.path.join(repo_dir, "nasa_asteroids.py")
+    target_script = TARGET_SCRIPT
     env = os.environ.copy()
-    env["PYTHONPATH"] = repo_dir
+    env["PYTHONPATH"] = SUBPROCESS_PYTHONPATH
     env["DB_PATH"] = str(tmp_path / "subprocess.db")
     env["NASA_API_KEY"] = "TEST_KEY"
 
@@ -1656,7 +1666,9 @@ def test_neows_summary_write_failure_halts_pipeline(tmp_path, monkeypatch, caplo
 # ---------------------------------------------------------------------------
 # Phase 1 Step 7 — optional NeoWs fields: extraction, nulls, storage, offline reprocess
 # ---------------------------------------------------------------------------
-_REAL_RAW = os.path.join(REPO_DIR, "asteroids_raw.json")
+_REAL_RAW = os.path.join(REPO_DIR, "data", "raw", "neows", "asteroids_raw.json")
+if not os.path.exists(_REAL_RAW):
+    _REAL_RAW = os.path.join(REPO_DIR, "asteroids_raw.json")
 _OPTIONAL_FIELDS = (
     "close_approach_datetime", "close_approach_epoch_ms", "relative_velocity_km_s", "absolute_magnitude_h",
     "estimated_diameter_min_km", "estimated_diameter_max_km", "is_sentry_object",
@@ -1834,9 +1846,9 @@ def test_cli_from_raw_runs_without_api_key(tmp_path):
     raw = tmp_path / "asteroids_raw.json"
     raw.write_text(json.dumps({"near_earth_objects": {"2026-09-29": [_neows_object()]}}), encoding="utf-8")
     env = {k: v for k, v in os.environ.items() if k != "NASA_API_KEY"}
-    env["PYTHONPATH"] = REPO_DIR
+    env["PYTHONPATH"] = SUBPROCESS_PYTHONPATH
     result = subprocess.run(
-        [sys.executable, os.path.join(REPO_DIR, "nasa_asteroids.py"), "--from-raw", str(raw)],
+        [sys.executable, TARGET_SCRIPT, "--from-raw", str(raw)],
         cwd=str(tmp_path), env=env, capture_output=True, text=True,
     )
     assert result.returncode == 0, result.stderr
